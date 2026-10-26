@@ -49,6 +49,7 @@ int main(void) {
   printf("s/@EBADF@/%d/\n", EBADF);
   printf("s/@ENOENT@/%d/\n", ENOENT);
   printf("s/@ENOTSOCK@/%d/\n", ENOTSOCK);
+  printf("s/@ENAMETOOLONG@/%d/\n", ENAMETOOLONG);
   return 0;
 }
 C
@@ -145,6 +146,24 @@ a closed end is the end of file ok
 a datagram pair ok
 an unknown type ok
 an unknown type errno=@EINVAL@
+bind a path ok
+its family ok
+its path ok
+listen on a path ok
+connect to the path ok
+accept on a path ok
+the client's peer is the path ok
+the client writes ok
+the server reads it ok
+what the server read ok
+bind a path in use ok
+bind a path in use errno=@EADDRINUSE@
+connect to a path nobody listens on ok
+connect to a path nobody listens on errno=@ENOENT@
+a path longer than sun_path ok
+a path longer than sun_path errno=@ENAMETOOLONG@
+bind a closed fd to a path ok
+bind a closed fd to a path errno=@EBADF@
 W
 
 n=$(wc -l < "$TMP/want" | tr -d ' ')

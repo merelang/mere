@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.676 — 2026-10-26
+
+_C, LLVM and RISC-V: `sock_unix_bind` and `sock_unix_connect` bind and connect a socket to a filesystem path. mere-ruby's UNIXSocket and UNIXServer stop raising NotImplementedError._
+
+`bind(2)` and `connect(2)` take a `struct sockaddr *`, which no extern can
+spell, so v0.1.555 put an address on the runtime's side as the text
+`getaddrinfo(3)` reads. A path is not such a text: `sock_bind` could bind an
+IPv4 or IPv6 socket and nothing could bind or connect an AF_UNIX one.
+`sock_pair` (v0.1.589) gave a connected pair, and a listener at a path stayed
+out of reach -- which is what mere-ruby's UNIXSocket.new, UNIXServer.new and
+Socket.unix are, about thirty of ruby/spec's socket files.
+
+- `sock_unix_bind : int -> str -> int` and `sock_unix_connect : int -> str ->
+  int` build the `struct sockaddr_un` in the runtime. `0`, or `-1` with the
+  errno in `fd_last_errno`. A path that does not fit `sun_path` with its NUL
+  (104 bytes on macOS, 108 on Linux) is `ENAMETOOLONG` before any syscall,
+  rather than a path the kernel would cut short.
+- LLVM gets them through `--ffi-c` like the rest of the runtime.
+- RISC-V: memu's host device answers them as calls 1040 and 1041 (memu
+  `riscv-runc`, both widths).
+
+Checks:
+
+- `scripts/sockaddr_check.sh` (100 rows): bind a path, its family and path
+  as `sock_local_addr` says, listen, connect, accept, bytes across, the
+  client's peer, a path in use (`EADDRINUSE`), a path nobody listens on
+  (`ENOENT`), a path longer than `sun_path` (`ENAMETOOLONG`) and a closed fd
+  (`EBADF`).
+- `test/llvmffi/native_probe.mere`: the same round trip on LLVM agrees with C.
+- `test/rv/host_net.mere`: the same on RV32 and RV64 under memu agrees with C.
+
+---
+
 ## v0.1.675 — 2026-10-24
 
 _C: `map_compact` compacts a small map that is mostly garbage even while a suspended stack points into its arena. mere-ruby's method locals, rewritten in a loop, stop growing until the method returns._

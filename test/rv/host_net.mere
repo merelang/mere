@@ -11,6 +11,8 @@ extern fn tcp_accept: int -> int;
 extern fn tcp_close: int -> unit;
 extern fn sock_local_addr: int -> str;
 extern fn sock_pair: int -> int;
+extern fn sock_unix_bind: int -> str -> int;
+extern fn sock_unix_connect: int -> str -> int;
 extern fn io_poll_new: int -> int;
 extern fn io_poll_add: int -> int -> int -> int;
 extern fn io_poll_wait: int -> int -> int;
@@ -75,6 +77,25 @@ let _ = print_int (if getppid () >= 1 then 1 else 0);
 let _ = print_int (if getpgid 0 > 0 then 1 else 0);
 let _ = print_int (if getsid 0 > 0 then 1 else 0);
 let _ = fd_close s4;
+// v0.1.676: a socket at a path (AF_UNIX is 1 on every platform), its
+// address, and a connection to it
+let up = "/tmp/mere-host-net.sock";
+let _ = file_delete up;
+let us = socket 1 1 0;
+let _ = print_int (sock_unix_bind us up);
+let _ = print (sock_local_addr us);
+let _ = print_int (listen us 5);
+let uc = socket 1 1 0;
+let _ = print_int (sock_unix_connect uc up);
+let ua = tcp_accept us;
+let _ = print_int (fd_write uc buf (mem_copy_str buf 0 "unix"));
+let uk = fd_read ua buf 64;
+let _ = print (mem_to_str buf uk);
+let _ = fd_close ua;
+let _ = fd_close uc;
+let _ = fd_close us;
+let _ = file_delete up;
+let _ = print_int (sock_unix_connect (socket 1 1 0) up);
 let _ = print_int (if proc_rlimit_resource "NOFILE" >= 0 then 1 else 0);
 let _ = print_int (proc_getrlimit "NOFILE");
 print_int (if proc_rlimit_field 0 > 0 then 1 else 0)

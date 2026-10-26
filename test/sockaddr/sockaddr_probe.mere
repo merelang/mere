@@ -16,6 +16,9 @@ extern fn sock_bind: int -> str -> int -> int;
 extern fn sock_local_addr: int -> str;
 extern fn sock_peer_addr: int -> str;
 extern fn sock_pair: int -> int;
+extern fn sock_unix_bind: int -> str -> int;
+extern fn sock_unix_connect: int -> str -> int;
+extern fn getpid: unit -> int;
 extern fn fd_last_errno: unit -> int;
 extern fn tcp_connect: str -> int -> int;
 extern fn tcp_accept: int -> int;
@@ -246,6 +249,38 @@ let main = fn () ->
   let _ = fd_close (dp % 1048576) in
   let _ = say "an unknown type" (sock_pair 7) (0 - 1) in
   let _ = say_e "an unknown type" in
+  // --- a socket at a PATH (v0.1.676): sockaddr_un through the runtime. The
+  // path is short on purpose: sun_path holds 104 bytes on macOS.
+  let up = "/tmp/mere-sa-" ++ str_of_int (getpid ()) ++ ".sock" in
+  let _ = file_delete up in
+  let us = socket 1 1 0 in
+  let _ = say "bind a path" (sock_unix_bind us up) 0 in
+  let _ = say_s "its family" (fam (sock_local_addr us)) "unix" in
+  let _ = say_s "its path" (host (sock_local_addr us)) up in
+  let _ = say "listen on a path" (listen us 5) 0 in
+  let uc = socket 1 1 0 in
+  let _ = say "connect to the path" (sock_unix_connect uc up) 0 in
+  let ua = tcp_accept us in
+  let _ = say "accept on a path" (b (ua >= 0)) 1 in
+  let _ = say_s "the client's peer is the path" (host (sock_peer_addr uc)) up in
+  let n3 = mem_copy_str buf 0 "uv" in
+  let _ = say "the client writes" (fd_write uc buf n3) 2 in
+  let _ = say "the server reads it" (fd_read ua buf 16) 2 in
+  let _ = say_s "what the server read" (mem_to_str buf 2) "uv" in
+  let _ = fd_close ua in
+  let _ = fd_close uc in
+  let ub = socket 1 1 0 in
+  let _ = say "bind a path in use" (sock_unix_bind ub up) (0 - 1) in
+  let _ = say_e "bind a path in use" in
+  let _ = fd_close us in
+  let _ = file_delete up in
+  let _ = say "connect to a path nobody listens on" (sock_unix_connect ub up) (0 - 1) in
+  let _ = say_e "connect to a path nobody listens on" in
+  let _ = say "a path longer than sun_path" (sock_unix_bind ub ("/tmp/" ++ str_repeat "x" 200)) (0 - 1) in
+  let _ = say_e "a path longer than sun_path" in
+  let _ = fd_close ub in
+  let _ = say "bind a closed fd to a path" (sock_unix_bind ub up) (0 - 1) in
+  let _ = say_e "bind a closed fd to a path" in
   let _ = tcp_close s4 in
   0;
 exit (main ())

@@ -7154,6 +7154,8 @@ let native_ffi_names =
        these and the fd_* family keep, per thread. *)
     "tcp_listen_at"; "sock_bind"; "sock_local_addr"; "sock_peer_addr"; "sock_pair";
     "fd_last_errno";
+    (* v0.1.676: bind(2) / connect(2) to a path (struct sockaddr_un) *)
+    "sock_unix_bind"; "sock_unix_connect";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
        setrlimit move the limits through a `struct rlimit *`; getpriority and
@@ -7913,6 +7915,39 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  int err = errno;";
       "  freeaddrinfo(res);";
       "  __fd_errno = r == 0 ? 0 : err;";
+      "  return r == 0 ? 0 : -1;";
+      "}";
+      "";
+      (* v0.1.676: a socket's address as a PATH, which neither sock_bind's
+         getaddrinfo nor an extern can spell -- mere-ruby's UNIXSocket and
+         UNIXServer, and Socket#bind / #connect with an AF_UNIX Addrinfo. *)
+      "/* sock_unix_bind / sock_unix_connect: bind(2) / connect(2) an existing";
+      "   socket to a filesystem path through a struct sockaddr_un. A path that";
+      "   does not fit sun_path (104 bytes on macOS, 108 on Linux, its NUL";
+      "   included) is ENAMETOOLONG before any syscall. 0, or -1 with errno kept. */";
+      "static int __sock_unix_addr(const char* path, struct sockaddr_un* sa, socklen_t* len) {";
+      "  memset(sa, 0, sizeof *sa);";
+      "  sa->sun_family = AF_UNIX;";
+      "  size_t n = path == NULL ? 0 : strlen(path);";
+      "  if (n >= sizeof sa->sun_path) { __fd_errno = ENAMETOOLONG; return -1; }";
+      "  memcpy(sa->sun_path, path, n);";
+      "  *len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);";
+      "  return 0;";
+      "}";
+      "static long long sock_unix_bind(long long fd, const char* path) {";
+      "  if (fd < 0) { __fd_errno = EBADF; return -1; }";
+      "  struct sockaddr_un sa; socklen_t sl;";
+      "  if (__sock_unix_addr(path, &sa, &sl) != 0) return -1;";
+      "  int r = bind((int)fd, (struct sockaddr*)&sa, sl);";
+      "  __fd_errno = r == 0 ? 0 : errno;";
+      "  return r == 0 ? 0 : -1;";
+      "}";
+      "static long long sock_unix_connect(long long fd, const char* path) {";
+      "  if (fd < 0) { __fd_errno = EBADF; return -1; }";
+      "  struct sockaddr_un sa; socklen_t sl;";
+      "  if (__sock_unix_addr(path, &sa, &sl) != 0) return -1;";
+      "  int r = connect((int)fd, (struct sockaddr*)&sa, sl);";
+      "  __fd_errno = r == 0 ? 0 : errno;";
       "  return r == 0 ? 0 : -1;";
       "}";
       "";

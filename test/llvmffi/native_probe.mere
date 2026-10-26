@@ -33,6 +33,12 @@ extern fn io_poll_wait: int -> int -> int;
 extern fn io_poll_get: int -> int -> int;
 extern fn fd_open: str -> str -> int -> int;
 extern fn fd_last_errno: unit -> int;
+extern fn sock_unix_bind: int -> str -> int;
+extern fn sock_unix_connect: int -> str -> int;
+extern fn socket: int -> int -> int -> int;
+extern fn listen: int -> int -> int;
+extern fn tcp_accept: int -> int;
+extern fn getpid: unit -> int;
 
 let say = fn (what: str) -> fn (v: str) -> print (what ++ " " ++ v);
 
@@ -66,6 +72,24 @@ let _ = tcp_close a;
 let _ = say "read after close" (str_of_int (tcp_read c (p + 32) 16));
 let _ = tcp_close c;
 let _ = say "read closed fd" (if tcp_read c (p + 32) 16 < 0 then "negative" else "not negative");
+
+// a socket at a path (v0.1.676)
+let up = "/tmp/mere-ffi-" ++ str_of_int (getpid ()) ++ ".sock";
+let _ = file_delete up;
+let us = socket 1 1 0;
+let _ = say "unix bind" (str_of_int (sock_unix_bind us up));
+let _ = say "unix listen" (str_of_int (listen us 5));
+let uc = socket 1 1 0;
+let _ = say "unix connect" (str_of_int (sock_unix_connect uc up));
+let ua = tcp_accept us;
+let _ = say "unix write" (str_of_int (tcp_write uc p (mem_copy_str p 0 "uv")));
+let _ = say "unix read" (str_of_int (tcp_read ua (p + 32) 16) ++ " " ++ mem_to_str (p + 32) 2);
+let _ = tcp_close ua;
+let _ = tcp_close uc;
+let _ = tcp_close us;
+let _ = file_delete up;
+let _ = say "unix connect to nothing" (str_of_int (sock_unix_connect (socket 1 1 0) up));
+let _ = say "unix path too long" (str_of_int (sock_unix_bind (socket 1 1 0) (str_repeat "x" 300)));
 
 // a refusal comes back as a negative int, and its errno is kept
 let bad = fd_open "/nonexistent/mere/llvm/ffi" "r" 0;

@@ -570,6 +570,8 @@ let libm_sigs : (string * string) list =
       ("tcp_connect", "si>i"); ("tcp_close", "i>u"); ("tcp_set_timeout", "ii>i");
       ("sock_bind", "isi>i"); ("sock_local_addr", "i>s"); ("sock_peer_addr", "i>s");
       ("sock_pair", "i>i"); ("udp_open", "si>i"); ("udp_send", "iii>i"); ("udp_recv", "iii>i");
+      (* v0.1.676: bind(2) / connect(2) to a path *)
+      ("sock_unix_bind", "is>i"); ("sock_unix_connect", "is>i");
       ("io_poll_new", "i>i"); ("io_poll_add", "iii>i"); ("io_poll_del", "ii>i");
       ("io_poll_wait", "ii>i"); ("io_poll_get", "ii>i");
       ("proc_getrlimit", "s>i"); ("proc_setrlimit", "sii>i"); ("proc_rlimit_field", "i>i");
