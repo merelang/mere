@@ -16,6 +16,8 @@ extern fn sock_unix_connect: int -> str -> int;
 extern fn sys_openlog: str -> int -> int -> int;
 extern fn sys_setlogmask: int -> int;
 extern fn sys_closelog: unit -> int;
+extern fn sock_getopt: int -> int -> int -> str;
+extern fn sock_setopt: int -> int -> int -> str -> int;
 extern fn io_poll_new: int -> int;
 extern fn io_poll_add: int -> int -> int -> int;
 extern fn io_poll_wait: int -> int -> int;
@@ -99,6 +101,17 @@ let _ = fd_close uc;
 let _ = fd_close us;
 let _ = file_delete up;
 let _ = print_int (sock_unix_connect (socket 1 1 0) up);
+// v0.1.678: socket options -- the numbers are the platform's (sys_os is
+// "linux" in the guest, and memu asks the host by its own)
+let dw = str_eq (sys_os ()) "darwin";
+let os4 = socket 2 1 0;
+let _ = print_int (sock_setopt os4 (if dw then 65535 else 1) (if dw then 128 else 13) "0100000007000000");
+let _ = print (sock_getopt os4 (if dw then 65535 else 1) (if dw then 128 else 13));
+let _ = print (sock_getopt os4 (if dw then 65535 else 1) (if dw then 4104 else 3));
+let _ = print_int (sock_setopt os4 6 1 "01000000");
+let _ = print_int (if str_eq (sock_getopt os4 6 1) "00000000" then 0 else 1);
+let _ = print_int (sock_setopt os4 6 1 "0");
+let _ = fd_close os4;
 // v0.1.677: the system log's mask, through the host
 let _ = print_int (sys_openlog "merehostnet" 0 8);
 let _ = print_int (sys_setlogmask 0);

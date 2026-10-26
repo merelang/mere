@@ -613,6 +613,24 @@ let __libm_sys_openlog = fn (i: str) -> fn (o: int) -> fn (f: int) -> __rv_hc_fd
 let __libm_sys_syslog = fn (p: int) -> fn (m: str) -> __rv_hc_fd 1043 p (__rv_cstr m) 0;
 let __libm_sys_closelog = fn (u: unit) -> __rv_hc_fd 1044 0 0 0;
 let __libm_sys_setlogmask = fn (m: int) -> __rv_hc_fd 1045 m 0 0;
+// v0.1.678: socket options. memu's host calls take three words, so the fd,
+// the option and the level travel in one: fd + name * 2^16 + level * 2^24
+// (a guest speaks Linux's numbers, where both are small; a level of 128 or
+// more, or a name of 256 or more, is EINVAL before the host is asked). The
+// bytes are hex, as on C.
+let __rv_sockopt_key = fn (fd: int) -> fn (lv: int) -> fn (nm: int) ->
+  if fd < 0 || fd >= 65536 || lv < 0 || lv >= 128 || nm < 0 || nm >= 256 then 0 - 1
+  else fd + nm * 65536 + lv * 16777216;
+let __libm_sock_getopt = fn (fd: int) -> fn (lv: int) -> fn (nm: int) ->
+  let k = __rv_sockopt_key fd lv nm in
+  if k < 0 then (let _ = __rv_rtw_set 80 22 in "")
+  else (let r = __rv_hc_str 1046 k "" in
+        let _ = __rv_rtw_set 80 (__rv_syscall 1098 0 0 0 0) in
+        r);
+let __libm_sock_setopt = fn (fd: int) -> fn (lv: int) -> fn (nm: int) -> fn (hex: str) ->
+  let k = __rv_sockopt_key fd lv nm in
+  if k < 0 then (let _ = __rv_rtw_set 80 22 in 0 - 1)
+  else __rv_hc_fd 1047 k (__rv_cstr hex) 0;
 let __libm_udp_open = fn (h: str) -> fn (port: int) -> __rv_hc_fd 1010 (__rv_cstr h) port 0;
 let __libm_udp_send = fn (fd: int) -> fn (p: int) -> fn (len: int) -> __rv_hc_fd 1011 fd (__rv_mem_at p) len;
 let __libm_udp_recv = fn (fd: int) -> fn (p: int) -> fn (cap: int) -> __rv_hc_fd 1012 fd (__rv_mem_at p) cap;

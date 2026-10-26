@@ -19,6 +19,8 @@ extern fn sock_pair: int -> int;
 extern fn sock_unix_bind: int -> str -> int;
 extern fn sock_unix_connect: int -> str -> int;
 extern fn getpid: unit -> int;
+extern fn sock_getopt: int -> int -> int -> str;
+extern fn sock_setopt: int -> int -> int -> str -> int;
 extern fn fd_last_errno: unit -> int;
 extern fn tcp_connect: str -> int -> int;
 extern fn tcp_accept: int -> int;
@@ -281,6 +283,32 @@ let main = fn () ->
   let _ = fd_close ub in
   let _ = say "bind a closed fd to a path" (sock_unix_bind ub up) (0 - 1) in
   let _ = say_e "bind a closed fd to a path" in
+  // --- socket options (v0.1.678): the platform's numbers, asked of sys_os;
+  // the bytes as hex, an int little-endian on both hosts
+  let dw = str_eq (sys_os ()) "darwin" in
+  let sol = if dw then 65535 else 1 in
+  let so_reuseaddr = if dw then 4 else 2 in
+  let so_type = if dw then 4104 else 3 in
+  let so_linger = if dw then 128 else 13 in
+  let os = socket 2 1 0 in
+  let _ = say_s "an option off" (sock_getopt os sol so_reuseaddr) "00000000" in
+  let _ = say "set an option" (sock_setopt os sol so_reuseaddr "01000000") 0 in
+  // (a flag reads back as nonzero: 1 on Linux, the option's own bit on macOS)
+  let _ = say "read it back" (b (str_len (sock_getopt os sol so_reuseaddr) == 8 && str_eq (sock_getopt os sol so_reuseaddr) "00000000" == false)) 1 in
+  let _ = say_s "the socket's type" (sock_getopt os sol so_type) "01000000" in
+  let _ = say "set a linger" (sock_setopt os sol so_linger "0100000005000000") 0 in
+  let _ = say_s "read the linger back" (sock_getopt os sol so_linger) "0100000005000000" in
+  let _ = say "TCP_NODELAY" (sock_setopt os 6 1 "01000000") 0 in
+  let _ = say "TCP_NODELAY is on" (b (str_eq (sock_getopt os 6 1) "00000000" == false)) 1 in
+  let _ = say "hex that is not whole bytes" (sock_setopt os sol so_reuseaddr "010") (0 - 1) in
+  let _ = say_e "hex that is not whole bytes" in
+  let _ = say "hex that is not hex" (sock_setopt os sol so_reuseaddr "zz000000") (0 - 1) in
+  let _ = say_e "hex that is not hex" in
+  let _ = say_s "an option that is not there" (sock_getopt os sol 9999) "" in
+  let _ = say_e "an option that is not there" in
+  let _ = fd_close os in
+  let _ = say_s "an option of a closed fd" (sock_getopt os sol so_type) "" in
+  let _ = say_e "an option of a closed fd" in
   let _ = tcp_close s4 in
   0;
 exit (main ())

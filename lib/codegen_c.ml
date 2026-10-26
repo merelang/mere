@@ -7161,6 +7161,9 @@ let native_ffi_names =
        extern; these call them as ruby's syslog.c does ("%s" and the message)
        and keep the ident's copy alive while the log is open. *)
     "sys_openlog"; "sys_syslog"; "sys_closelog"; "sys_setlogmask";
+    (* v0.1.678: getsockopt(2) / setsockopt(2), which take a pointer and a
+       length; the option's bytes cross as hex (an int option is 01000000) *)
+    "sock_getopt"; "sock_setopt";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
        setrlimit move the limits through a `struct rlimit *`; getpriority and
@@ -7983,6 +7986,44 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  return 0;";
       "}";
       "static long long sys_setlogmask(long long mask) { return (long long)setlogmask((int)mask); }";
+      "";
+      (* v0.1.678 *)
+      "/* sock_getopt / sock_setopt: getsockopt(2) / setsockopt(2) with the";
+      "   level and option numbers as given (the caller holds the platform's";
+      "   SOL_* / SO_* table). The option's bytes cross as lowercase hex, two";
+      "   characters a byte, because an int option has zero bytes in it. Up to";
+      "   256 bytes. sock_getopt answers the hex, or \"\" with errno kept;";
+      "   sock_setopt answers 0, or -1 with errno kept (EINVAL for hex that is";
+      "   not whole bytes). */";
+      "static char* __sock_none(int e);";
+      "static char* sock_getopt(long long fd, long long level, long long name) {";
+      "  unsigned char buf[256]; socklen_t len = sizeof buf;";
+      "  memset(buf, 0, sizeof buf);";
+      "  if (fd < 0) return __sock_none(EBADF);";
+      "  if (getsockopt((int)fd, (int)level, (int)name, buf, &len) != 0) return __sock_none(errno);";
+      "  if (len > sizeof buf) len = sizeof buf;";
+      "  static const char hx[] = \"0123456789abcdef\";";
+      "  char* r = __lang_str_alloc(__lang_current_region, (size_t)len * 2);";
+      "  for (socklen_t i = 0; i < len; i++) { r[2*i] = hx[buf[i] >> 4]; r[2*i+1] = hx[buf[i] & 15]; }";
+      "  r[(size_t)len * 2] = 0;";
+      "  __fd_errno = 0;";
+      "  return r;";
+      "}";
+      "static int __sock_hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }";
+      "static long long sock_setopt(long long fd, long long level, long long name, const char* hex) {";
+      "  unsigned char buf[256];";
+      "  size_t n = hex == NULL ? 0 : strlen(hex);";
+      "  if (n % 2 != 0 || n / 2 > sizeof buf) { __fd_errno = EINVAL; return -1; }";
+      "  for (size_t i = 0; i < n / 2; i++) {";
+      "    int h = __sock_hexval(hex[2*i]), l = __sock_hexval(hex[2*i+1]);";
+      "    if (h < 0 || l < 0) { __fd_errno = EINVAL; return -1; }";
+      "    buf[i] = (unsigned char)(h * 16 + l);";
+      "  }";
+      "  if (fd < 0) { __fd_errno = EBADF; return -1; }";
+      "  int r = setsockopt((int)fd, (int)level, (int)name, buf, (socklen_t)(n / 2));";
+      "  __fd_errno = r == 0 ? 0 : errno;";
+      "  return r == 0 ? 0 : -1;";
+      "}";
       "";
       "/* \"<family> <port> <address>\": inet / inet6 with getnameinfo's numeric";
       "   host (a scoped IPv6 address keeps its %zone, a v4-mapped one its";

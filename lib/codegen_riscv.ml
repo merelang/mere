@@ -574,6 +574,8 @@ let libm_sigs : (string * string) list =
       ("sock_unix_bind", "is>i"); ("sock_unix_connect", "is>i");
       (* v0.1.677: the system log *)
       ("sys_openlog", "sii>i"); ("sys_syslog", "is>i"); ("sys_closelog", "u>i"); ("sys_setlogmask", "i>i");
+      (* v0.1.678: socket options, their bytes as hex *)
+      ("sock_getopt", "iii>s"); ("sock_setopt", "iiis>i");
       ("io_poll_new", "i>i"); ("io_poll_add", "iii>i"); ("io_poll_del", "ii>i");
       ("io_poll_wait", "ii>i"); ("io_poll_get", "ii>i");
       ("proc_getrlimit", "s>i"); ("proc_setrlimit", "sii>i"); ("proc_rlimit_field", "i>i");

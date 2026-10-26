@@ -38,6 +38,8 @@ extern fn sock_unix_connect: int -> str -> int;
 extern fn sys_openlog: str -> int -> int -> int;
 extern fn sys_setlogmask: int -> int;
 extern fn sys_closelog: unit -> int;
+extern fn sock_getopt: int -> int -> int -> str;
+extern fn sock_setopt: int -> int -> int -> str -> int;
 extern fn socket: int -> int -> int -> int;
 extern fn listen: int -> int -> int;
 extern fn tcp_accept: int -> int;
@@ -101,6 +103,14 @@ let _ = say "logmask set" (str_of_int (sys_setlogmask 31) ++ " " ++ str_of_int (
 let _ = sys_setlogmask 255;
 let _ = say "closelog" (str_of_int (sys_closelog ()));
 
+// socket options (v0.1.678), the host's numbers
+let dw = str_eq (sys_os ()) "darwin";
+let os4 = socket 2 1 0;
+let _ = say "setopt" (str_of_int (sock_setopt os4 (if dw then 65535 else 1) (if dw then 128 else 13) "0100000007000000"));
+let _ = say "getopt" (sock_getopt os4 (if dw then 65535 else 1) (if dw then 128 else 13));
+let _ = say "getopt type" (sock_getopt os4 (if dw then 65535 else 1) (if dw then 4104 else 3));
+let _ = say "setopt odd hex" (str_of_int (sock_setopt os4 6 1 "0"));
+let _ = tcp_close os4;
 // a refusal comes back as a negative int, and its errno is kept
 let bad = fd_open "/nonexistent/mere/llvm/ffi" "r" 0;
 let _ = say "fd_open missing" (str_of_int bad);

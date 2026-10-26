@@ -261,6 +261,8 @@ and comes out as the text `getnameinfo(3)` writes, and the family comes out as a
 | `sys_syslog` | `int -> str -> int` | `priority message`: `syslog(3)` with `"%s"` and the message — never the message as the format. `0` |
 | `sys_closelog` | `unit -> int` | `closelog(3)`, and the ident's copy is freed. `0` |
 | `sys_setlogmask` | `int -> int` | `setlogmask(3)`: the mask that was in force; `0` asks without changing it |
+| `sock_getopt` | `int -> int -> int -> str` | `fd level name`: `getsockopt(2)` (v0.1.678). The numbers are the platform's (`SOL_SOCKET` is `0xffff` on macOS and `1` on Linux; ask `sys_os`). The option's bytes as lowercase hex, up to 256 bytes — an int is `01000000` on both hosts, and a flag reads back as nonzero (`1` on Linux, the option's own bit on macOS). `""` with errno kept |
+| `sock_setopt` | `int -> int -> int -> str -> int` | `fd level name hex`: `setsockopt(2)` with those bytes. `0`, or `-1` with errno kept (`EINVAL` for hex that is not whole bytes). RISC-V: memu translates the guest's Linux numbers to a macOS host's |
 | `sock_local_addr` | `int -> str` | `getsockname(2)` as `"<family> <port> <address>"` — `"inet 5000 127.0.0.1"`, `"inet6 5000 ::1"`, `"unix 0 <path>"` (the path last: it may hold spaces), `"other 0 "`. `""` on failure |
 | `sock_peer_addr` | `int -> str` | `getpeername(2)`, the same text; `""` with `ENOTCONN` for a socket with no peer |
 | `fd_last_errno` | `unit -> int` | The errno the last of these **and of the `fd_*` family** left, `0` when it succeeded. Per thread |

@@ -4,6 +4,45 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.678 — 2026-10-27
+
+_C, LLVM and RISC-V: `sock_getopt` and `sock_setopt` read and set a socket option. mere-ruby's getsockopt stops being a NoMethodError, and its setsockopt stops discarding the value._
+
+`getsockopt(2)` and `setsockopt(2)` take a pointer and a length, which no
+extern can spell. The two calls take the level and the option by number and
+move the option's bytes as hex. A number is not portable here (`SOL_SOCKET`
+is `0xffff` on macOS and `1` on Linux, `SO_REUSEADDR` 4 and 2), but the
+caller already holds the platform's table and `sys_os` says whose it is. The
+bytes are hex because an int option has zero bytes in it, where
+`mem_to_str` stops.
+
+- `sock_getopt : int -> int -> int -> str`: the option's bytes, up to 256,
+  or `""` with the errno in `fd_last_errno`.
+- `sock_setopt : int -> int -> int -> str -> int`: `0`, or `-1`. `EINVAL`
+  for hex that is not whole bytes, before any call.
+- macOS reads a flag back as the option's own bit (4 for `SO_REUSEADDR`),
+  Linux as 1. Both are nonzero, and that is all the checks compare.
+- RISC-V:
+  - memu's host calls take three words, so the fd, the option and the level
+    travel in one (calls 1046 and 1047).
+  - A guest speaks Linux's numbers; on a macOS host memu translates
+    `SOL_SOCKET` and the `SO_*`, `IP_*`, `TCP_*` and `IPV6_*` it knows.
+
+Checks:
+
+- `scripts/sockaddr_check.sh` (116 rows), on macOS and on Linux:
+  - an option off, set and read back;
+  - the socket's type;
+  - a linger of 8 bytes;
+  - `TCP_NODELAY`;
+  - hex that is not whole bytes or not hex (`EINVAL`);
+  - an option the kernel does not have (`ENOPROTOOPT`);
+  - a closed fd (`EBADF`).
+- `test/llvmffi/native_probe.mere` and `test/rv/host_net.mere` agree with C,
+  the latter through memu's translation.
+
+---
+
 ## v0.1.677 — 2026-10-27
 
 _C, LLVM and RISC-V: `sys_openlog`, `sys_syslog`, `sys_closelog` and `sys_setlogmask` reach the system log. mere-ruby's Syslog stops being a C extension it cannot load._

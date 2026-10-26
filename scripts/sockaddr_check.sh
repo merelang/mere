@@ -50,6 +50,7 @@ int main(void) {
   printf("s/@ENOENT@/%d/\n", ENOENT);
   printf("s/@ENOTSOCK@/%d/\n", ENOTSOCK);
   printf("s/@ENAMETOOLONG@/%d/\n", ENAMETOOLONG);
+  printf("s/@ENOPROTOOPT@/%d/\n", ENOPROTOOPT);
   return 0;
 }
 C
@@ -164,6 +165,22 @@ a path longer than sun_path ok
 a path longer than sun_path errno=@ENAMETOOLONG@
 bind a closed fd to a path ok
 bind a closed fd to a path errno=@EBADF@
+an option off ok
+set an option ok
+read it back ok
+the socket's type ok
+set a linger ok
+read the linger back ok
+TCP_NODELAY ok
+TCP_NODELAY is on ok
+hex that is not whole bytes ok
+hex that is not whole bytes errno=@EINVAL@
+hex that is not hex ok
+hex that is not hex errno=@EINVAL@
+an option that is not there ok
+an option that is not there errno=@ENOPROTOOPT@
+an option of a closed fd ok
+an option of a closed fd errno=@EBADF@
 W
 
 n=$(wc -l < "$TMP/want" | tr -d ' ')
