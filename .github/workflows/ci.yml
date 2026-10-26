@@ -913,6 +913,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: sh scripts/sockaddr_check.sh
 
+      # v0.1.677: the system log. syslog(3) takes varargs and openlog(3) keeps
+      # the ident pointer, so the runtime makes both calls; the message goes
+      # out with LOG_PERROR too and is read back from stderr (the log itself
+      # is the host's), and the masks are what setlogmask answers.
+      - name: syslog_check (sys_openlog, sys_syslog, sys_closelog, sys_setlogmask)
+        if: ${{ !cancelled() }}
+        run: sh scripts/syslog_check.sh
+
       # Float results must not depend on the C optimizer (v0.1.315): the
       # same dot product at -O0 and -O2 must produce the same bits, and both
       # must match the interpreter. Without the emitted FP_CONTRACT OFF

@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.677 — 2026-10-27
+
+_C, LLVM and RISC-V: `sys_openlog`, `sys_syslog`, `sys_closelog` and `sys_setlogmask` reach the system log. mere-ruby's Syslog stops being a C extension it cannot load._
+
+Two of the four calls are beyond what an extern can do. `syslog(3)` takes a format and
+varargs, and `openlog(3)` keeps the ident pointer it is given, which in a
+program whose strings live in regions would dangle. So the runtime makes
+both calls:
+
+- `sys_syslog` passes `"%s"` and the message, as ruby's syslog.c does. A
+  message is never a format, and `%n` in it is text.
+- `sys_openlog` keeps its own copy of the ident until the next `openlog` or
+  `closelog`.
+- `sys_setlogmask` returns the mask that was in force, and `0` asks without
+  changing it.
+- LLVM gets them through `--ffi-c`. RISC-V gets them through memu's host device as calls 1042 to
+  1045. The `LOG_*` numbers are the same on macOS and glibc, so the guest's
+  numbers need no mapping.
+
+Checks:
+
+- `scripts/syslog_check.sh` (new, in CI):
+  - The log itself is the host's (the unified log on macOS, `/dev/log` on Linux) and is
+    read back differently on each. So the probe also asks for `LOG_PERROR`
+    and the script reads stderr.
+  - It checks the message under its ident with `100% %s %n` as written, that a masked
+    priority sends nothing, a second ident after `closelog`, and the masks.
+  - Same result on macOS and on Linux (glibc, the CI image).
+- `test/llvmffi/native_probe.mere` and `test/rv/host_net.mere`: the masks
+  through LLVM and through memu agree with C.
+
+---
+
 ## v0.1.676 — 2026-10-26
 
 _C, LLVM and RISC-V: `sock_unix_bind` and `sock_unix_connect` bind and connect a socket to a filesystem path. mere-ruby's UNIXSocket and UNIXServer stop raising NotImplementedError._

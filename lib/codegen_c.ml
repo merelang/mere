@@ -7156,6 +7156,11 @@ let native_ffi_names =
     "fd_last_errno";
     (* v0.1.676: bind(2) / connect(2) to a path (struct sockaddr_un) *)
     "sock_unix_bind"; "sock_unix_connect";
+    (* v0.1.677: the system log. syslog(3) takes a format and varargs, and
+       openlog(3) keeps the ident pointer it was given, so neither can be an
+       extern; these call them as ruby's syslog.c does ("%s" and the message)
+       and keep the ident's copy alive while the log is open. *)
+    "sys_openlog"; "sys_syslog"; "sys_closelog"; "sys_setlogmask";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
        setrlimit move the limits through a `struct rlimit *`; getpriority and
@@ -7950,6 +7955,34 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  __fd_errno = r == 0 ? 0 : errno;";
       "  return r == 0 ? 0 : -1;";
       "}";
+      "";
+      (* v0.1.677 *)
+      "/* sys_openlog / sys_syslog / sys_closelog / sys_setlogmask: the system";
+      "   log. openlog(3) keeps the ident POINTER, so the runtime owns a copy";
+      "   until the next openlog or closelog. syslog(3) is called with \"%s\" and";
+      "   the message, never with the message as its format. setlogmask answers";
+      "   the mask that was in force (0 asks without changing it). */";
+      "#include <syslog.h>";
+      "static char* __sys_log_ident = NULL;";
+      "static long long sys_openlog(const char* ident, long long opt, long long fac) {";
+      "  char* copy = strdup(ident == NULL ? \"\" : ident);";
+      "  if (copy == NULL) return -1;";
+      "  openlog(copy, (int)opt, (int)fac);";
+      "  free(__sys_log_ident);";
+      "  __sys_log_ident = copy;";
+      "  return 0;";
+      "}";
+      "static long long sys_syslog(long long pri, const char* msg) {";
+      "  syslog((int)pri, \"%s\", msg == NULL ? \"\" : msg);";
+      "  return 0;";
+      "}";
+      "static long long sys_closelog(void) {";
+      "  closelog();";
+      "  free(__sys_log_ident);";
+      "  __sys_log_ident = NULL;";
+      "  return 0;";
+      "}";
+      "static long long sys_setlogmask(long long mask) { return (long long)setlogmask((int)mask); }";
       "";
       "/* \"<family> <port> <address>\": inet / inet6 with getnameinfo's numeric";
       "   host (a scoped IPv6 address keeps its %zone, a v4-mapped one its";

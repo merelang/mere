@@ -257,6 +257,10 @@ and comes out as the text `getnameinfo(3)` writes, and the family comes out as a
 | `sock_pair` | `int -> int` | `type` (1 stream, 2 datagram, 5 seqpacket): an AF_UNIX `socketpair(2)` (v0.1.589). Both descriptors in one int, `first * 2^20 + second`; `-1` with errno kept |
 | `sock_unix_bind` | `int -> str -> int` | `fd path`: `bind(2)` an existing socket to a filesystem path through a `struct sockaddr_un` (v0.1.676). A path that does not fit `sun_path` with its NUL (104 bytes on macOS, 108 on Linux) is `-1` with `ENAMETOOLONG` before any call. `0`, or `-1` with errno kept. C and LLVM; RISC-V through memu's host device |
 | `sock_unix_connect` | `int -> str -> int` | `fd path`: `connect(2)` the same way. `0`, or `-1` with errno kept (`ENOENT` for a path that is not there, `ECONNREFUSED` for one nobody listens on) |
+| `sys_openlog` | `str -> int -> int -> int` | `ident options facility`: `openlog(3)` (v0.1.677). The runtime keeps a copy of the ident while the log is open (openlog keeps the pointer). `0` |
+| `sys_syslog` | `int -> str -> int` | `priority message`: `syslog(3)` with `"%s"` and the message — never the message as the format. `0` |
+| `sys_closelog` | `unit -> int` | `closelog(3)`, and the ident's copy is freed. `0` |
+| `sys_setlogmask` | `int -> int` | `setlogmask(3)`: the mask that was in force; `0` asks without changing it |
 | `sock_local_addr` | `int -> str` | `getsockname(2)` as `"<family> <port> <address>"` — `"inet 5000 127.0.0.1"`, `"inet6 5000 ::1"`, `"unix 0 <path>"` (the path last: it may hold spaces), `"other 0 "`. `""` on failure |
 | `sock_peer_addr` | `int -> str` | `getpeername(2)`, the same text; `""` with `ENOTCONN` for a socket with no peer |
 | `fd_last_errno` | `unit -> int` | The errno the last of these **and of the `fd_*` family** left, `0` when it succeeded. Per thread |

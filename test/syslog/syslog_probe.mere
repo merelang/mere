@@ -1,0 +1,33 @@
+// v0.1.677: the system log -- openlog(3), syslog(3), closelog(3) and
+// setlogmask(3) through the runtime (syslog takes varargs and openlog keeps
+// the ident pointer, so neither can be an extern). The log itself is the
+// host's and cannot be read back portably, so the message goes out with
+// LOG_PERROR as well and scripts/syslog_check.sh reads it from stderr; the
+// masks are what setlogmask answers. LOG_* numbers are the same on macOS and
+// Linux: LOG_PERROR 0x20, LOG_USER 8, LOG_ERR 3, LOG_WARNING 4.
+extern fn sys_openlog: str -> int -> int -> int;
+extern fn sys_syslog: int -> str -> int;
+extern fn sys_closelog: unit -> int;
+extern fn sys_setlogmask: int -> int;
+
+let say = fn (label: str) -> fn (got: int) -> fn (want: int) ->
+  if got == want then print (label ++ " ok")
+  else print (label ++ " FAIL got=" ++ str_of_int got ++ " want=" ++ str_of_int want);
+
+let main = fn (u: unit) ->
+  // the ident is a temporary: the runtime must keep its own copy
+  let _ = say "openlog" (sys_openlog ("mere" ++ "probe") 32 8) 0 in
+  let _ = say "syslog" (sys_syslog 3 "hello 100% %s %n") 0 in
+  let _ = say "the mask in force" (sys_setlogmask 0) 255 in
+  // LOG_UPTO(LOG_WARNING)
+  let _ = say "set a mask" (sys_setlogmask 31) 255 in
+  let _ = say "the new mask" (sys_setlogmask 0) 31 in
+  // LOG_INFO (6) is outside the mask: nothing goes out
+  let _ = say "a masked priority" (sys_syslog 6 "masked out") 0 in
+  let _ = sys_setlogmask 255 in
+  let _ = say "closelog" (sys_closelog ()) 0 in
+  let _ = say "reopen" (sys_openlog "mereprobe2" 32 8) 0 in
+  let _ = say "after reopening" (sys_syslog 4 "second") 0 in
+  let _ = say "closelog again" (sys_closelog ()) 0 in
+  0;
+exit (main ())
