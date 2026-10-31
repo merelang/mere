@@ -88,13 +88,13 @@ jobs:
         run: |
           mkdir -p dist
           cp _build/default/bin/mere.exe "dist/${{ matrix.asset }}"
+          chmod 755 "dist/${{ matrix.asset }}"
           if [ "$RUNNER_OS" = macOS ]; then
             strip -Sx "dist/${{ matrix.asset }}"
             codesign --force --sign - "dist/${{ matrix.asset }}"
           else
             strip "dist/${{ matrix.asset }}"
           fi
-          chmod +x "dist/${{ matrix.asset }}"
 
       - name: Check the asset before uploading
         run: |
