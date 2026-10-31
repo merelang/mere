@@ -215,3 +215,24 @@ dune test --force      # bypass dune's cache if a run reports 0 tests
 CI (`.github/workflows/ci.yml`) runs the suite on ubuntu + macOS ×
 OCaml 5.1 / 5.4 (4-matrix). Both `ci.yml` and `pages.yml` must be
 green before a release.
+
+## Binary releases
+
+Push a version tag only after verifying its source and release notes.
+The Release workflow creates or reuses a **draft**, strips build metadata,
+checks the binaries for credential patterns and home-directory paths, then
+downloads the uploaded assets and checks their version and execution again.
+A failed check leaves the release private. The workflow refuses to replace
+assets on an already published release, including on a rerun.
+
+After the workflow and required CI checks pass, download both assets, check
+their contents with the local publication policy, and review the release
+notes. Publish the reviewed draft explicitly:
+
+```sh
+gh release edit <tag> --repo merelang/mere --draft=false --latest
+```
+
+The asset checker detects known patterns; review remains necessary for
+confidential material that a pattern cannot identify. Keep private detection
+rules and review records outside the public source tree.

@@ -1,9 +1,7 @@
 name: Release
 
-# Push a tag like `v0.1.0` to build prebuilt `mere` binaries for macOS and
-# Linux and attach them to a GitHub Release. Consumers can then install
-# without an OCaml toolchain (see scripts/install.sh) — closing the
-# "no installed mere" distribution gap.
+# Tags build and verify binaries in a DRAFT release. Publication is a separate
+# action after reviewing the downloaded assets and release notes (RUNBOOK.md).
 
 on:
   push:
@@ -43,21 +41,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Tags with a pre-release suffix (e.g. v0.1.0-rc1) publish as a
-          # GitHub pre-release, so they're excluded from /releases/latest.
           PRE=""
           case "${GITHUB_REF_NAME}" in *-*) PRE="--prerelease" ;; esac
-          # Idempotent, but only for the one failure that is expected on a
-          # re-run. `|| true` swallowed every other reason this can fail, and
-          # a release that was never created is a release nobody can install.
-          if ! out="$(gh release create "${GITHUB_REF_NAME}" \
-                --repo "${GITHUB_REPOSITORY}" \
-                --title "${GITHUB_REF_NAME}" \
-                --generate-notes $PRE 2>&1)"; then
-            case "$out" in
-              *"already exists"*) echo "release ${GITHUB_REF_NAME} already exists, reusing it" ;;
-              *) echo "$out" >&2; exit 1 ;;
-            esac
+          # A draft does not reserve a tag name against a second, public
+          # release. Query first; never overwrite an already published asset.
+          if draft="$(gh release view "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            [ "$draft" = true ] || {
+              echo "release is already public; refusing to overwrite it" >&2; exit 1; }
+            echo "reusing draft ${GITHUB_REF_NAME}"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" \
+              --draft --verify-tag --generate-notes $PRE
           fi
 
   binaries:
@@ -92,7 +88,18 @@ jobs:
         run: |
           mkdir -p dist
           cp _build/default/bin/mere.exe "dist/${{ matrix.asset }}"
+          if [ "$RUNNER_OS" = macOS ]; then
+            strip -Sx "dist/${{ matrix.asset }}"
+            codesign --force --sign - "dist/${{ matrix.asset }}"
+          else
+            strip "dist/${{ matrix.asset }}"
+          fi
           chmod +x "dist/${{ matrix.asset }}"
+
+      - name: Check the asset before uploading
+        run: |
+          python3 scripts/release_asset_check.py --self-test
+          python3 scripts/release_asset_check.py "dist/${{ matrix.asset }}"
 
       - name: The binary must report the tag's version
         run: |
@@ -122,6 +129,7 @@ jobs:
           gh release download "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "${{ matrix.asset }}" --dir roundtrip --clobber
+          python3 scripts/release_asset_check.py "roundtrip/${{ matrix.asset }}"
           chmod +x "roundtrip/${{ matrix.asset }}"
           got="$(./roundtrip/${{ matrix.asset }} --version | sed -n 's/^mere v//p')"
           [ "$got" = "$want" ] || {

@@ -48,6 +48,9 @@ jobs:
       - name: Run tests
         run: opam exec -- dune runtest
 
+      - name: Release asset checker negative controls
+        run: python3 scripts/release_asset_check.py --self-test
+
   # The gates that are not `dune runtest`: cross-backend parity, the differential
   # checks against other people's implementations (node's URL and TextDecoder,
   # QEMU), self-hosting, and the language server.
