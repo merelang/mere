@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 # EVERY GATE STEP RUNS, EVEN AFTER ONE FAILS (`if: ${{ !cancelled() }}`).
 #
@@ -74,10 +73,26 @@ jobs:
   # Linux only, and that is deliberate rather than a shortcut: development
   # happens on macOS, where these are run before every commit, so the two
   # platforms end up covered between CI and the working copy.
-  gates:
-    name: Gates (cross-backend and differential)
-    # Keep integration oracles on the validated image as ubuntu-latest moves.
+  gate_plan:
+    name: Gate assignment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate gate assignments and failure propagation
+        run: ruby scripts/ci_gate_check.rb --self-test
+
+  # Separate runners isolate fixed ports, build outputs and large compilations.
+  # Every group keeps the same pinned tools and required preflights.
+  gate_shards:
+    name: Gate group (${{ matrix.group }})
+    needs: gate_plan
+    # Match the validated oracle environment. Ubuntu 26.04 changes QEMU
+    # packaging and the default C compiler's handling of generated C.
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [compiler, runtime, web, conformance, downstream, riscv]
 
     steps:
       - uses: actions/checkout@v5
@@ -225,6 +240,11 @@ jobs:
       - name: Build
         run: opam exec -- dune build
 
+      # Contrib's site library imports declared packages. Prepare them on each
+      # runner rather than relying on the site-build gate's earlier side effect.
+      - name: Install package dependencies
+        run: opam exec -- _build/default/bin/mere.exe install
+
       # Asserted rather than assumed: a missing tool would otherwise turn into
       # either a silent skip (a gate that passes without running) or a storm of
       # MISCOMPILE rows. wat2wasm's flags are checked because parity.sh treats a
@@ -302,20 +322,21 @@ jobs:
         run: opam exec -- sh scripts/tool_preflight_check.sh --required
 
       - name: tool_preflight poison
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/tool_preflight_check.sh --poison
 
       # The build matrix runs this too, but without wat2wasm and node it skips
       # the self-host codegen cross-validation — 2,225 cases there against 2,430
       # here. Those 205 only run in this job, which has the toolchain.
       - name: Run tests (full, with the wasm toolchain present)
+        if: ${{ matrix.group == 'compiler' }}
         run: opam exec -- dune runtest
 
       # A program that overflows, and what it says when it does. The suite checks this
       # feature by looking for the message in the EMITTED TEXT, which stayed green while
       # neither backend built on this runner at all. See v0.1.285.
       - name: stack_overflow (the fault names itself, per backend)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/stack_overflow.sh
 
       # And WHERE it happened, plus the calls that got there. Builtins raise with
@@ -325,7 +346,7 @@ jobs:
       # switches the frames off and moves one expected position, and requires
       # the gate to go red for each.
       - name: "runtime_loc (a runtime failure names its line and its callers)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/runtime_loc_check.sh
           sh scripts/runtime_loc_check.sh --poison
@@ -336,7 +357,7 @@ jobs:
       # the shipped tree clean, and the poison moves an expected LINE as well as
       # a count, because warning about the wrong arm is the expensive failure.
       - name: "unreachable_arm (a dead match arm is reported, a live one is not)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/unreachable_arm_check.sh
           sh scripts/unreachable_arm_check.sh --poison
@@ -346,7 +367,7 @@ jobs:
       # itself is checking nothing, which is why the agreement is the gate and
       # not a note in the changelog.
       - name: "alloc_meter (C, LLVM and Wasm agree on how much was allocated)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/alloc_meter_check.sh
           sh scripts/alloc_meter_check.sh --poison
@@ -359,7 +380,7 @@ jobs:
       # came out as an empty string. Cheap, and it goes first because it reads
       # files rather than running anything.
       - name: "trailing_trim (no harness eats its subject's last line)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/trailing_trim_check.sh
           sh scripts/trailing_trim_check.sh --poison
@@ -369,7 +390,7 @@ jobs:
       # displays the program's own value is one almost nothing exercises -- and
       # it had drifted into four different answers for the same program.
       - name: "main_value (the four backends display a value the same way)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/main_value_check.sh
           sh scripts/main_value_check.sh --poison
@@ -379,27 +400,27 @@ jobs:
       # harness, which is why they cover shapes a hand-written suite does not:
       # its first run found `show` of a Vec answering `<unknown>` on C.
       - name: "examples_parity (the corpus prints the same on interp and C)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/examples_parity.sh
           sh scripts/examples_parity.sh --poison
 
       - name: "determinism (parity precondition — stdout is a function of the program)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/determinism_check.sh
 
       # A double's bits, held as integers narrow enough for the one backend
       # that has no float. The gate checks the round trip bit for bit, that
       # interp and C agree, and that every exported name compiles for RV32I.
       - name: "softfloat (a double's bits, on a target with no float)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/softfloat_check.sh
 
       # The -rv prelude is injected by the driver, so the backend's own tests
       # cannot see it. Without this a name could be added there and never
       # compiled by anything.
       - name: "rv prelude (every name it defines compiles for -rv)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/rv_prelude_check.sh
 
       # The listing (-rvs) and the debug map (-rvg) must describe the binary
@@ -407,7 +428,7 @@ jobs:
       # (regions not settled) until v0.1.610, and a profile read through the map
       # blamed the wrong functions.
       - name: "rv listing (-rvs / -rvg are the binary, word for word)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/rv_listing_check.sh
 
       # `run` is the only channel a program has for the fate of a child, and the
@@ -415,14 +436,14 @@ jobs:
       # for SIGKILL where the shell and the C backend say 137. Below 128, where
       # nobody looks.
       - name: "run status (how a child died, same answer on both backends)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/run_status_check.sh
 
       # The interpreter is a capability boundary by construction; this asks the
       # filesystem whether it held, and asks whether a host can come back with a
       # verdict for a plugin that loops, allocates, or does not parse.
       - name: "plugin host (survives somebody else's program)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/plugin_host_check.sh
 
       # What a spawned thread's failure does to the program: one answer on four
@@ -430,102 +451,102 @@ jobs:
       # unclaimed one is a line at exit, the exit status is main's). Until then
       # three answers, and on C and LLVM a coin flip weighted by machine load.
       - name: "thread fail (what a dead thread does to the program)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/thread_fail_check.sh --poison
 
       # host_matrix asks which backend has each builtin; this asks whether the
       # documentation has heard of it. 25 of 221 had not been written about
       # anywhere by hand when it was added.
       - name: "doc coverage (every builtin is named in a hand-written doc)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/doc_coverage_check.sh
 
       # Every reserved word the lexer has, in language-reference.md's Keywords
       # block and in reserved-names.md (v0.1.538, Q-084): `view` was in neither
       # list, and the reference's block was missing trait / impl / dyn / derive.
       - name: "keywords doc (every reserved word is listed where people look)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/keywords_doc_check.sh && sh scripts/keywords_doc_check.sh --poison
 
       - name: "decls round-trip (--decls output, pasted back, changes nothing)"
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/decls_roundtrip.sh
 
       - name: live_query (which reads a write affects, on every backend)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/live_query_check.sh
 
       - name: migration_check (a migration consumes every existing row)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/gate.sh scripts/migration_check.sh
 
       - name: live_soundness (a write never leaves a read stale — judged by the database)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/gate.sh scripts/live_soundness_check.sh
 
       - name: render_purity (no view module reads the clock or the environment)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/render_purity_check.sh
 
       - name: cascade_catalog (the DDL parser vs pg_constraint)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/gate.sh scripts/cascade_catalog_check.sh
 
       - name: extern_host (which contrib modules a native binary can link)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/extern_host_check.sh
 
       - name: wasm_stub (which builtins answer without reaching the host)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/wasm_stub_check.sh
 
       - name: wasm_stub poison (the gate can still go red)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/wasm_stub_check.sh --poison
       # v0.1.663: read_line / read_stdin on LLVM, fed real bytes, against C
       - name: llvm_stdin (read_line and read_stdin on LLVM agree with C)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/llvm_stdin_check.sh
       - name: llvm_stdin --poison (a line that keeps its newline goes red)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/llvm_stdin_check.sh --poison
       # v0.1.670: the externs the compiler implements, on LLVM through `mere --ffi-c`
       - name: llvm_ffi (the native runtime linked beside LLVM IR answers as C's)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/llvm_ffi_check.sh
       - name: llvm_ffi --poison (an int answer zero-extended goes red)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/llvm_ffi_check.sh --poison
       # v0.1.671: read_key and the terminal builtins on Wasm, under a pty, against C
       - name: wasm_tty (the Node host leaves the terminal as C does)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/wasm_tty_check.sh
       - name: wasm_tty --poison (a raw mode that keeps IEXTEN goes red)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/wasm_tty_check.sh --poison
 
       - name: type_query_imports (-t resolves an import like the build does)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/type_query_imports_check.sh
 
       - name: lsp_binding_position (definition/rename point at the name)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/lsp_binding_position_check.sh
 
       - name: lsp_binding_position poison
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/lsp_binding_position_check.sh --poison
 
       - name: mount (the router and the manifest come from one list)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/mount_check.sh
 
       - name: htmlbuild (the writing half escapes, on every backend)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/htmlbuild_check.sh
 
       - name: budget (sizes inside their bands, and what a page owes its reader)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/budget_check.sh
 
       # Separate from budget above because it costs a full site build (most of
@@ -537,50 +558,50 @@ jobs:
       # _build/default/bin/mere.exe directly -- so copying their step form is
       # what broke it: dune is on PATH here only inside opam's environment.
       - name: wasm_size (what the playground ships, inside its bands)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: opam exec -- sh scripts/wasm_size_check.sh
 
       - name: nojs (the primary flow completes with no JavaScript)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/nojs_check.sh
 
       - name: authz_coverage (no effect runs as nobody)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/authz_coverage_check.sh
 
       - name: live_e2e (the live-read loop over a real socket)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/live_e2e_check.sh
 
       - name: sse_native (live push from a native binary, no runtime under it)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/sse_native_check.sh
 
       - name: boundary_compat (every released version of the wire, crossed)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/boundary_compat_check.sh
 
       - name: render_agreement (server walk vs client DOM, same tree)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/render_agreement_check.sh
 
       - name: dom_canvas (a frame put on a canvas arrives pixel for pixel)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/dom_canvas_check.sh
 
       - name: parity (interp / C / LLVM / wasm agree)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/parity.sh
 
       - name: ctest (C backend end to end)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/ctest.sh
 
       # contrib's own self-tests ran under the interpreter and nowhere else,
       # which is how `contrib/toml` spent the project's whole history unable
       # to produce C that compiles. Four minutes, 87 programs.
       - name: contrib_ctest (contrib compiles and agrees with the interpreter)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/contrib_ctest.sh
 
       # Q-134 pinned in both directions: an allocation visible in a function's
@@ -588,7 +609,7 @@ jobs:
       # default. The second is conservative and open; the first is a
       # regression if it ever flips.
       - name: alloc_region_pin (where an invisible allocation goes)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/alloc_region_pin.sh
 
       # v0.1.481-482. Two bounds, and the floor is the one that matters: a gate
@@ -598,60 +619,60 @@ jobs:
       # v0.1.324 records a fix to this same cost that built, kept every gate
       # green, and moved the allocation by zero bytes.
       - name: closure_alloc_pin (the uncurried entry, both directions)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/closure_alloc_pin.sh
 
       - name: range_version_check (the checked loop is the oracle for Q-108)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/range_version_check.sh
 
       - name: vectorize_check (clang vectorizes the emitted C)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/gate.sh scripts/vectorize_check.sh
 
       - name: url_parity (vs node's URL)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'conformance' }}
         run: sh scripts/url_parity.sh
 
       - name: encoding_parity (vs node's TextDecoder)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'conformance' }}
         run: sh scripts/encoding_parity.sh
 
       - name: unicode_parity (vs node's Intl.Segmenter)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'conformance' }}
         run: sh scripts/unicode_parity.sh
 
       # No oracle exists for UAX #14, so this one runs the Unicode Consortium's
       # own conformance file, vendored under test/data so it needs no network.
       - name: linebreak_conformance (UCD test file)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'conformance' }}
         run: sh scripts/linebreak_conformance.sh
 
       # Normalization is the one algorithm here with both kinds of gate: an
       # independent implementation above, and the UCD's exhaustive file here.
       - name: normalize_conformance (UCD test file)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'conformance' }}
         run: sh scripts/normalize_conformance.sh
 
       - name: host_matrix (every builtin on every backend)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/host_matrix.sh
 
       # These two landed with v0.1.304/305 but were never wired in here — a
       # gate that exists and does not run is a claim, not a check.
       - name: thread_leak_check (a leak is reported, a join is not)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/thread_leak_check.sh
 
       - name: virtual_clock_check (parked threads advance the clock)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/virtual_clock_check.sh
 
       # Arena capacity stays proportional to allocation: one giant allocation
       # must neither strand the bump block's tail nor become the doubling base
       # (v0.1.307). Deterministic — the meter is MERE_REGION_STATS, not RSS.
       - name: region_slack_check (capacity tracks allocation)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/region_slack_check.sh
 
       # Does `region R { }` actually return memory, per backend? Same program,
@@ -659,7 +680,7 @@ jobs:
       # The LLVM leg is a pin on a KNOWN gap and fails if the gap closes, so
       # the recorded numbers cannot go stale quietly.
       - name: region_reclaim_check (a region block returns memory, or is recorded as not doing so)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/region_reclaim_check.sh
 
       # Does a key a program asked for actually ARRIVE? A pipe has no line
@@ -669,7 +690,7 @@ jobs:
       # direction: plain tty_raw must still let the signal through, so folding
       # ISIG into it cannot happen quietly.
       - name: tty_raw_check (raw mode delivers the keys, and still interrupts)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/tty_raw_check.sh
 
       # contrib/unicode/width against a NAMED second implementation (Reline),
@@ -679,14 +700,14 @@ jobs:
       # categories are ones where the ORACLE is the one to correct, which is
       # why the script is written to report rather than to waive.
       - name: width_check (display width agrees with a second implementation)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'conformance' }}
         run: sh scripts/width_check.sh
 
       # How big Q-127's remaining half is, measured on the corpus rather than
       # guessed: which functions would take a hidden region argument, and which
       # cannot take one at all.
       - name: region_params_check (the size of the change Q-127 still needs)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/region_params_check.sh
 
       # Progress that survives SIGKILL. The gate counts the attempts that were
@@ -695,7 +716,7 @@ jobs:
       # kill schedule against the same program with its log turned off, which
       # must never finish.
       - name: durable_check (a killed run resumes, and the kills are real)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/durable_check.sh
 
       # Recomputing only what changed: two consumers against the free oracle
@@ -705,7 +726,7 @@ jobs:
       # recomputes everything every time (must MATCH it, which is why the
       # count is checked at all).
       - name: inc_check (contrib/inc recomputes the right nodes, and only those)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/inc_check.sh
 
       # A program's exit status is part of its answer. The Wasm backend used to
@@ -713,7 +734,7 @@ jobs:
       # runs these modules -- and no parity program called `exit`, so the whole
       # builtin was outside the differential suite (v0.1.434, Q-114).
       - name: exit_status_check (exit n ends the program with n, on every backend)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/exit_status_check.sh
 
       # `mere check` must accept exactly what the compile path accepts. The
@@ -724,7 +745,7 @@ jobs:
       # handful of picked cases, plus the named row that only the backend flags
       # can see.
       - name: check_cmd_check (`mere check` agrees with the compile path)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/check_cmd_check.sh
 
       # A `match` with no arm for a case was a warning printed from inside the
@@ -736,7 +757,7 @@ jobs:
       # back into the program and run, so a hint that stops being valid Mere
       # goes red rather than being merely wrong.
       - name: exhaustive_check (a missing case is refused on every path)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/exhaustive_check.sh
 
       # The region report names the one expression that took binarytrees from
@@ -744,7 +765,7 @@ jobs:
       # Nothing is inferred: the report is where the language says "here", and
       # the source is where the decision becomes visible (v0.1.415).
       - name: suggest_check (the region report names the expression that mattered)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/suggest_check.sh
 
       # The enumerated escape table. Every way a region-bound value can reach
@@ -753,27 +774,27 @@ jobs:
       # disagreeing with nothing watching is what Q-053 was. Open holes are
       # rows, not absences: if one closes, this FAILS until the table says so.
       - name: escape_check (region escape routes, enumerated)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/escape_check.sh
       # The SAFE rows above are accepted; this asks whether an accepted program
       # then reads the right bytes once the block's memory has been reused. Four
       # routes were safe by every verdict and use-after-free at run time
       # (Q-190, Q-191, Q-192 and LLVM channels, v0.1.563-564).
       - name: region_uaf_check (what escaped a block by a route the types do not see is still there)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/region_uaf_check.sh --poison
 
       # v0.1.605: a ten-million-element list ran the copy out of C stack, one
       # frame per element. The copier now walks a list's spine in a loop.
       - name: deep_list_check (a long list is copied without a C frame per element)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/deep_list_check.sh --poison
 
       # `mere -c --region-sites` names the source lines whose containers filled
       # the default region (v0.1.570), and must change nothing else: the same
       # output, the same default-region total.
       - name: region_sites_check (the meter names the line that filled the default region)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/region_sites_check.sh --poison
 
       # Two host-facing corners of the LLVM backend that nothing built and ran
@@ -781,7 +802,7 @@ jobs:
       # whose only file builtins are file_openrw / file_size / file_close, and
       # `args ()` strings, which were argv's raw pointers with no length header.
       - name: llvm_host_args_check (file-only programs build on LLVM; an argument is a str)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/llvm_host_args_check.sh --poison
 
       # A container written by a thread other than the one that made it fails
@@ -790,30 +811,30 @@ jobs:
       # v0.1.582: and a container another thread has read is read-only, an
       # OwnedVec belongs to the thread spawn moved it into.
       - name: owner_check (a container is written only by the thread that made it)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/owner_check.sh --poison
 
       # A saturated call of a curried inner function allocates no closures on
       # C, LLVM and Wasm (Q-142, v0.1.583): mandelbrot's inner loop was 104
       # B/iter on Wasm and 235 MB on LLVM before.
       - name: inner_direct_check (an inner function called with every argument builds no closures)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/inner_direct_check.sh && sh scripts/inner_direct_check.sh --poison
 
       # The language server (v0.1.576): an unbroken run of didChanges that has
       # already arrived is checked once, and foldingRange is answered.
       - name: lsp_coalesce_check (keystrokes already out of date are not each re-checked)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/lsp_coalesce_check.sh
 
       - name: lsp_folding_check (declarations and comment runs fold)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/lsp_folding_check.sh
 
       # The self-hosted lexer reads every word lib/lexer.ml reserves as a keyword
       # (v0.1.578); the operators are selfhost_lexer_ops_check's.
       - name: selfhost_lexer_keywords_check (no reserved word is read as a name)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/selfhost_lexer_keywords_check.sh --poison
 
       # The README, executed. Its Quick-examples transcript is cut from the
@@ -823,7 +844,7 @@ jobs:
       # versions old while every gate here was green: nothing was pointed
       # outward. This is.
       - name: first_run_check (the README, executed)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: opam exec -- sh scripts/first_run_check.sh
 
       # Parts of the Wasm runtime are literal WAT text gated behind a flag only
@@ -832,7 +853,7 @@ jobs:
       # were both that, in sections wrong since values widened. Every gated
       # section needs a program, or a written reason it cannot have one.
       - name: section_coverage (every hand-written runtime section has a program)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/section_coverage.sh
 
       # The cross-language benchmark suite, deterministic half only: every
@@ -842,14 +863,14 @@ jobs:
       # measure the runner. Reference toolchains absent from the image are
       # skipped with a printed reason rather than silently.
       - name: bench_check (the implementations agree; allocation is in band)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/bench_check.sh
 
       # The --lib boundary, checked from the outside: the .so's exported
       # symbol set is exactly the boundary, a C host linking it gets the
       # right values, and module init runs once (v0.1.308).
       - name: lib_check (shared-library boundary)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/lib_check.sh
 
       # Readiness I/O (v0.1.313): the transcript checks both directions --
@@ -857,14 +878,14 @@ jobs:
       # happened -- and pins the coded would-block returns on nonblocking
       # read / accept / write.
       - name: io_poll_check (readiness answers what it claims)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/io_poll_check.sh
 
       # Audio output (v0.1.314): the queue's contract under the SDL dummy
       # driver — visible pending bytes, bounded drain to exactly 0, -1 after
       # close. Sample correctness is the consumer's oracle, not this gate's.
       - name: audio_check (the audio queue's contract, headless)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/gate.sh scripts/audio_check.sh
 
       # v0.1.509: the file_* metadata runtime. Every expectation is a value the
@@ -872,7 +893,7 @@ jobs:
       # reads the size -- so the gate is the same on any POSIX host and needs
       # no library. It caught a stale-cache design on its first run.
       - name: filestat_check (stat, chmod, truncate, umask, readlink, mkfifo)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/filestat_check.sh
 
       # v0.1.522: the fd_* runtime -- an open file. open(2) is in <fcntl.h>,
@@ -884,7 +905,7 @@ jobs:
       # to answer the same number, and a truncation test that was reading the
       # previous run's leftovers.
       - name: fdio_check (open, read, write, seek, dup, pipe, close)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/fdio_check.sh
 
       # v0.1.550: resource limits, scheduling priority and flock(2). The
@@ -894,7 +915,7 @@ jobs:
       # every row is a limit the probe set and read back, or a refusal it
       # provoked. Same transcript as root and as an unprivileged user.
       - name: proclimit_check (getrlimit, setrlimit, getpriority, setpriority, flock)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/proclimit_check.sh
 
       # v0.1.589: a signal's disposition (catch and do nothing, default, raise)
@@ -902,13 +923,13 @@ jobs:
       # inherited SIG_IGN, a pipe whose reader has exited, a run that must end
       # of SIGPIPE (141).
       - name: procsig_check (SIGPIPE caught and passed on as the default, a write to a closed pipe is EPIPE)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/procsig_check.sh
 
       # v0.1.633: a stdin the parent made non-blocking and writes to late --
       # read_stdin waits instead of taking EAGAIN for the end (C and Wasm)
       - name: stdin_nonblock_check (read_stdin on a non-blocking pipe waits for the late write)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/stdin_nonblock_check.sh
 
       # v0.1.555: a listener on a chosen address, bind(2) on a socket, the
@@ -917,7 +938,7 @@ jobs:
       # 104), so the expected ones are read from the host's <errno.h>; every
       # other row is a port the kernel gave the probe or a refusal it provoked.
       - name: sockaddr_check (tcp_listen_at, sock_bind, getsockname, getpeername, fd_last_errno)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/sockaddr_check.sh
 
       # v0.1.677: the system log. syslog(3) takes varargs and openlog(3) keeps
@@ -925,7 +946,7 @@ jobs:
       # out with LOG_PERROR too and is read back from stderr (the log itself
       # is the host's), and the masks are what setlogmask answers.
       - name: syslog_check (sys_openlog, sys_syslog, sys_closelog, sys_setlogmask)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/syslog_check.sh
 
       # Float results must not depend on the C optimizer (v0.1.315): the
@@ -933,7 +954,7 @@ jobs:
       # must match the interpreter. Without the emitted FP_CONTRACT OFF
       # pragma, clang's default fma contraction breaks both claims.
       - name: fp_contract_check (the optimizer must not change the answer)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/fp_contract_check.sh
 
       # The one rounding a program asks for by name (Q-176, v0.1.534): `fma`
@@ -941,7 +962,7 @@ jobs:
       # four backends. The Wasm leg is software ($__lang_fma) and is the reason
       # this gate exists; it fails rather than skips without wat2wasm and node.
       - name: fma_check (fma against fma(3), bit for bit, four backends)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/fma_check.sh
 
       # The emitted C must fit inside clang's nesting limit and must evaluate
@@ -951,7 +972,7 @@ jobs:
       # This runner has BOTH compilers, which is the point -- one compiler
       # cannot disagree with itself.
       - name: bracket_depth_check (nesting limit + operand order)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/bracket_depth_check.sh
 
       # A `musttail` the target cannot honour is a build that DIES, and only at -O0
@@ -959,22 +980,22 @@ jobs:
       # half of what arm64 forwards -- so this runner is the one that sees the
       # binding number, and the gate fails if the pinned table drifts either way.
       - name: musttail_budget_check (a musttail the target can keep)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/musttail_budget_check.sh
 
       - name: selfhost_check
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/selfhost_check.sh
 
       # The self-hosted lexer reads every operator lib/lexer.ml reads, as one
       # token (v0.1.539, Q-153): `|>` came out as Pipe then Gt and `@@` / `?`
       # did not lex, while selfhost_check stayed green on a corpus using none.
       - name: selfhost_lexer_ops (the second lexer keeps up with the first)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/selfhost_lexer_ops_check.sh && sh scripts/selfhost_lexer_ops_check.sh --poison
 
       - name: lsp_smoke
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/lsp_smoke.sh
           sh scripts/lsp_smoke.sh --poison
@@ -982,19 +1003,19 @@ jobs:
       # v0.1.502. Three checks that came in with the Gleam-derived slice, each
       # with its poison run: a gate that cannot go red is a line in a log.
       - name: unused_check (bindings nothing reads)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/unused_check.sh
           sh scripts/unused_check.sh --poison
 
       - name: version_floor_check (the feature/version table, re-derived)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/version_floor_check.sh
           sh scripts/version_floor_check.sh --poison
 
       - name: echo_check (echo says the same thing on every backend)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/echo_check.sh
           sh scripts/echo_check.sh --poison
@@ -1002,46 +1023,46 @@ jobs:
       # v0.1.504. The second Gleam-derived slice, same rule: each with its
       # poison run.
       - name: warnings_as_errors_check (a warning can fail a build)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/warnings_as_errors_check.sh
           sh scripts/warnings_as_errors_check.sh --poison
 
       - name: decls_json_check (the two exits of --decls agree)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/decls_json_check.sh
           sh scripts/decls_json_check.sh --poison
 
       - name: module_privacy_check (pub hides what it does not mark)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/module_privacy_check.sh
           sh scripts/module_privacy_check.sh --poison
 
       # v0.1.505.
       - name: refutable_let_check (a let that can fail is refused)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/refutable_let_check.sh
           sh scripts/refutable_let_check.sh --poison
 
       - name: fmt_comments_check (the formatter keeps column-1 comments)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/fmt_comments_check.sh
           sh scripts/fmt_comments_check.sh --poison
 
       # v0.1.506.
       - name: diagnostic_position_check (a diagnostic points where you can act)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/diagnostic_position_check.sh
           sh scripts/diagnostic_position_check.sh --poison
 
       # v0.1.507.
       - name: syntax_hint_check (a syntax error says what to write instead)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/syntax_hint_check.sh
           sh scripts/syntax_hint_check.sh --poison
@@ -1051,7 +1072,7 @@ jobs:
       # that had not existed for hundreds of releases, each one next to a green
       # gate that proved the opposite.
       - name: doc_claims_check (a documented limitation is still a limitation)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/doc_claims_check.sh
           sh scripts/doc_claims_check.sh --poison
@@ -1059,7 +1080,7 @@ jobs:
       # Q-165. The parity suite holds the backends to one answer; this asks
       # whether that answer is the same one the uncaught failure prints.
       - name: fail_reason_check (a caught failure and an uncaught one agree)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/fail_reason_check.sh
           sh scripts/fail_reason_check.sh --poison
@@ -1067,7 +1088,7 @@ jobs:
       # Q-166. The module gate one level out: `import` splices, so the boundary
       # `pub` needs is the file each token came from.
       - name: file_privacy_check (`pub` at the top of a file survives the splice)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/file_privacy_check.sh
           sh scripts/file_privacy_check.sh --poison
@@ -1076,7 +1097,7 @@ jobs:
       # block's release; the scale is the point, because one catch passed on the
       # backend that segfaulted at a hundred.
       - name: region_unwind_check (a catch releases the block it jumped over)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/region_unwind_check.sh
           sh scripts/region_unwind_check.sh --poison
@@ -1085,7 +1106,7 @@ jobs:
       # not a nicety -- 52 of 293 examples came back as something the compiler
       # refused, and the formatter's own tests were all small single files.
       - name: fmt_roundtrip_check (what fmt writes is still the same program)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison
@@ -1094,7 +1115,7 @@ jobs:
       # wrote rather than copying the `mu_` prefix and the field order by hand.
       # The poison is the hand-copied struct, giving a different answer.
       - name: ffi_header_check (the shim includes what the compiler wrote)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/ffi_header_check.sh
           sh scripts/ffi_header_check.sh --poison
@@ -1104,7 +1125,7 @@ jobs:
       # variants could. The twins are asked the same questions side by side,
       # because the bug was that they disagreed.
       - name: module_type_check (a module's type can be written down)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/module_type_check.sh
           sh scripts/module_type_check.sh --poison
@@ -1115,7 +1136,7 @@ jobs:
       # control inside the test now; this pins each population and the size of
       # each runtime exemption.
       - name: wasm_assert_strength (the backends' assertions can fail)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/wasm_assert_strength.sh
           sh scripts/wasm_assert_strength.sh --poison
@@ -1124,7 +1145,7 @@ jobs:
       # name. The same bug was fixed on Wasm first and shipped with NO gate,
       # which is exactly how the LLVM side stayed broken; this asks both.
       - name: toplevel_shadow_check (a callee's local does not write your global)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/toplevel_shadow_check.sh
           sh scripts/toplevel_shadow_check.sh --poison
@@ -1134,7 +1155,7 @@ jobs:
       # hardest: a tool that prints only documented names merges "not exported"
       # with "nobody wrote a comment".
       - name: doc_cmd_check (mere doc says what a file exports)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/doc_cmd_check.sh
           sh scripts/doc_cmd_check.sh --poison
@@ -1145,13 +1166,13 @@ jobs:
       # v0.1.554. No gate says it skipped and then exits 0: "passed" and "did
       # not run" are different statuses (2 could not answer, 3 optional).
       - name: skip_exit_check (no gate says it skipped and exits 0)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/skip_exit_check.sh
           sh scripts/skip_exit_check.sh --poison
 
       - name: test_cmd_check (mere test runs what a package declares, in order)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/test_cmd_check.sh
           sh scripts/test_cmd_check.sh --poison
@@ -1161,7 +1182,7 @@ jobs:
       # in three different spellings. Both directions on both native backends,
       # because a fixture that passed either way would prove nothing.
       - name: stack_request_check (a program can say how much stack it needs)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/stack_request_check.sh
           sh scripts/stack_request_check.sh --poison
@@ -1173,26 +1194,26 @@ jobs:
       # its current region per process: two allocating threads ran out of
       # memory. Both native backends, with a poison.
       - name: threads_alloc_check (two threads allocating at once)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/threads_alloc_check.sh
           sh scripts/threads_alloc_check.sh --poison
 
       - name: spawn_stack_check (a spawned thread gets the requested stack)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |
           sh scripts/spawn_stack_check.sh
           sh scripts/spawn_stack_check.sh --poison
 
       # v0.1.508.
       - name: binding_form_check (every spelling gets the same verdict)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: |
           sh scripts/binding_form_check.sh
           sh scripts/binding_form_check.sh --poison
 
       - name: socket_parity
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/gate.sh scripts/socket_parity.sh
 
       # Three runtime sections exist only under `-w --component`, so the parity
@@ -1201,11 +1222,11 @@ jobs:
       # component toolchain installed for socket_parity above, and skips loudly
       # rather than silently if that toolchain is absent.
       - name: component_parity (the component-only sections, run)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/gate.sh scripts/component_parity.sh
 
       - name: tcp_read_codes
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/gate.sh scripts/tcp_read_codes.sh
 
       # A Mere program ANSWERING a TLS connection, not dialling one. The client
@@ -1214,7 +1235,7 @@ jobs:
       # oracles are curl and openssl s_client -- two TLS implementations that
       # are not ours and cannot be made lenient from this repository.
       - name: tls_server_check (a Mere program terminates TLS)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/gate.sh scripts/tls_server_check.sh
 
       # Whether the server answers requests AT THE SAME TIME. A handler that
@@ -1227,7 +1248,7 @@ jobs:
       # scripts/http_concurrency_check.sh here. Fixing an instance is not
       # fixing a pattern.
       - name: no bare `wait` in a gate that starts a server
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: |
           if grep -rn '^[[:space:]]*wait[[:space:]]*$' scripts/*.sh; then
             echo "a bare wait: name the client PIDs instead"
@@ -1240,11 +1261,11 @@ jobs:
       # stopped at their first zero byte, so every JSON test passed while every
       # binary upload would have been truncated.
       - name: http_upload_check (a binary upload survives its zero bytes)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/http_upload_check.sh
 
       - name: http_concurrency_check (the server serves more than one at once)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/http_concurrency_check.sh
 
       # The Protocol Buffers wire format against protoc's BYTES. Runs the
@@ -1253,7 +1274,7 @@ jobs:
       # 63-bit and the compiled backends are 64-bit, and that divergence is
       # PINNED here rather than dropped, so a fix breaks this gate and says so.
       - name: proto_parity (vs protoc's bytes)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/proto_parity.sh
 
       # The .proto parser and descriptor encoder, byte-identical to
@@ -1262,7 +1283,7 @@ jobs:
       # schema is serialised by the code that reads wire bytes and one oracle
       # checks both layers at once.
       - name: proto_desc_parity (vs protoc's descriptor set)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/proto_desc_parity.sh
 
       # The GENERATED codec against protoc's bytes: decode protoc's output and
@@ -1270,7 +1291,7 @@ jobs:
       # the committed examples/hello_pb.mere against a fresh run, because a
       # generator whose output nobody reads is a generator nobody can review.
       - name: proto_gen_parity (generated codec vs protoc's bytes)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/proto_gen_parity.sh
 
       # The GraphQL parser and printer against graphql-js, by sending our output
@@ -1279,7 +1300,7 @@ jobs:
       # to hide. A deliberately broken lexer proved the round-trip alone is blind
       # to the Int/Float distinction, so the harness asks for that kind directly.
       - name: graphql_parity (vs graphql-js)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/graphql_parity.sh
 
       # The executor against graphql-js's execute(), with the resolvers being the
@@ -1288,26 +1309,26 @@ jobs:
       # null destroys the nearest nullable ancestor, and an item error in [Int!]
       # nulls the whole list.
       - name: graphql_exec_parity (vs graphql-js execute)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/graphql_exec_parity.sh
 
       - name: graphql_intro_parity (vs graphql-js introspection)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/graphql_intro_parity.sh
 
       - name: graphql_validate_parity (vs graphql-js validate)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/graphql_validate_parity.sh
 
       - name: graphql_server_parity (a native GraphQL endpoint, real clients)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/graphql_server_parity.sh
 
       # HTTP/2 framing against hyperframe, in both directions, plus the reserved
       # bit of the stream identifier — the one field that behaves correctly
       # against every well-behaved peer while being wrong.
       - name: http2_parity (vs hyperframe)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/http2_parity.sh
 
       # HPACK against the Python hpack library, per CONNECTION rather than per
@@ -1315,7 +1336,7 @@ jobs:
       # different header name. Includes a block captured from grpc-go, which is
       # what checks the two tables the oracle and the implementation share.
       - name: hpack_parity (vs hpack)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/hpack_parity.sh
 
       # The whole stack, driven by clients that know nothing about it: grpcurl
@@ -1324,32 +1345,32 @@ jobs:
       # not decoration — removing the server's frame reassembly passed every other
       # section, because on loopback a request arrives in a single read.
       - name: grpc_parity (grpcurl and python h2 against a Mere server)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/grpc_parity.sh
 
       # The window capability, checked by reading the window's own pixels back.
       # SDL's `dummy` video driver gives a software renderer and an event queue
       # with no display, so this needs no X server on the runner.
       - name: window_check
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/gate.sh scripts/window_check.sh
 
       # The HTML tokenizer against html5lib-tests, the suite maintained alongside
       # the specification. Vendored, so this needs no network.
       - name: html_tokenizer_conformance
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'conformance' }}
         run: sh scripts/html_tokenizer_conformance.sh
 
       - name: infer_scaling (type inference stays linear)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/gate.sh scripts/infer_scaling.sh
 
       - name: wasm_sourcemap
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/gate.sh scripts/wasm_sourcemap.sh
 
       - name: debug_info (lldb agrees where each line is)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/gate.sh scripts/debug_info.sh
 
       # The RISC-V arc's headline claim is that the same bytes behave
@@ -1374,7 +1395,7 @@ jobs:
       # compiled at all. The script now refuses to pass on zero, and this step
       # now runs whenever the gates do.
       - name: Check out the dogfood repositories
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (matrix.group == 'downstream' || matrix.group == 'riscv') }}
         continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/downstream"
@@ -1395,7 +1416,7 @@ jobs:
           # the script is what let the two drift apart in the first place.
 
       - name: downstream_check (their code is still a program)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_check.sh
 
       # downstream_check stops at emission; nothing compiled what came out, so a
@@ -1407,7 +1428,7 @@ jobs:
       # and mbrowse are minutes each and peak at 6-7 GB. The poison leg first:
       # each kind of failure must say which kind it is.
       - name: Restore the downstream compile cache
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         uses: actions/cache@v4
         with:
           path: ~/.cache/mere-downstream-cc
@@ -1415,11 +1436,11 @@ jobs:
           restore-keys: downstream-cc-
 
       - name: downstream_cc_check --poison (a failure says whether it was an error, a timeout or a kill)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_cc_check.sh --poison
 
       - name: downstream_cc_check (their emitted code still compiles)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_cc_check.sh
 
       # memu is already among the dogfood clones above, so the RISC-V
@@ -1428,7 +1449,7 @@ jobs:
       # the same pass line either way, which is how a gate stops meaning what
       # it says. It names which halves ran now.
       - name: qemu_virt (vs an emulator nobody here wrote, and one we did)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/gate.sh scripts/qemu_virt.sh
 
       # The operating system on that CPU: a two-task kernel with a shell, and a
@@ -1438,7 +1459,7 @@ jobs:
       # 0x80000007 interrupt cause, all three stopped compiling and no gate said
       # so. This builds them and runs two on the same memu checkout.
       - name: os_check (the kernel, the shell and a user process, on memu)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/os_check.sh
 
       # Same-thread coroutines. A switch carries the four pieces of state that
@@ -1448,7 +1469,7 @@ jobs:
       # v0.1.623: here, after the clones, so that RISC-V's column (both widths,
       # on memu, with poisons over the prelude) runs too.
       - name: coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/coro_check.sh --poison
 
       # ⚠ THIS GATE WAS IN NO WORKFLOW. rv_exec_check is the differential
@@ -1458,37 +1479,37 @@ jobs:
       # int_width_boundary, added to the parity suite for a different question,
       # differs by construction on a 32-bit target.
       - name: rv_exec (the RISC-V backend against the C backend, hosted side)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_exec_check.sh
 
       # v0.1.637 (Q-200): a failing program fails the same way on RISC-V --
       # stdout, stderr and the exit status each against C -- with a poison
       # that folds the streams back together, the shape before.
       - name: rv_failure (a failure on RISC-V is the C backend's failure)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_failure_check.sh
       - name: rv_failure --poison (the streams folded together go red)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_failure_check.sh --poison
       # v0.1.659: region_uaf_check's RISC-V leg -- what escaped a block by a
       # route the types do not see, read after the block's memory was reused,
       # at both widths. Its first run found ownedvec_store wrong since v0.1.653.
       - name: region_uaf --rv-only (RISC-V reads an escaped value after its block is reused)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/region_uaf_check.sh --rv-only
       # v0.1.642: sys_os / sys_arch answer for each backend's ABI (the host's on
       # interp, C and LLVM; wasi on Wasm; linux on RISC-V)
       - name: sys_info (sys_os / sys_arch on every backend)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/sys_info_check.sh
       - name: sys_info --poison (a C program asked about another machine goes red)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: sh scripts/sys_info_check.sh --poison
 
       # A RISC-V region rolls back (v0.1.613): 100 trees that need ~130 MB
       # unreclaimed must run in 16 MB on the Mere-written CPU.
       - name: region_reclaim RV64 (a RISC-V region block returns memory)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/region_reclaim_check.sh --rv-only
 
       # The other half of the same argument: qemu_virt checks that the bytes we
@@ -1497,5 +1518,23 @@ jobs:
       # instrument with no gate goes quietly wrong -- this one was 41%
       # unreadable on the wide target and confidently mis-named srli as srai.
       - name: rvd_oracle (mere -rvd vs a disassembler nobody here wrote)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: OBJDUMP=riscv64-linux-gnu-objdump sh scripts/rvd_oracle_check.sh
+
+  # Keep the existing required-check name. A failed or skipped matrix must not
+  # turn into a skipped (and therefore non-blocking) final check.
+  gates:
+    name: Gates (cross-backend and differential)
+    needs: [gate_plan, gate_shards]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gate group to succeed
+        env:
+          GATE_PLAN_RESULT: ${{ needs.gate_plan.result }}
+          GATE_SHARDS_RESULT: ${{ needs.gate_shards.result }}
+        run: |
+          [ "$GATE_PLAN_RESULT" = success ] && [ "$GATE_SHARDS_RESULT" = success ] || {
+            echo "Gate assignment or a gate group did not succeed" >&2
+            exit 1
+          }
