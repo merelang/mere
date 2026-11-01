@@ -62,90 +62,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             asset: mere-linux-x86_64
           - os: macos-latest
             asset: mere-macos-arm64
-          # macOS x86_64 (Intel) is omitted: the macos-13 runner sat
-          # queued for over a day here. Add it back when Intel runners are
-          # reliably available, or via cross-compilation.
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: "5.1"
-
-      - name: Install dependencies
-        run: opam install . --deps-only
-
-      - name: Build release binary
-        run: opam exec -- dune build --release bin/mere.exe
-
-      - name: Stage binary
-        run: |
-          mkdir -p dist
-          cp _build/default/bin/mere.exe "dist/${{ matrix.asset }}"
-          chmod 755 "dist/${{ matrix.asset }}"
-          if [ "$RUNNER_OS" = macOS ]; then
-            strip -Sx "dist/${{ matrix.asset }}"
-            codesign --force --sign - "dist/${{ matrix.asset }}"
-          else
-            strip "dist/${{ matrix.asset }}"
-          fi
-
-      - name: Check the asset before uploading
-        run: |
-          python3 scripts/release_asset_check.py --self-test
-          python3 scripts/release_asset_check.py "dist/${{ matrix.asset }}"
-
-      - name: The binary must report the tag's version
-        run: |
-          want="${GITHUB_REF_NAME#v}"; want="${want%%-*}"
-          got="$(./dist/${{ matrix.asset }} --version | sed -n 's/^mere v//p')"
-          [ "$got" = "$want" ] || {
-            echo "release: built ${{ matrix.asset }} reports v$got, tag says v$want" >&2; exit 1; }
-          echo "${{ matrix.asset }} reports v$got"
-
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            "dist/${{ matrix.asset }}" --clobber
-
-      # The one check that would have caught the 260-version-old install: ask
-      # the release for the asset, the way a user does, and run what comes
-      # back. Verifying what was built says nothing about what was served.
-      - name: The UPLOADED binary must report the tag's version
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          want="${GITHUB_REF_NAME#v}"; want="${want%%-*}"
-          mkdir -p roundtrip
-          gh release download "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern "${{ matrix.asset }}" --dir roundtrip --clobber
-          python3 scripts/release_asset_check.py "roundtrip/${{ matrix.asset }}"
-          chmod +x "roundtrip/${{ matrix.asset }}"
-          got="$(./roundtrip/${{ matrix.asset }} --version | sed -n 's/^mere v//p')"
-          [ "$got" = "$want" ] || {
-            echo "release: the asset served for ${{ matrix.asset }} reports v$got, tag says v$want" >&2
-            echo "release: what was built and what is being served are different binaries" >&2
-            exit 1; }
-          echo "served ${{ matrix.asset }} reports v$got"
-
-          # And it must actually run. A binary that reports a version and then
-          # cannot compile anything is still a broken install.
-          printf 'let _ = print "release-ok";\n' > roundtrip/smoke.mere
-          out="$(./roundtrip/${{ matrix.asset }} roundtrip/smoke.mere)"
-          case "$out" in
-            *release-ok*) echo "served ${{ matrix.asset }} runs a program" ;;
-            *) echo "release: the served binary did not run a one-line program" >&2; exit 1 ;;
-          esac
+    uses: ./.github/workflows/release-build.yml
+    with:
+      os: ${{ matrix.os }}
+      asset: ${{ matrix.asset }}
+      publish-draft: true
 
   checksums:
     needs: binaries

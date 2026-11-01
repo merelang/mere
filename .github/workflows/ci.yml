@@ -21,6 +21,23 @@ on:
 # the gates below it fail loudly rather than silently not existing.
 
 jobs:
+  distribution:
+    name: Distribution compatibility (${{ matrix.asset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            asset: mere-linux-x86_64
+          - os: macos-latest
+            asset: mere-macos-arm64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      os: ${{ matrix.os }}
+      asset: ${{ matrix.asset }}
+
   build:
     strategy:
       fail-fast: false
@@ -49,6 +66,9 @@ jobs:
 
       - name: Release asset checker negative controls
         run: python3 scripts/release_asset_check.py --self-test
+
+      - name: Distribution runtime checker negative controls
+        run: python3 scripts/release_runtime_check_test.py
 
       - name: Installer failure and replacement checks
         run: python3 scripts/install_check.py
