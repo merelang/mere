@@ -84,7 +84,9 @@ jobs:
   gate_shards:
     name: Gate group (${{ matrix.group }})
     needs: gate_plan
-    runs-on: ubuntu-latest
+    # Match the validated oracle environment. Ubuntu 26.04 changes QEMU
+    # packaging and the default C compiler's handling of generated C.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

@@ -54,6 +54,7 @@ module CIGates
     require!(plan.fetch("steps").any? { |s| s["run"] == "ruby scripts/ci_gate_check.rb --self-test" },
              "the assignment job must run the coverage and failure controls")
     shard = jobs.fetch("gate_shards")
+    require!(shard["runs-on"] == "ubuntu-24.04", "integration checks must use the validated Ubuntu 24.04 image")
     require!(Array(shard["needs"]) == ["gate_plan"], "groups must wait for gate assignment")
     require!(!shard["if"] && !shard["continue-on-error"], "gate groups must be required")
     require!(shard.fetch("strategy")["fail-fast"] == false, "one failed group must not cancel the rest")
@@ -122,6 +123,7 @@ module CIGates
       "excluded group" => ->(c) { c[:matrix]["exclude"] = [{"group" => "compiler"}] },
       "included group" => ->(c) { c[:matrix]["include"] = [{"group" => "compiler"}] },
       "fail fast" => ->(c) { c[:shard]["strategy"]["fail-fast"] = true },
+      "unpinned runner" => ->(c) { c[:shard]["runs-on"] = "ubuntu-latest" },
       "optional groups" => ->(c) { c[:shard]["continue-on-error"] = true },
       "optional check" => ->(c) { c[:poison]["continue-on-error"] = true },
       "missing RISC-V checkout" => ->(c) { c[:checkout]["if"] = "${{ !cancelled() && matrix.group == 'downstream' }}" },
