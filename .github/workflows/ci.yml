@@ -240,6 +240,11 @@ jobs:
       - name: Build
         run: opam exec -- dune build
 
+      # Contrib's site library imports declared packages. Prepare them on each
+      # runner rather than relying on the site-build gate's earlier side effect.
+      - name: Install package dependencies
+        run: opam exec -- _build/default/bin/mere.exe install
+
       # Asserted rather than assumed: a missing tool would otherwise turn into
       # either a silent skip (a gate that passes without running) or a storm of
       # MISCOMPILE rows. wat2wasm's flags are checked because parity.sh treats a

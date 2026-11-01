@@ -13,6 +13,7 @@ module CIGates
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   CHECKOUT = "Check out the dogfood repositories"
   CACHE = "Restore the downstream compile cache"
+  PACKAGES = "Install package dependencies"
 
   def self.require!(condition, message)
     raise Invalid, message unless condition
@@ -67,6 +68,12 @@ module CIGates
     steps = shard.fetch("steps")
     start = steps.index { |s| s["name"] == PREFLIGHT }
     require!(start, "every group needs the required tool preflight")
+    build = steps.index { |s| s["name"] == "Build" }
+    packages = steps.index { |s| s["name"] == PACKAGES }
+    require!(build && packages && build < packages && packages < start,
+             "declared packages must be installed after building and before preflights")
+    require!(steps[packages]["run"] == "opam exec -- _build/default/bin/mere.exe install",
+             "package preparation must use the compiler being tested")
     require!(steps[0..start].all? { |s| !s["if"] }, "setup and required preflights must run in every group")
     checks = steps[(start + 1)..]
     require!(checks.map { |s| s["name"] }.uniq.length == checks.length, "check names must be unique")
@@ -131,6 +138,7 @@ module CIGates
       "missing full suite" => ->(c) { c[:steps].delete(c[:full]) },
       "empty full suite" => ->(c) { c[:full]["run"] = "true" },
       "missing required preflight" => ->(c) { c[:steps].reject! { |s| s["name"] == PREFLIGHT } },
+      "missing package preparation" => ->(c) { c[:steps].reject! { |s| s["name"] == PACKAGES } },
       "skipped setup" => ->(c) { c[:steps].find { |s| s["name"] == "Build" }["if"] = "false" },
       "missing group dependency" => ->(c) { c[:final]["needs"] = ["gate_plan"] },
       "skipped final check" => ->(c) { c[:final].delete("if") },

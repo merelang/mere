@@ -216,8 +216,9 @@ CI (`.github/workflows/ci.yml`) runs the suite on ubuntu + macOS ×
 OCaml 5.1 / 5.4 (4-matrix). Integration checks use the validated Ubuntu 24.04
 image and run in six parallel groups:
 compiler, runtime, web, conformance, downstream and RISC-V. Each integration
-check runs once; required tool preflights run in every group. A failed group
-does not cancel the others. The required check retains its name,
+check runs once; package installation and required tool preflights run in
+every group. A failed group does not cancel the others. The required check
+retains its name,
 `Gates (cross-backend and differential)`. It passes only when the assignment
 check and every group succeed. Failed, cancelled or skipped groups fail it.
 Run `ruby scripts/ci_gate_check.rb --self-test` to validate assignments and
