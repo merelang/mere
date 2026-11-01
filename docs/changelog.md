@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.679 — 2026-11-01
+
+_C: generated programs and libraries compile with GCC 15's default C23 mode._
+
+Define the per-thread failure state once, before the thread trampoline and
+failure runtime. The previous repeated declarations were definitions under
+C23 and GCC rejected them. Failure targets and messages remain thread-local.
+
+`scripts/c_compiler_check.sh` compiles and runs generated programs and a C
+library host at `-O0` and `-O2`, in the compiler's default mode and in GNU C11,
+C17 and C23 modes. CI runs it with Clang on Linux and macOS and with GCC 14
+and 15 on Linux, covering nested failure capture, thread joins, coroutine
+switches and recovery after a library call fails.
+
 ## v0.1.678 — 2026-10-27
 
 _C, LLVM and RISC-V: `sock_getopt` and `sock_setopt` read and set a socket option. mere-ruby's getsockopt stops being a NoMethodError, and its setsockopt stops discarding the value._

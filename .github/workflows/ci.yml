@@ -53,6 +53,19 @@ jobs:
       - name: Installer failure and replacement checks
         run: python3 scripts/install_check.py
 
+      - name: Generate C compiler fixtures
+        run: opam exec -- sh scripts/c_compiler_check.sh --emit "$RUNNER_TEMP/c-compiler"
+
+      - name: Compile and run generated C with Clang
+        run: CC=clang sh scripts/c_compiler_check.sh --check "$RUNNER_TEMP/c-compiler"
+
+      - name: Compile and run generated C with GCC 14 and 15
+        if: runner.os == 'Linux'
+        run: |
+          for version in 14 15; do
+            docker run --rm -v "$RUNNER_TEMP/c-compiler:/cases:ro" "gcc:$version" sh /cases/check.sh --check /cases
+          done
+
   # The gates that are not `dune runtest`: cross-backend parity, the differential
   # checks against other people's implementations (node's URL and TextDecoder,
   # QEMU), self-hosting, and the language server.
