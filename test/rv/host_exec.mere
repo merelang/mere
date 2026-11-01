@@ -1,0 +1,52 @@
+// v0.1.682: proc_exec, proc_set_title, fd_except_ready and sock_send, line
+// for line against the C backend at both widths (rv_exec_check). On RISC-V
+// memu runs them on the host: the title is memu's, the exec replaces memu,
+// and the pid the guest asks for is memu's, so "the same pid" holds there too.
+extern fn proc_exec: str -> str -> str -> str -> str -> int;
+extern fn proc_set_title: str -> int;
+extern fn proc_spawn: str -> str -> str -> str -> int -> str -> int;
+extern fn proc_waitpid: int -> int -> int;
+extern fn fd_except_ready: int -> int;
+extern fn sock_send: int -> int -> int -> int -> int;
+extern fn tcp_listen_at: str -> int -> int -> int;
+extern fn tcp_connect: str -> int -> int;
+extern fn tcp_accept: int -> int;
+extern fn sock_local_addr: int -> str;
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn getpid: unit -> int;
+let z = chr 0;
+let two = chr 2;
+let buf = mem_alloc 64;
+// 1. a device answers (0 or 1: Darwin's select calls /dev/null exceptional,
+//    Linux's does not), and a bad descriptor is -1
+let dn = fd_open "/dev/null" "r" 0;
+let _ = print ("dev/null " ++ (let e = fd_except_ready dn in if e == 0 || e == 1 then "answers" else str_of_int e));
+let _ = print ("bad fd " ++ str_of_int (fd_except_ready (0 - 1)));
+// 2. an out-of-band byte: sent with MSG_OOB (1 on both hosts and in Linux's
+//    numbers), and then pending on the accepted end
+let srv = tcp_listen_at "127.0.0.1" 0 8;
+let addr = sock_local_addr srv;
+let port = int_of_str (substring addr 5 (str_last_index_of addr " "));
+let cli = tcp_connect "127.0.0.1" port;
+let con = tcp_accept srv;
+let _ = print ("before " ++ str_of_int (fd_except_ready con));
+let _ = print ("sent " ++ str_of_int (sock_send cli buf (mem_copy_str buf 0 "hello") 1));
+let rec wait_oob = fn (i: int) ->
+  if i >= 200 then 0
+  else if fd_except_ready con == 1 then 1
+  else (let _ = fd_read dn buf 1 in wait_oob (i + 1));
+let _ = print ("oob " ++ str_of_int (wait_oob 0));
+let _ = print ("send on a bad fd " ++ str_of_int (sock_send (0 - 1) buf 1 0));
+// 3. the title ps shows
+let n = proc_set_title "hello world";
+let _ = print ("title " ++ (if n == 11 then "fits" else str_of_int n));
+let me = str_of_int (getpid ());
+let p1 = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "ps -o command= -p " ++ me ++ " | grep -c 'hello world'") "" "" (0 - 1) "";
+let _ = proc_waitpid p1 0;
+// 4. exec: a missing program answers, and then this process becomes sh
+let _ = print ("enoent " ++ str_of_int (proc_exec "/no/such/prog" "x" "" "" ""));
+let r = proc_exec "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "[ \"$$\" = \"$P\" ] && echo same-pid; echo $X; cd -P . && pwd") ("X=given" ++ z ++ "P=" ++ me) ("d" ++ two ++ "1" ++ two ++ "2") "/";
+print ("not reached " ++ str_of_int r)

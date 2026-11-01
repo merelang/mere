@@ -39,6 +39,10 @@ extern fn sys_openlog: str -> int -> int -> int;
 extern fn sys_setlogmask: int -> int;
 extern fn sys_closelog: unit -> int;
 extern fn sock_getopt: int -> int -> int -> str;
+extern fn sock_send: int -> int -> int -> int -> int;
+extern fn fd_except_ready: int -> int;
+extern fn proc_set_title: str -> int;
+extern fn proc_exec: str -> str -> str -> str -> str -> int;
 extern fn sock_setopt: int -> int -> int -> str -> int;
 extern fn socket: int -> int -> int -> int;
 extern fn listen: int -> int -> int;
@@ -111,6 +115,17 @@ let _ = say "getopt" (sock_getopt os4 (if dw then 65535 else 1) (if dw then 128 
 let _ = say "getopt type" (sock_getopt os4 (if dw then 65535 else 1) (if dw then 4104 else 3));
 let _ = say "setopt odd hex" (str_of_int (sock_setopt os4 6 1 "0"));
 let _ = tcp_close os4;
+// v0.1.682: send(2) with flags on a socket pair, select's third set on it
+// and on a closed descriptor, the title (its length), and an exec that fails
+let sp = sock_pair 1;
+let sp_a = sp / 1048576;
+let sp_b = sp % 1048576;
+let sb = mem_alloc 8;
+let _ = say "sock_send" (str_of_int (sock_send sp_a sb (mem_copy_str sb 0 "hey") 0));
+let _ = say "except on a pair" (str_of_int (fd_except_ready sp_b));
+let _ = say "except on -1" (str_of_int (fd_except_ready (0 - 1)));
+let _ = say "title" (str_of_int (proc_set_title "probe"));
+let _ = say "exec of nothing" (str_of_int (proc_exec "/no/such" "x" "" "" ""));
 // a refusal comes back as a negative int, and its errno is kept
 let bad = fd_open "/nonexistent/mere/llvm/ffi" "r" 0;
 let _ = say "fd_open missing" (str_of_int bad);

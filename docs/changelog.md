@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.682 — 2026-11-02
+
+_proc_exec, proc_set_title, sock_send and fd_except_ready: exec that keeps
+the pid, the title ps shows, and an out-of-band byte._
+
+mere-ruby's `exec` was a spawn and a wait, so the program ran under a new
+pid (test_process's exec_wordsplit); `$0 =` and `Process.setproctitle`
+changed nothing ps could see; `send(str, MSG_OOB)` was a plain write and
+`IO.select`'s third set was never asked.
+
+- `proc_exec path argv envp actions chdir` is `proc_spawn`'s contract
+  without the group, and the process becomes the program. Darwin has
+  `POSIX_SPAWN_SETEXEC`; elsewhere the actions, the directory and the
+  signal defaults are applied here and `execve(2)` runs. `proc_spawn` and
+  it share one body.
+- `proc_set_title t` writes the title over the argument strings, and the
+  environment strings that follow them (moved to the heap first), as
+  ruby's setproctitle does. The runtime finds the area itself
+  (`_NSGetArgv`, `/proc/self/stat`'s arg_start / arg_end), so an LLVM
+  program's main need not hand it over.
+- `sock_send fd p len flags` is `send(2)` with flags.
+- `fd_except_ready fd` is `select(2)`'s exceptfds with no wait. Measured:
+  Darwin's `poll(2)` never reports a TCP out-of-band byte as `POLLPRI`;
+  select does on both hosts.
+
+RISC-V: memu runs them on the host as calls 1048-1052 (1036 still carries
+exec's path, argv and envp); exec replaces memu, the title is memu's, and
+the guest's `MSG_*` flags are translated for a macOS host.
+
+`test/rv/host_exec` (rv_exec_check) matches C line for line at both widths;
+it also ran on Linux (ubuntu 24.04, clang 18). `native_probe` covers the four
+on LLVM.
+
 ## v0.1.681 — 2026-11-01
 
 _Wasm: enforce Map ownership across workers and guard Vec recycling._

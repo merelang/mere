@@ -432,6 +432,37 @@ else
 fi
 echo "rv_exec: $hspass passed, $hsfail failed for proc_spawn (both widths)"
 
+# host_exec (v0.1.682): proc_exec (a missing program, then this process
+# becoming sh with a given environment, a dup2 and a directory -- the pid
+# stays), proc_set_title as ps shows it, an out-of-band byte sent with
+# sock_send's MSG_OOB and seen by fd_except_ready -- against C. On RISC-V
+# memu runs them on the host: its title, its exec, its pid.
+name=host_exec
+hepass=0; hefail=0
+if "$MERE" -c "$ROOT/test/rv/host_exec.mere" > "$TMP/ref.c" 2>/dev/null \
+   && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
+  ( cd "$TMP" && ulimit -t 60; ./ref ) > "$TMP/i.out" 2>&1
+  for width in 32 64; do
+    if [ "$width" = 64 ]; then flag=-rv64; emu="$RVRUN64"; else flag=-rv; emu="$RVRUN"; fi
+    if ! "$MERE" $flag --ram 16 "$ROOT/test/rv/host_exec.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+      printf '  FAIL  %s:%s did not build\n' "$name" "$width"; head -2 "$TMP/rverr"; hefail=$((hefail+1)); rc=1; continue
+    fi
+    if [ -z "$emu" ]; then hepass=$((hepass+1)); continue; fi
+    ( cd "$TMP" && perl -e 'alarm 120; exec @ARGV' "$emu" 16 2>&1 ) | grep -a -v '^rvrun' > "$TMP/r.out"
+    if diff -q "$TMP/i.out" "$TMP/r.out" >/dev/null; then
+      printf '  ok    %s:%s (exec keeps the pid, the title ps shows, an out-of-band byte)\n' "$name" "$width"
+      hepass=$((hepass+1))
+    else
+      printf '  FAIL  %s:%s (RV%s disagrees with the C backend)\n' "$name" "$width" "$width"
+      diff -a "$TMP/i.out" "$TMP/r.out" | head -8 | sed 's/^/    /'
+      hefail=$((hefail+1)); rc=1
+    fi
+  done
+else
+  printf '  FAIL  %s: the C reference did not build\n' "$name"; hefail=$((hefail+1)); rc=1
+fi
+echo "rv_exec: $hepass passed, $hefail failed for proc_exec (both widths)"
+
 # host_files (v0.1.640): the file builtins over those descriptors -- File,
 # positioned reads and writes, lines, whole files as bytes, mkdir_p -- both widths.
 # host_fds (v0.1.634): the C runtime's descriptors -- fd_open with each mode,

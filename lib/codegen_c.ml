@@ -7164,6 +7164,8 @@ let native_ffi_names =
     (* v0.1.678: getsockopt(2) / setsockopt(2), which take a pointer and a
        length; the option's bytes cross as hex (an int option is 01000000) *)
     "sock_getopt"; "sock_setopt";
+    (* v0.1.682: send(2) with its flags (MSG_OOB), the bytes from the arena *)
+    "sock_send";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
        setrlimit move the limits through a `struct rlimit *`; getpriority and
@@ -7188,7 +7190,11 @@ let native_ffi_names =
        anything about it; and SIG_IGN, for a program that says so *)
     "proc_sig_catch"; "proc_sig_take"; "proc_sig_ignore";
     (* v0.1.660: posix_spawn with file actions, and waitpid, in Linux's numbers *)
-    "proc_spawn"; "proc_waitpid"; "proc_wait_status" ]
+    "proc_spawn"; "proc_waitpid"; "proc_wait_status";
+    (* v0.1.682: exec(2) with proc_spawn's arguments, the title ps shows, and
+       an out-of-band byte waiting (select's third set, which Darwin's poll
+       does not report) *)
+    "proc_exec"; "proc_set_title"; "fd_except_ready" ]
 
 (* TLS externs. Not implemented natively yet (needs libssl FFI). Stubbed so
    a native build LINKS and plaintext connections work; referenced by the
@@ -7354,7 +7360,7 @@ let native_ffi_flags (has : string -> bool) : native_ffi_flags =
   let ff_fdio =
     List.exists has
       [ "fd_open"; "fd_read"; "fd_write"; "fd_close"; "fd_seek"; "fd_dup";
-        "fd_sync"; "fd_isatty"; "fd_pipe" ] in
+        "fd_sync"; "fd_isatty"; "fd_pipe"; "fd_except_ready" ] in
   (* v0.1.550: declaring any proc_* limit/priority extern, or file_flock, pulls
      in <sys/resource.h> and <sys/file.h>. The same cost model again: two
      headers, no library, no build-line change. *)
@@ -7365,7 +7371,8 @@ let native_ffi_flags (has : string -> bool) : native_ffi_flags =
         "proc_getpriority"; "proc_setpriority"; "proc_last_errno";
         "file_flock"; "proc_sig_noop"; "proc_sig_default"; "proc_sig_raise";
         "proc_out_errno"; "proc_sig_catch"; "proc_sig_take"; "proc_sig_ignore";
-        "proc_spawn"; "proc_waitpid"; "proc_wait_status" ] in
+        "proc_spawn"; "proc_waitpid"; "proc_wait_status"; "proc_exec";
+        "proc_set_title" ] in
   { ff_tls; ff_midi; ff_window; ff_audio; ff_filestat; ff_fdio; ff_proclimit }
 
 let () = is_native_ffi_fwd := is_native_ffi
@@ -8024,6 +8031,16 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  __fd_errno = r == 0 ? 0 : errno;";
       "  return r == 0 ? 0 : -1;";
       "}";
+      "/* sock_send (v0.1.682): send(2) of len bytes at arena offset p with the";
+      "   flags as given (the platform's MSG_* numbers -- MSG_OOB is 1 on both";
+      "   hosts). The count sent, or -1 with errno kept. */";
+      "static long long sock_send(long long fd, long long p, long long len, long long flags) {";
+      "  if (fd < 0) { __fd_errno = EBADF; return -1; }";
+      "  if (len < 0) { __fd_errno = EINVAL; return -1; }";
+      "  ssize_t n = send((int)fd, __mem + p, (size_t)len, (int)flags);";
+      "  __fd_errno = n < 0 ? errno : 0;";
+      "  return n < 0 ? -1 : (long long)n;";
+      "}";
       "";
       "/* \"<family> <port> <address>\": inet / inet6 with getnameinfo's numeric";
       "   host (a scoped IPv6 address keeps its %zone, a v4-mapped one its";
@@ -8484,6 +8501,23 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "  if (pipe(fds) != 0) { __fd_errno = errno; return -1; }";
              "  __fd_errno = 0;";
              "  return ((long long)fds[0] << 32) | (long long)(unsigned int)fds[1];";
+             "}";
+             "";
+             "/* fd_except_ready (v0.1.682): is an exceptional condition pending on fd";
+             "   -- TCP's out-of-band byte -- now? select(2)'s third set with no wait:";
+             "   1, 0, or -1 with errno kept (EINVAL for a descriptor past FD_SETSIZE).";
+             "   select and not poll, because Darwin's poll(2) does not report";
+             "   out-of-band data as POLLPRI; select's exceptfds does on both hosts. */";
+             "#include <sys/select.h>";
+             "static long long fd_except_ready(long long fd) {";
+             "  if (fd < 0) { __fd_errno = EBADF; return -1; }";
+             "  if (fd >= FD_SETSIZE) { __fd_errno = EINVAL; return -1; }";
+             "  fd_set e; FD_ZERO(&e); FD_SET((int)fd, &e);";
+             "  struct timeval tv = { 0, 0 };";
+             "  int r = select((int)fd + 1, NULL, NULL, &e, &tv);";
+             "  if (r < 0) { __fd_errno = errno; return -1; }";
+             "  __fd_errno = 0;";
+             "  return (r > 0 && FD_ISSET((int)fd, &e)) ? 1 : 0;";
              "}" ]
        else "");
       (if filestat then
@@ -8900,8 +8934,16 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "  for (int i = 0; v[i]; i++) free(v[i]);";
              "  free(v);";
              "}";
-             "static long long proc_spawn(const char* path, const char* argv_s, const char* envp_s,";
-             "                            const char* actions_s, long long pgroup, const char* dir) {";
+             "/* proc_spawn's body, and proc_exec's (v0.1.682): with `setexec` the process";
+             "   BECOMES the program -- the same pid, no child -- by POSIX_SPAWN_SETEXEC";
+             "   where the platform has it (Darwin), and elsewhere by applying the";
+             "   actions, the directory and the signals here and calling execve(2).";
+             "   Either way a return is a failure, -errno; on the execve path an action";
+             "   that was applied before the failure stays applied. */";
+             "static void __free_split(char** v);";
+             "static long long __proc_exec_here(const char* path, char** argv, char** envp, char** acts, int nact, const char* dir);";
+             "static long long __proc_spawn_go(const char* path, const char* argv_s, const char* envp_s,";
+             "                                 const char* actions_s, long long pgroup, const char* dir, int setexec) {";
              "  int ac = 0, ec = 0, nact = 0;";
              "  char** argv = __split_sep(argv_s, __lang_str_size(argv_s), 0, 0, &ac);";
              "  char** envp = __split_sep(envp_s, __lang_str_size(envp_s), 0, 1, &ec);";
@@ -8910,6 +8952,11 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "  posix_spawn_file_actions_t fa; posix_spawnattr_t at;";
              "  int fa_ok = 0, at_ok = 0;";
              "  if (!argv || !envp || !acts) { r = -12; goto done; }                /* ENOMEM */";
+             "  /* what is written and not yet flushed goes now: an exec drops it */";
+             "  if (setexec) fflush(NULL);";
+             "#if !defined(__APPLE__)";
+             "  if (setexec) { r = __proc_exec_here(path, argv, envp, acts, nact, dir); goto done; }";
+             "#endif";
              "  if (posix_spawn_file_actions_init(&fa) != 0) { r = -12; goto done; }";
              "  fa_ok = 1;";
              "  for (int i = 0; i < nact; i++) {";
@@ -8949,6 +8996,9 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "    posix_spawnattr_setsigdefault(&at, &def);";
              "    posix_spawnattr_setsigmask(&at, &none);";
              "    if (pgroup >= 0) { fl |= POSIX_SPAWN_SETPGROUP; posix_spawnattr_setpgroup(&at, (pid_t)pgroup); }";
+             "#if defined(__APPLE__)";
+             "    if (setexec) fl |= POSIX_SPAWN_SETEXEC;";
+             "#endif";
              "    posix_spawnattr_setflags(&at, fl);";
              "  }";
              "  {";
@@ -8961,6 +9011,112 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "  if (at_ok) posix_spawnattr_destroy(&at);";
              "  __free_split(argv); __free_split(envp); __free_split(acts);";
              "  return r;";
+             "}";
+             "static long long proc_spawn(const char* path, const char* argv_s, const char* envp_s,";
+             "                            const char* actions_s, long long pgroup, const char* dir) {";
+             "  return __proc_spawn_go(path, argv_s, envp_s, actions_s, pgroup, dir, 0);";
+             "}";
+             "/* proc_exec (v0.1.682): proc_spawn's contract without the group, and this";
+             "   process becomes the program (exec(2): the pid stays). Answers only when";
+             "   it failed, -errno in Linux's numbers. */";
+             "static long long proc_exec(const char* path, const char* argv_s, const char* envp_s,";
+             "                           const char* actions_s, const char* dir) {";
+             "  return __proc_spawn_go(path, argv_s, envp_s, actions_s, -1, dir, 1);";
+             "}";
+             "static long long __proc_exec_here(const char* path, char** argv, char** envp, char** acts, int nact, const char* dir) {";
+             "  for (int i = 0; i < nact; i++) {";
+             "    int nf = 0;";
+             "    char** f = __split_sep(acts[i], strlen(acts[i]), 2, 1, &nf);";
+             "    int e = 0;";
+             "    if (!f) e = 12;";
+             "    else if (nf == 3 && strcmp(f[0], \"d\") == 0)";
+             "      e = dup2(atoi(f[1]), atoi(f[2])) < 0 ? errno : 0;";
+             "    else if (nf == 2 && strcmp(f[0], \"c\") == 0)";
+             "      e = close(atoi(f[1])) < 0 ? errno : 0;";
+             "    else if (nf == 5 && strcmp(f[0], \"o\") == 0) {";
+             "      int hf = __host_oflags(atoll(f[2]));";
+             "      if (hf < 0) e = 22;";
+             "      else {";
+             "        int to = atoi(f[1]);";
+             "        int fd = open(f[4], hf, (mode_t)atoll(f[3]));";
+             "        if (fd < 0) e = errno;";
+             "        else if (fd != to) { e = dup2(fd, to) < 0 ? errno : 0; close(fd); }";
+             "      }";
+             "    } else e = 22;";
+             "    __free_split(f);";
+             "    if (e != 0) return -(long long)__lin_errno(e);";
+             "  }";
+             "  if (dir[0] != 0 && chdir(dir) != 0) return -(long long)__lin_errno(errno);";
+             "  {";
+             "    int sigs[] = { SIGPIPE, SIGINT, SIGQUIT, SIGTERM, SIGHUP };";
+             "    for (int i = 0; i < 5; i++) signal(sigs[i], SIG_DFL);";
+             "    sigset_t none; sigemptyset(&none); sigprocmask(SIG_SETMASK, &none, NULL);";
+             "  }";
+             "  execve(path, argv, envp);";
+             "  return -(long long)__lin_errno(errno);";
+             "}";
+             "/* proc_set_title (v0.1.682): what ps(1) shows for this process. The";
+             "   argument strings the kernel laid out at exec are written over -- the";
+             "   area from argv[0] to the end of the last argument, which is what ps";
+             "   reads, and the environment's strings when they follow it, as ruby's";
+             "   setproctitle takes them (the environment is copied out first, so";
+             "   getenv still answers) -- with the title cut to fit and the rest";
+             "   zeroed. The area is";
+             "   found here and not handed in by main(): Darwin's _NSGetArgv, and";
+             "   Linux's arg_start / arg_end in /proc/self/stat, so an LLVM program";
+             "   (whose main is not this file's) finds it the same way. Answers the";
+             "   bytes of the title that fit, or -1 where no area is found. ⚠ args";
+             "   read after this see the title: read them first. */";
+             "#if defined(__APPLE__)";
+             "#include <crt_externs.h>";
+             "#endif";
+             "/* the end of the area after the environment strings that follow `end`";
+             "   one after another, each moved to the heap first (once) */";
+             "static int __title_env_moved = 0;";
+             "static char* __title_take_env(char** env, char* end) {";
+             "  if (env == NULL) return end;";
+             "  char* e = end;";
+             "  for (int i = 0; env[i]; i++) if (env[i] == e + 1) e = env[i] + strlen(env[i]);";
+             "  if (e != end && !__title_env_moved) {";
+             "    for (int i = 0; env[i]; i++) { char* c = strdup(env[i]); if (c) env[i] = c; }";
+             "    __title_env_moved = 1;";
+             "  }";
+             "  return __title_env_moved ? e : end;";
+             "}";
+             "static long long proc_set_title(const char* t) {";
+             "  char* start = NULL; size_t cap = 0;";
+             "#if defined(__APPLE__)";
+             "  int ac = *_NSGetArgc(); char** av = *_NSGetArgv();";
+             "  if (ac <= 0 || av == NULL || av[0] == NULL) return -1;";
+             "  start = av[0];";
+             "  char* end = av[0] + strlen(av[0]);";
+             "  for (int i = 1; i < ac; i++) if (av[i] == end + 1) end = av[i] + strlen(av[i]);";
+             "  end = __title_take_env(*_NSGetEnviron(), end);";
+             "  cap = (size_t)(end - start);";
+             "#elif defined(__linux__)";
+             "  FILE* f = fopen(\"/proc/self/stat\", \"r\");";
+             "  if (!f) return -1;";
+             "  char buf[4096]; size_t n = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[n] = 0;";
+             "  char* p = strrchr(buf, ')'); if (!p) return -1;";
+             "  /* past the comm: the state is field 3, arg_start 48 and arg_end 49 */";
+             "  unsigned long long as = 0, ae = 0; int field = 2;";
+             "  for (char* q = p + 1; *q; q++) if (*q == ' ') {";
+             "    field++;";
+             "    if (field == 48) as = strtoull(q + 1, NULL, 10);";
+             "    if (field == 49) { ae = strtoull(q + 1, NULL, 10); break; }";
+             "  }";
+             "  if (as == 0 || ae <= as) return -1;";
+             "  start = (char*)(uintptr_t)as;";
+             "  { extern char** environ; char* end = __title_take_env(environ, start + (ae - as) - 1);";
+             "    cap = (size_t)(end - start); }";
+             "#else";
+             "  return -1;";
+             "#endif";
+             "  size_t len = strlen(t);";
+             "  if (len > cap) len = cap;";
+             "  memmove(start, t, len);";
+             "  memset(start + len, 0, cap - len + 1);";
+             "  return (long long)len;";
              "}";
              "/* the status the last proc_waitpid took, in Linux's form */";
              "static _Thread_local long long __wait_status = 0;";
