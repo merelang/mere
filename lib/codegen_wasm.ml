@@ -4104,11 +4104,9 @@ and emit_expr (e : Ast.expr) : unit =
     vec_used := true;
     emit_instr "call $mere_vec_new"
   | Ast.App ({ node = Ast.Var "__vec_owned"; _ }, arg) ->
-    (* Container ownership is not tracked on this backend. The Node host can
-       run workers, so this constant does not establish thread ownership. *)
+    vec_used := true;
     emit_expr arg;
-    emit_instr "drop";
-    emit_instr "i64.const 1"
+    emit_instr "call $mere_vec_owner_ok ;; vec-owner-predicate"
   | Ast.App ({ node = Ast.Var "vec_len"; _ }, arg) ->
     vec_used := true;
     emit_expr arg;
@@ -4220,9 +4218,9 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "call $mere_vec_filter"
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
     (* Phase 15.7: In Wasm, OwnedVec and Vec use the same bump runtime, so
-       owned_vec_new = $mere_vec_new (alias). *)
+       OwnedVec uses an untracked constructor until its own handoff protocol exists. *)
     vec_used := true;
-    emit_instr "call $mere_vec_new"
+    emit_instr "call $mere_owned_vec_new"
   | Ast.App ({ node = Ast.Var "owned_vec_len"; _ }, arg) ->
     vec_used := true;
     emit_expr arg;
@@ -4242,7 +4240,7 @@ and emit_expr (e : Ast.expr) : unit =
        are the same, so just deep-copy with $mere_vec_clone. *)
     vec_used := true;
     emit_expr vec_e;
-    emit_instr "call $mere_vec_clone"
+    emit_instr "call $mere_vec_to_owned"
   | Ast.App ({ node = Ast.Var "owned_vec_to_vec"; _ }, owned_e) ->
     vec_used := true;
     emit_expr owned_e;
@@ -5827,7 +5825,8 @@ let emit_top_adapter2 (name : string) : string =
 let emit_eta_adapter_wasm (slug : string) (builtin : string) : string =
   let body =
     match builtin with
-    | "vec_new" | "owned_vec_new" -> "call $mere_vec_new"
+    | "vec_new" -> "call $mere_vec_new"
+    | "owned_vec_new" -> "call $mere_owned_vec_new"
     | "strbuf_new" -> "call $mere_strbuf_new"
     | "map_new" ->
       let k_tag =
@@ -8277,27 +8276,31 @@ let list_str_runtime_wasm = {|
     (i64.extend_i32_s (local.get $acc)))|}
 
 (* Phase 15.4: Vec[R, T] runtime — all element types share one
-   implementation because every Mere value lowers to a 4-byte i32 in
-   Wasm (scalars direct, structured types are memory offsets).
-   Layout: 16 bytes per vec — { data_ptr:i32, len:i32, cap:i32, _pad:i32 }.
-   `_pad` keeps the struct 16-byte-aligned (matches C / LLVM layout).
+   implementation with 8-byte i64 element slots (scalars directly,
+   structured values as widened memory offsets).
+   Layout: 16 bytes per vec — { data_ptr:i32, len:i32, cap:i32, owner:i32 }.
+   Threaded modules use an aligned atomic owner word; zero is untracked
+   OwnedVec storage and bit 30 marks a foreign read permanently.
    Push reallocates by appending a fresh buffer at the bump pointer
    (arena semantics — old buffers leak until process exit). *)
 let vec_runtime = {|
   (func $mere_vec_new (result i64)
     (local $v i32) (local $buf i32)
     (local.set $v (global.get $__lang_bump))
+    (local.set $v (i32.and (i32.add (local.get $v) (i32.const 7)) (i32.const -8))) ;; vec-owner
     (global.set $__lang_bump (i32.add (local.get $v) (i32.const 16)))
     (local.set $buf (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 32)))
     (i32.store offset=0 (local.get $v) (local.get $buf))
     (i32.store offset=4 (local.get $v) (i32.const 0))
     (i32.store offset=8 (local.get $v) (i32.const 4))
+    (call $mere_vec_owner_init (local.get $v)) ;; vec-owner
     (i64.extend_i32_s (local.get $v)))
   (func $mere_vec_push (param $v8 i64) (param $x i64) (result i64)
     (local $len i32) (local $cap i32) (local $buf i32)
     (local $new_buf i32) (local $i i32)
     (local $v i32)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 0))) (then (return (i64.const 0)))) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (local.set $cap (i32.load offset=8 (local.get $v)))
@@ -8351,12 +8354,14 @@ let vec_runtime = {|
   ;; calls them checked its whole index range once, before the loop.
   (func $mere_vec_get_unchecked (param $v8 i64) (param $i8 i64) (result i64)
     (local $v i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (i64.load
       (i32.add (i32.load offset=0 (local.get $v))
                (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8)))))
   (func $mere_vec_set_unchecked (param $v8 i64) (param $i8 i64) (param $x i64) (result i64)
     (local $v i32)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 1))) (then (return (i64.const 0)))) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (i64.store
       (i32.add (i32.load offset=0 (local.get $v))
@@ -8368,6 +8373,7 @@ let vec_runtime = {|
     (local $len i32) (local $buf i32)
     (local $v i32)
     (local $i i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
@@ -8385,12 +8391,14 @@ let vec_runtime = {|
                (i32.mul (local.get $i) (i32.const 8)))))
   (func $mere_vec_len (param $v8 i64) (result i64)
     (local $v i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (i64.extend_i32_s (i32.load offset=4 (local.get $v))))
   (func $mere_vec_set (param $v8 i64) (param $i8 i64) (param $x i64) (result i64)
     (local $len i32) (local $buf i32)
     (local $v i32)
     (local $i i32)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 1))) (then (return (i64.const 0)))) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
@@ -8415,6 +8423,7 @@ let vec_runtime = {|
   (func $mere_vec_clone (param $src8 i64) (result i64)
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
     (local $src i32)
+    (call $mere_vec_read (local.get $src8)) ;; vec-owner
     (local.set $src (i32.wrap_i64 (local.get $src8)))
     (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
     (local.set $len (i32.load offset=4 (local.get $src)))
@@ -8428,10 +8437,21 @@ let vec_runtime = {|
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (i64.extend_i32_s (local.get $new)))
+  (func $mere_owned_vec_new (result i64)
+    (local $v i64)
+    (local.set $v (call $mere_vec_new))
+    (i32.atomic.store offset=12 (i32.wrap_i64 (local.get $v)) (i32.const 0)) ;; vec-owner
+    (local.get $v))
+  (func $mere_vec_to_owned (param $src i64) (result i64)
+    (local $v i64)
+    (local.set $v (call $mere_vec_clone (local.get $src)))
+    (i32.atomic.store offset=12 (i32.wrap_i64 (local.get $v)) (i32.const 0)) ;; vec-owner
+    (local.get $v))
   ;; Phase 19.3: vec_reverse — in-place swap, returns 0 (unit).
   (func $mere_vec_reverse (param $v8 i64) (result i64)
     (local $lo i32) (local $hi i32) (local $buf i32) (local $tmp i64)
     (local $v i32)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 2))) (then (return (i64.const 0)))) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $buf (i32.load offset=0 (local.get $v)))
     (local.set $lo (i32.const 0))
@@ -8474,6 +8494,7 @@ let vec_runtime = {|
     (local $swap i32) (local $right i32)
     (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32)
     (local $outer_fn2 i32) (local $scratch i32)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 3))) (then (return (i64.const 0)))) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $n (i32.load offset=4 (local.get $v)))
     (if (i32.le_s (local.get $n) (i32.const 1))
@@ -8614,6 +8635,8 @@ let vec_runtime = {|
     (local $abuf i32) (local $bbuf i32)
     (local $a i32)
     (local $b i32)
+    (call $mere_vec_read (local.get $a8)) ;; vec-owner
+    (call $mere_vec_read (local.get $b8)) ;; vec-owner
     (local.set $a (i32.wrap_i64 (local.get $a8)))
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
@@ -8646,6 +8669,7 @@ let vec_higher_order_runtime = {|
   (func $mere_vec_iter (param $v8 i64) (param $cl8 i64) (result i64)
     (local $i i32) (local $len i32) (local $buf i32)
     (local $env i32) (local $fn i32) (local $v i32) (local $cl i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
@@ -8670,6 +8694,7 @@ let vec_higher_order_runtime = {|
     (local $outer_env i32) (local $outer_fn i32) (local $v i32) (local $outer_cl i32)
     (local $inner_cl i32) (local $inner_env i32) (local $inner_fn i32) (local $elem i64)
     (local $outer_fn2 i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $outer_cl (i32.wrap_i64 (local.get $outer_cl8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
@@ -8719,6 +8744,7 @@ let vec_higher_order_runtime = {|
   (func $mere_vec_map (param $v8 i64) (param $cl8 i64) (result i64)
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
     (local $env i32) (local $fn i32) (local $mapped i64) (local $v i32) (local $cl i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
@@ -8744,6 +8770,7 @@ let vec_higher_order_runtime = {|
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
     (local $env i32) (local $fn i32) (local $elem i64) (local $keep i64)
     (local $v i32) (local $cl i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $new (i32.wrap_i64 (call $mere_vec_new)))
@@ -8832,12 +8859,14 @@ let simd_runtime_wasm () =
     (call $__mere_box_f64 (f64.add (f64x2.extract_lane 0 (local.get $x)) (f64x2.extract_lane 1 (local.get $x)))))
   (func $mere_f64x2_load_unchecked (param $v8 i64) (param $i8 i64) (result i64)
     (local $slot i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $slot (i32.add (i32.load offset=0 (i32.wrap_i64 (local.get $v8))) (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8))))
     (call $__mere_box_v128
       (f64x2.replace_lane 1
         (f64x2.splat (f64.load offset=0 align=8 (i32.wrap_i64 (i64.load offset=0 (local.get $slot)))))
         (f64.load offset=0 align=8 (i32.wrap_i64 (i64.load offset=8 (local.get $slot)))))))
   (func $mere_f64x2_load (param $v8 i64) (param $i8 i64) (result i64)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
                 (i64.gt_s (i64.add (local.get $i8) (i64.const 2))
                           (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $v8))))))
@@ -8845,12 +8874,14 @@ let simd_runtime_wasm () =
     (call $mere_f64x2_load_unchecked (local.get $v8) (local.get $i8)))
   (func $mere_f64x2_store_unchecked (param $v8 i64) (param $i8 i64) (param $x8 i64) (result i64)
     (local $slot i32) (local $x v128)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 4))) (then (return (i64.const 0)))) ;; vec-owner
     (local.set $slot (i32.add (i32.load offset=0 (i32.wrap_i64 (local.get $v8))) (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8))))
     (local.set $x (v128.load offset=0 align=16 (i32.wrap_i64 (local.get $x8))))
     (i64.store offset=0 (local.get $slot) (call $__mere_box_f64 (f64x2.extract_lane 0 (local.get $x))))
     (i64.store offset=8 (local.get $slot) (call $__mere_box_f64 (f64x2.extract_lane 1 (local.get $x))))
     (i64.const 0))
   (func $mere_f64x2_store (param $v8 i64) (param $i8 i64) (param $x8 i64) (result i64)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 4))) (then (return (i64.const 0)))) ;; vec-owner
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
                 (i64.gt_s (i64.add (local.get $i8) (i64.const 2))
                           (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $v8))))))
@@ -8967,11 +8998,13 @@ let simd_runtime_wasm () =
     (call $__mere_box_f64 (f64.add (f64x2.extract_lane 0 (local.get $x)) (f64x2.extract_lane 1 (local.get $x)))))
   (func $mere_f64x2_load_unchecked_v (param $v8 i64) (param $i8 i64) (result v128)
     (local $slot i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $slot (i32.add (i32.load offset=0 (i32.wrap_i64 (local.get $v8))) (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8))))
     (f64x2.replace_lane 1
       (f64x2.splat (f64.load offset=0 align=8 (i32.wrap_i64 (i64.load offset=0 (local.get $slot)))))
       (f64.load offset=0 align=8 (i32.wrap_i64 (i64.load offset=8 (local.get $slot))))))
   (func $mere_f64x2_load_v (param $v8 i64) (param $i8 i64) (result v128)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
                 (i64.gt_s (i64.add (local.get $i8) (i64.const 2))
                           (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $v8))))))
@@ -8979,11 +9012,13 @@ let simd_runtime_wasm () =
     (call $mere_f64x2_load_unchecked_v (local.get $v8) (local.get $i8)))
   (func $mere_f64x2_store_unchecked_v (param $v8 i64) (param $i8 i64) (param $x v128) (result i64)
     (local $slot i32)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 4))) (then (return (i64.const 0)))) ;; vec-owner
     (local.set $slot (i32.add (i32.load offset=0 (i32.wrap_i64 (local.get $v8))) (i32.mul (i32.wrap_i64 (local.get $i8)) (i32.const 8))))
     (i64.store offset=0 (local.get $slot) (call $__mere_box_f64 (f64x2.extract_lane 0 (local.get $x))))
     (i64.store offset=8 (local.get $slot) (call $__mere_box_f64 (f64x2.extract_lane 1 (local.get $x))))
     (i64.const 0))
   (func $mere_f64x2_store_v (param $v8 i64) (param $i8 i64) (param $x v128) (result i64)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 4))) (then (return (i64.const 0)))) ;; vec-owner
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
                 (i64.gt_s (i64.add (local.get $i8) (i64.const 2))
                           (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $v8))))))
@@ -12140,6 +12175,50 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         ~post:(fresh_str_offset " out of range 0..255")
     else ""
   in
+  let vec_owner_section =
+    if not (!vec_used || !simd_used) then ""
+    else if not !uses_threads then ""
+    else begin
+      let ops = ["vec_push"; "vec_set"; "vec_reverse"; "vec_sort"; "f64x2_store"] in
+      let failures = List.mapi (fun i op ->
+        let foreign = fresh_str_offset (op ^ ": a Vec made by one thread was written by another -- a Vec is not safe to share between threads; give it one owner thread and send it messages over a Channel") in
+        let shared = fresh_str_offset (op ^ ": a Vec another thread has read was written -- once a second thread reads a Vec it is shared, and a shared Vec is read-only; give it one owner thread and send it messages over a Channel") in
+        Printf.sprintf
+          "    (if (i32.eq (local.get $op) (i32.const %d)) (then (drop (call $__lang_fail (if (result i64) (i32.eq (local.get $owner) (i32.or (call $mere_vec_tid) (i32.const 1073741824))) (then (i64.const %d)) (else (i64.const %d))))) (return (i32.const 0))))\n"
+          i shared foreign) ops |> String.concat "" in
+      let missing = fresh_str_offset "Wasm host must initialize a unique __lang_thread_id for every instance" in
+      Printf.sprintf {|
+  (func $mere_vec_tid (result i32)
+    (if (i32.or (i32.eqz (global.get $__lang_thread_id))
+                (i32.ge_u (global.get $__lang_thread_id) (i32.const 1073741824)))
+      (then (drop (call $__lang_fail (i64.const %d))) (unreachable)))
+    (global.get $__lang_thread_id))
+  (func $mere_vec_owner_init (param $v i32)
+    (i32.atomic.store offset=12 (local.get $v) (call $mere_vec_tid)))
+  (func $mere_vec_read (param $v8 i64)
+    (local $v i32) (local $owner i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $owner (i32.atomic.load offset=12 (local.get $v)))
+    (if (i32.and (i32.and (i32.ne (local.get $owner) (i32.const 0))
+                         (i32.eqz (i32.and (local.get $owner) (i32.const 1073741824))))
+                (i32.ne (local.get $owner) (call $mere_vec_tid)))
+      (then (drop (i32.atomic.rmw.or offset=12 (local.get $v) (i32.const 1073741824))))))
+  (func $mere_vec_owner_ok (param $v8 i64) (result i64)
+    (local $owner i32)
+    (local.set $owner (i32.atomic.load offset=12 (i32.wrap_i64 (local.get $v8))))
+    (i64.extend_i32_u (i32.or (i32.eqz (local.get $owner))
+                            (i32.eq (local.get $owner) (call $mere_vec_tid)))))
+  (func $mere_vec_write (param $v8 i64) (param $op i32) (result i32)
+    (local $owner i32)
+    (local.set $owner (i32.atomic.load offset=12 (i32.wrap_i64 (local.get $v8))))
+    (if (i32.or (i32.eqz (local.get $owner))
+                (i32.eq (local.get $owner) (call $mere_vec_tid)))
+      (then (return (i32.const 1))))
+%s
+    (unreachable))
+|} missing failures
+    end
+  in
   let data_section =
     if !str_data_decls = [] then ""
     else String.concat "\n" (List.rev !str_data_decls) ^ "\n"
@@ -12470,6 +12549,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       ^ "  (func $mere_spawn (param i64) (result i64)\n\
         \    (i64.extend_i32_u (call $mere_spawn_h (i32.wrap_i64 (local.get 0)))))\n\
         \  (global $__lang_in_thread (export \"__lang_in_thread\") (mut i32) (i32.const 0))\n\
+        \  (global $__lang_thread_id (export \"__lang_thread_id\") (mut i32) (i32.const 0))\n\
         \  (func $mere_join (param i64) (result i64)\n\
         \    (local $r i32)\n\
         \    (local.set $r (call $mere_join_h (i32.wrap_i64 (local.get 0))))\n\
@@ -12511,7 +12591,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     else "  (memory (export \"memory\") 1024)\n")
     ^ boundary_shims
   in
-  let vec_runtime_section = if !vec_used then vec_runtime else "" in
+  let vec_runtime_section = vec_owner_section ^ (if !vec_used then vec_runtime else "") in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
@@ -12962,6 +13042,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   (func $mere_vec_to_list (param $v8 i64) (result i64)
     (local $v i32) (local $len i32) (local $i i32) (local $acc i32)
     (local $tup i32) (local $node i32)
+    (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $len (i32.load offset=4 (local.get $v)))
     ;; Nil cell (16 bytes): { tag }
@@ -13751,6 +13832,14 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     vec_higher_order_section strbuf_section map_key_eq_section map_runtime_section
     (args_host_section ^ env_host_section ^ lines_host_section ^ stdin_host_section ^ fma_section ^ f64x2_fma_section ^ vec_to_list_section ^ lb_section) list_len_section
     fn_section component_section local_decl indented_body
+  |> (fun wat ->
+      if !uses_threads then wat
+      else String.split_on_char '\n' wat
+        |> List.filter_map (fun line ->
+            if String.ends_with ~suffix:";; vec-owner" line then None
+            else if String.ends_with ~suffix:";; vec-owner-predicate" line then Some "    drop\n    i64.const 1"
+            else Some line)
+        |> String.concat "\n")
   |> prune_dead_fail_checks
 
 (* The table `mere -wg` prints: which Mere line each Wasm function came from.

@@ -1402,7 +1402,11 @@ Two things are allowed through on purpose:
 
 **At run time (v0.1.575)**, a `Map`, `Vec`, `StrBuf`, `ByteBuf` or `ListBuf`
 remembers the thread that made it, and a WRITE from any other thread stops the
-program, on the interpreter, C and LLVM alike:
+program, on the interpreter, C and LLVM alike. Threaded Wasm modules also
+guard `Vec` as of v0.1.680; the other Wasm containers and its `OwnedVec`
+handoff remain unguarded. See the [backend coverage and host identity
+requirements](memory-model.md#runtime-guards-and-coverage-limits). A foreign
+Vec write reports:
 
 ```
 vec_push: a Vec made by one thread was written by another -- a Vec is not safe
@@ -1427,10 +1431,11 @@ refuses one honest shape: threads read a table, are joined, and then the owner
 updates it. Build a new table for the next phase instead, or keep the table in
 one thread and ask it over a `Channel`.
 
-A program that never spawns pays one load of a global per read and per write;
-one that does pays a thread-id comparison.
+On the native backends, a program that never spawns pays one load of a global
+per read and per write; one that does pays a thread-id comparison.
 
-**`OwnedVec`** is moved, not shared: the closure given to `spawn` takes the
+**`OwnedVec`** on the interpreter, C and LLVM is moved, not shared: the closure
+given to `spawn` takes the
 `OwnedVec`s it captures with it, and they belong to the new thread. Any other
 thread's use fails (`owned_vec_push: an OwnedVec belongs to one thread ...`) --
 one reached through a closure handed to a library that spawns it, say, where

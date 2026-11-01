@@ -412,7 +412,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.679)
+## 4. Implemented memory behavior (v0.1.680)
 
 ### Concurrency and sharing
 
@@ -475,17 +475,34 @@ their owner thread. A foreign write fails. A foreign read makes the
 container permanently shared and read-only: a later write by its owner
 fails too, even after readers have been joined. `OwnedVec` has a separate
 ownership handoff when moved into a spawned closure. These behaviors are
-exercised by [`owner_check.sh`](https://github.com/merelang/mere/blob/v0.1.679/scripts/owner_check.sh).
+exercised by [`owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/owner_check.sh).
 
-**Wasm and RISC-V do not implement these native container-owner guards.**
-The frontend checks still apply, but an opaque callback accepted by those
-checks does not gain the native runtime protection. For example,
-[`test/owner/param_vec.mere`](https://github.com/merelang/mere/blob/v0.1.679/test/owner/param_vec.mere) passes a handler
-through a function parameter: native ownership checks reject its foreign
-write, while the shipped Node Wasm host currently runs it and prints `2`.
-Keep mutable containers within one worker and exchange messages over
-channels when targeting Wasm. RISC-V green threads also have different
-runtime semantics from native threads.
+**Threaded Wasm modules also guard `Vec` (v0.1.680).** A foreign write
+fails before mutation, and a foreign read permanently prevents later writes,
+including after `join`. The checks cover ordinary, range-versioned and SIMD
+accesses. Read-only sharing and a worker's own mutable Vec remain valid.
+For example, [`test/owner/param_vec.mere`](https://github.com/merelang/mere/blob/main/test/owner/param_vec.mere)
+now rejects the foreign write on the Node Wasm host as it does natively.
+The Wasm cases and negative controls in
+[`owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/owner_check.sh)
+cover these rules and worker identity separation.
+
+An embedding host must set the exported mutable `__lang_thread_id` global
+before executing Mere code: use a distinct integer in `1..1073741823` for
+each instance sharing memory. `scripts/run_wasm.js` uses `1` for the main
+instance and `tid + 1` for each worker. Zero or an out-of-range identity is
+refused by name when a Vec is used. The existing `__lang_in_thread` global
+remains a boolean for failure propagation. Modules that use neither thread nor channel builtins omit the Vec owner
+checks and atomic metadata accesses.
+
+**Wasm's `Map`, `StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` still lack
+these runtime owner guards.** `OwnedVec` keeps its existing move behavior
+without a runtime handoff check. RISC-V also lacks the native container-owner
+guards. Frontend checks still apply on both backends, but an opaque callback
+accepted by them gains no additional protection for these containers. Keep
+mutable containers within one worker and exchange messages over channels.
+The Vec checks enforce access rules at operation boundaries; they do not
+lock an entire operation against concurrent access or synchronize FFI code.
 
 FFI code and the implementation behind a `sync type` require the capability
 author to provide the promised synchronization. The `--lib` host boundary

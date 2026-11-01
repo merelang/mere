@@ -1,0 +1,7 @@
+// A foreign read freezes a Vec permanently, including after join.
+let mk = fn () -> let v = vec_new () in let _ = vec_push v 10 in v;
+let v = mk ();
+let launch = fn (f: unit -> unit) -> spawn f;
+let h = launch (fn () -> let _ = vec_get v 0 in ());
+let _ = join h;
+vec_push v 20
