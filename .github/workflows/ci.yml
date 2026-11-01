@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 # EVERY GATE STEP RUNS, EVEN AFTER ONE FAILS (`if: ${{ !cancelled() }}`).
 #
