@@ -1,0 +1,29 @@
+// Grow, update and delete pointer-valued entries in both generated layouts.
+// Deleted scalar entries trigger the hashed runtime's tombstone squeezing.
+let work = fn () ->
+  let ints = map_new () in
+  let pairs = map_new () in
+  let rec fill = fn (i: int) -> if i == 128 then () else
+    let value = "value:" ++ str_of_int i in
+    let _ = map_set ints i value in
+    let _ = map_set pairs (i, "key") value in
+    fill (i + 1) in
+  let _ = fill 0 in
+  let rec erase = fn (i: int) -> if i == 100 then () else
+    let _ = map_delete ints i in
+    let _ = map_delete pairs (i, "key") in
+    erase (i + 1) in
+  let _ = erase 0 in
+  let _ = map_set ints 127 "updated" in
+  let _ = map_set pairs (127, "key") "updated" in
+  let rec check = fn (i: int) -> if i == 127 then 0 else
+    let want = "value:" ++ str_of_int i in
+    let score = if map_get ints i == want && map_get pairs (i, "key") == want then 2 else 0 in
+    score + check (i + 1) in
+  check 100 + map_len ints + map_len pairs +
+    (if map_get ints 127 == "updated" && map_get pairs (127, "key") == "updated" then 2 else 0);
+let results = channel_new ();
+let h = spawn (fn () -> channel_send results (work ()));
+let own_total = work ();
+let _ = join h;
+print_int (own_total + channel_recv results)

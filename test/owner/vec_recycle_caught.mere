@@ -1,0 +1,13 @@
+// Local recycling still works; caught foreign recycling leaves the Vec intact.
+let mk = fn () -> let v = vec_new () in let _ = vec_push v 3 in v;
+let v = mk ();
+let result = channel_new ();
+let launch = fn (f: unit -> unit) -> spawn f;
+let h = launch (fn () ->
+  let own = vec_new () in
+  let _ = vec_push own 4 in
+  let _ = vec_recycle own in
+  let _ = vec_push own 7 in
+  channel_send result (try_or (fn () -> let _ = vec_recycle v in 0) (vec_get own 0)));
+let _ = join h;
+print (str_of_int (channel_recv result) ++ ":" ++ str_of_int (vec_len v))

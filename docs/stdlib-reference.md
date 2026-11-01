@@ -1402,9 +1402,10 @@ Two things are allowed through on purpose:
 
 **At run time (v0.1.575)**, a `Map`, `Vec`, `StrBuf`, `ByteBuf` or `ListBuf`
 remembers the thread that made it, and a WRITE from any other thread stops the
-program, on the interpreter, C and LLVM alike. Threaded Wasm modules also
-guard `Vec` as of v0.1.680; the other Wasm containers and its `OwnedVec`
-handoff remain unguarded. See the [backend coverage and host identity
+program on the interpreter, C and LLVM, with LLVM inline exceptions listed
+in the memory contract. Threaded Wasm modules also
+guard `Vec` as of v0.1.680 and `Map` as of v0.1.681; other Wasm containers
+and `OwnedVec` handoff remain unguarded. See the [backend coverage and host identity
 requirements](memory-model.md#runtime-guards-and-coverage-limits). A foreign
 Vec write reports:
 

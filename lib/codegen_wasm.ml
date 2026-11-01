@@ -4301,7 +4301,7 @@ and emit_expr (e : Ast.expr) : unit =
     let k_tag = map_key_tag_of_wasm arg.Ast.ty arg.Ast.loc in
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
     emit_expr arg;
-    emit_instr (Printf.sprintf "call $mere_map_%s_clear" k_tag)
+    emit_instr (Printf.sprintf "call $mere_map_%s_recycle" k_tag)
   | Ast.App ({ node = Ast.Var "map_clear"; _ }, arg) ->
     let k_tag = map_key_tag_of_wasm arg.Ast.ty arg.Ast.loc in
     (if k_tag = "int" then map_int_used := true else map_str_used := true);
@@ -4317,10 +4317,7 @@ and emit_expr (e : Ast.expr) : unit =
     (* v0.1.644: semantically "make it empty"; no per-container arenas here *)
     vec_used := true;
     emit_expr arg;
-    emit_instr "i32.wrap_i64";
-    emit_instr "i32.const 0";
-    emit_instr "i32.store offset=4";
-    emit_instr "i64.const 0"  (* unit *)
+    emit_instr "call $mere_vec_recycle"
   | Ast.App ({ node = Ast.Var ("map_compact" | "vec_compact"); _ }, arg) ->
     (* v0.1.297: compaction is an optimization with no observable behaviour;
        this backend's bump heap has no per-container arenas to swap, so the
@@ -8394,6 +8391,10 @@ let vec_runtime = {|
     (call $mere_vec_read (local.get $v8)) ;; vec-owner
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (i64.extend_i32_s (i32.load offset=4 (local.get $v))))
+  (func $mere_vec_recycle (param $v8 i64) (result i64)
+    (if (i32.eqz (call $mere_vec_write (local.get $v8) (i32.const 5))) (then (return (i64.const 0)))) ;; vec-owner
+    (i32.store offset=4 (i32.wrap_i64 (local.get $v8)) (i32.const 0))
+    (i64.const 0))
   (func $mere_vec_set (param $v8 i64) (param $i8 i64) (param $x i64) (result i64)
     (local $len i32) (local $buf i32)
     (local $v i32)
@@ -9592,8 +9593,9 @@ let write_file_bytes_runtime_wasm ~pre ~post = Printf.sprintf {|
       (then (return (call $__lang_fail_num (i64.const %d) (local.get $x) (i64.const %d)))))
     (local.get $r))|} pre post
 
-(* Phase 15.10: Map[R, K, V] runtime — per-K only (V is i32 for all).
+(* Phase 15.10: Map[R, K, V] runtime — per-K only (values use i64 slots).
    Layout: { keys:i32, values:i32, len:i32, cap:i32 } = 16 bytes.
+   Threaded modules align the header and append an atomic owner word.
    Linear scan; on reaching cap, allocate a new array via bump
    (arena semantics). *)
 
@@ -9727,7 +9729,9 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
   (func $mere_map_%s_new (result i64)
     (local $m i32) (local $keys i32) (local $values i32)
     (local.set $m (global.get $__lang_bump))
+    (local.set $m (i32.and (i32.add (local.get $m) (i32.const 7)) (i32.const -8))) ;; map-owner
     (global.set $__lang_bump (i32.add (local.get $m) (i32.const 16)))
+    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 4))) ;; map-owner
     (local.set $keys (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 32)))
     (local.set $values (global.get $__lang_bump))
@@ -9736,12 +9740,14 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (i32.store offset=4 (local.get $m) (local.get $values))
     (i32.store offset=8 (local.get $m) (i32.const 0))
     (i32.store offset=12 (local.get $m) (i32.const 4))
+    (call $mere_map_owner_init (i32.add (local.get $m) (i32.const 16))) ;; map-owner
     (i64.extend_i32_u (local.get $m)))
   (func $mere_map_%s_set (param $m8 i64) (param $k i64) (param $v i64) (result i64)
     (local $m i32)
     (local $i i32) (local $len i32) (local $cap i32)
     (local $keys i32) (local $values i32)
     (local $new_keys i32) (local $new_values i32)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16)) (i32.const 0))) (then (return (i64.const 0)))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
@@ -9814,6 +9820,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
   (func $mere_map_%s_get (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
     (local $i i32) (local $len i32) (local $keys i32) (local $values i32)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
@@ -9835,6 +9842,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
   (func $mere_map_%s_has (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
     (local $i i32) (local $len i32) (local $keys i32)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
@@ -9851,11 +9859,13 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
         (br $scan_lp)))
     (i64.const 0))
   (func $mere_map_%s_len (param $m8 i64) (result i64)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16))) ;; map-owner
     (i64.extend_i32_s (i32.load offset=8 (i32.wrap_i64 (local.get $m8)))))
   ;; v0.1.298: map_clear -- len = 0. O(1); the mass-deletion primitive
   ;; (map_delete shifts the arrays per call, so emptying a map with it is
   ;; quadratic time).
   (func $mere_map_%s_clear (param $m8 i64) (result i64)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16)) (i32.const 2))) (then (return (i64.const 0)))) ;; map-owner
     (i32.store offset=8 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
     (i64.const 0))
   ;; Phase 19.2: map_iter — call outer(k) → inner closure, then inner(v).
@@ -9866,6 +9876,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
     (local $keys i32) (local $values i32)
     (local $outer_env i32) (local $outer_fn i32)
     (local $k i64) (local $v i64) (local $inner_cl i32) (local $outer_fn2 i32)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len    (i32.load offset=8 (local.get $m)))
@@ -9906,6 +9917,7 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
   (func $mere_map_%s_delete (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
     (local $i i32) (local $j i32) (local $len i32) (local $keys i32) (local $values i32)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16)) (i32.const 1))) (then (return (i64.const 0)))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $len (i32.load offset=8 (local.get $m)))
     (local.set $keys (i32.load offset=0 (local.get $m)))
@@ -9937,6 +9949,11 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
         (br $find_lp)))
     (i64.const 0))"
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
+    ^ Printf.sprintf {|
+  (func $mere_map_%s_recycle (param $m8 i64) (result i64)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 16)) (i32.const 3))) (then (return (i64.const 0)))) ;; map-owner
+    (call $mere_map_%s_clear (local.get $m8)))
+|} k_tag k_tag
 
 (* O(1) Wasm map for scalar keys (int / bool / str / unit): open-addressing
    hash index over the insertion-order keys/values arrays, mirroring the C
@@ -9986,7 +10003,8 @@ let emit_map_key_hash_wasm (k_ty : Ast.ty) : string =
 let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   Printf.sprintf {|
-  ;; Q-063: the header is 36 bytes now. 24 = dead[] (one byte per dense slot,
+  ;; Q-063: the base header is 36 bytes. Threaded modules append an owner word.
+  ;; 24 = dead[] (one byte per dense slot,
   ;; non-zero means vacated), 28 = live (what _len answers), 32 = idx_used
   ;; (occupied index slots: live entries PLUS vacated ones, since a vacated slot
   ;; still lengthens every probe through it). Delete used to shift the dense
@@ -9997,7 +10015,9 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local $m i32) (local $keys i32) (local $values i32) (local $idx i32) (local $i i32)
     (local $dead i32)
     (local.set $m (global.get $__lang_bump))
+    (local.set $m (i32.and (i32.add (local.get $m) (i32.const 7)) (i32.const -8))) ;; map-owner
     (global.set $__lang_bump (i32.add (local.get $m) (i32.const 36)))
+    (global.set $__lang_bump (i32.add (global.get $__lang_bump) (i32.const 4))) ;; map-owner
     (local.set $keys (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $keys) (i32.const 32)))
     (local.set $values (global.get $__lang_bump))
@@ -10022,6 +10042,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
       (i32.store (i32.add (local.get $idx) (i32.mul (local.get $i) (i32.const 4))) (i32.const -1))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $fl)))
+    (call $mere_map_owner_init (i32.add (local.get $m) (i32.const 36))) ;; map-owner
     (i64.extend_i32_u (local.get $m)))
   (func $mere_map_%s_reindex (param $m i32) (param $newcap i32)
     (local $ni i32) (local $i i32) (local $s i32) (local $len i32) (local $keys i32) (local $ncm1 i32) (local $h i32)
@@ -10106,6 +10127,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local $keys i32) (local $values i32) (local $len i32) (local $cap i32) (local $occ i32)
     (local $nk i32) (local $nv i32) (local $i i32) (local $newlen i32)
     (local $reuse i32) (local $dead i32) (local $nd i32) (local $live i32)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36)) (i32.const 0))) (then (return (i64.const 0)))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $h (i32.wrap_i64 (call $mere_map_key_hash_%s (local.get $k))))
     (local.set $m (i32.wrap_i64 (local.get $m8)))
@@ -10205,6 +10227,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
   (func $mere_map_%s_get (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
     (local $s i32) (local $idx i32) (local $icm1 i32) (local $keys i32) (local $values i32) (local $occ i32)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $icm1 (i32.sub (i32.load offset=20 (local.get $m)) (i32.const 1)))
@@ -10231,6 +10254,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
   (func $mere_map_%s_has (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
     (local $s i32) (local $idx i32) (local $icm1 i32) (local $keys i32) (local $occ i32)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $icm1 (i32.sub (i32.load offset=20 (local.get $m)) (i32.const 1)))
@@ -10251,11 +10275,13 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
   ;; Q-063: the LIVE count. Offset 8 is the dense high-water mark and includes
   ;; tombstones, which no observer of the language may see.
   (func $mere_map_%s_len (param $m8 i64) (result i64)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36))) ;; map-owner
     (i64.extend_i32_s (i32.load offset=28 (i32.wrap_i64 (local.get $m8)))))
   ;; v0.1.298: map_clear -- O(1) where emptying one key at a time is a walk.
   ;; It resets the tombstone state too, and rebuilds the index, because leaving
   ;; vacated slots behind an empty map would make the next probe walk them.
   (func $mere_map_%s_clear (param $m8 i64) (result i64)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36)) (i32.const 2))) (then (return (i64.const 0)))) ;; map-owner
     (i32.store offset=8 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
     (i32.store offset=28 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
     (i32.store offset=32 (i32.wrap_i64 (local.get $m8)) (i32.const 0))
@@ -10268,6 +10294,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local $keys i32) (local $values i32)
     (local $outer_env i32) (local $outer_fn i32)
     (local $k i64) (local $v i64) (local $inner_cl i32) (local $dead i32) (local $outer_fn2 i32)
+    (call $mere_map_read (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $cl (i32.wrap_i64 (local.get $cl8)))
     (local.set $len    (i32.load offset=8 (local.get $m)))
@@ -10316,6 +10343,7 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     (local $s i32) (local $idx i32) (local $idxcap i32) (local $icm1 i32)
     (local $keys i32) (local $values i32) (local $occ i32) (local $len i32) (local $j i32)
     (local $dead i32) (local $live i32) (local $deadn i32)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36)) (i32.const 1))) (then (return (i64.const 0)))) ;; map-owner
     (local.set $m (i32.wrap_i64 (local.get $m8)))
     (local.set $idx (i32.load offset=16 (local.get $m)))
     (local.set $idxcap (i32.load offset=20 (local.get $m)))
@@ -10352,6 +10380,11 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
     k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag k_tag
     k_tag k_tag k_tag
+    ^ Printf.sprintf {|
+  (func $mere_map_%s_recycle (param $m8 i64) (result i64)
+    (if (i32.eqz (call $mere_map_write (i32.add (i32.wrap_i64 (local.get $m8)) (i32.const 36)) (i32.const 3))) (then (return (i64.const 0)))) ;; map-owner
+    (call $mere_map_%s_clear (local.get $m8)))
+|} k_tag k_tag
 
 let map_int_runtime_wasm = {|
   (func $mere_map_int_new (result i64)
@@ -12175,48 +12208,88 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         ~post:(fresh_str_offset " out of range 0..255")
     else ""
   in
-  let vec_owner_section =
-    if not (!vec_used || !simd_used) then ""
-    else if not !uses_threads then ""
-    else begin
-      let ops = ["vec_push"; "vec_set"; "vec_reverse"; "vec_sort"; "f64x2_store"] in
-      let failures = List.mapi (fun i op ->
-        let foreign = fresh_str_offset (op ^ ": a Vec made by one thread was written by another -- a Vec is not safe to share between threads; give it one owner thread and send it messages over a Channel") in
-        let shared = fresh_str_offset (op ^ ": a Vec another thread has read was written -- once a second thread reads a Vec it is shared, and a shared Vec is read-only; give it one owner thread and send it messages over a Channel") in
-        Printf.sprintf
-          "    (if (i32.eq (local.get $op) (i32.const %d)) (then (drop (call $__lang_fail (if (result i64) (i32.eq (local.get $owner) (i32.or (call $mere_vec_tid) (i32.const 1073741824))) (then (i64.const %d)) (else (i64.const %d))))) (return (i32.const 0))))\n"
-          i shared foreign) ops |> String.concat "" in
+
+  let container_tid_section =
+    if not !uses_threads ||
+       not (!vec_used || !simd_used || Hashtbl.length map_key_types > 0) then ""
+    else
       let missing = fresh_str_offset "Wasm host must initialize a unique __lang_thread_id for every instance" in
       Printf.sprintf {|
-  (func $mere_vec_tid (result i32)
+  (func $mere_container_tid (result i32)
     (if (i32.or (i32.eqz (global.get $__lang_thread_id))
                 (i32.ge_u (global.get $__lang_thread_id) (i32.const 1073741824)))
       (then (drop (call $__lang_fail (i64.const %d))) (unreachable)))
     (global.get $__lang_thread_id))
+|} missing
+  in
+  let vec_owner_section =
+    if not (!vec_used || !simd_used) then ""
+    else if not !uses_threads then ""
+    else begin
+      let ops = ["vec_push"; "vec_set"; "vec_reverse"; "vec_sort"; "f64x2_store"; "vec_recycle"] in
+      let failures = List.mapi (fun i op ->
+        let foreign = fresh_str_offset (op ^ ": a Vec made by one thread was written by another -- a Vec is not safe to share between threads; give it one owner thread and send it messages over a Channel") in
+        let shared = fresh_str_offset (op ^ ": a Vec another thread has read was written -- once a second thread reads a Vec it is shared, and a shared Vec is read-only; give it one owner thread and send it messages over a Channel") in
+        Printf.sprintf
+          "    (if (i32.eq (local.get $op) (i32.const %d)) (then (drop (call $__lang_fail (if (result i64) (i32.eq (local.get $owner) (i32.or (call $mere_container_tid) (i32.const 1073741824))) (then (i64.const %d)) (else (i64.const %d))))) (return (i32.const 0))))\n"
+          i shared foreign) ops |> String.concat "" in
+      Printf.sprintf {|
   (func $mere_vec_owner_init (param $v i32)
-    (i32.atomic.store offset=12 (local.get $v) (call $mere_vec_tid)))
+    (i32.atomic.store offset=12 (local.get $v) (call $mere_container_tid)))
   (func $mere_vec_read (param $v8 i64)
     (local $v i32) (local $owner i32)
     (local.set $v (i32.wrap_i64 (local.get $v8)))
     (local.set $owner (i32.atomic.load offset=12 (local.get $v)))
     (if (i32.and (i32.and (i32.ne (local.get $owner) (i32.const 0))
                          (i32.eqz (i32.and (local.get $owner) (i32.const 1073741824))))
-                (i32.ne (local.get $owner) (call $mere_vec_tid)))
+                (i32.ne (local.get $owner) (call $mere_container_tid)))
       (then (drop (i32.atomic.rmw.or offset=12 (local.get $v) (i32.const 1073741824))))))
   (func $mere_vec_owner_ok (param $v8 i64) (result i64)
     (local $owner i32)
     (local.set $owner (i32.atomic.load offset=12 (i32.wrap_i64 (local.get $v8))))
     (i64.extend_i32_u (i32.or (i32.eqz (local.get $owner))
-                            (i32.eq (local.get $owner) (call $mere_vec_tid)))))
+                            (i32.eq (local.get $owner) (call $mere_container_tid)))))
   (func $mere_vec_write (param $v8 i64) (param $op i32) (result i32)
     (local $owner i32)
     (local.set $owner (i32.atomic.load offset=12 (i32.wrap_i64 (local.get $v8))))
     (if (i32.or (i32.eqz (local.get $owner))
-                (i32.eq (local.get $owner) (call $mere_vec_tid)))
+                (i32.eq (local.get $owner) (call $mere_container_tid)))
       (then (return (i32.const 1))))
 %s
     (unreachable))
-|} missing failures
+|} failures
+    end
+  in
+
+  let map_owner_section =
+    if not !uses_threads || Hashtbl.length map_key_types = 0 then ""
+    else begin
+      let ops = ["map_set"; "map_delete"; "map_clear"; "map_recycle"] in
+      let failures = List.mapi (fun i op ->
+        let foreign = fresh_str_offset (op ^ ": a Map made by one thread was written by another -- a Map is not safe to share between threads; give it one owner thread and send it messages over a Channel") in
+        let shared = fresh_str_offset (op ^ ": a Map another thread has read was written -- once a second thread reads a Map it is shared, and a shared Map is read-only; give it one owner thread and send it messages over a Channel") in
+        Printf.sprintf
+          "    (if (i32.eq (local.get $op) (i32.const %d)) (then (drop (call $__lang_fail (if (result i64) (i32.eq (local.get $owner) (i32.or (call $mere_container_tid) (i32.const 1073741824))) (then (i64.const %d)) (else (i64.const %d))))) (return (i32.const 0))))\n"
+          i shared foreign) ops |> String.concat "" in
+      Printf.sprintf {|
+  ;; Callers pass an aligned owner word after the existing header: offset
+  ;; 16 in a linear map, 36 in a hashed map. Zero is not a valid Map owner.
+  (func $mere_map_owner_init (param $word i32)
+    (i32.atomic.store (local.get $word) (call $mere_container_tid)))
+  (func $mere_map_read (param $word i32)
+    (local $owner i32)
+    (local.set $owner (i32.atomic.load (local.get $word)))
+    (if (i32.and (i32.eqz (i32.and (local.get $owner) (i32.const 1073741824)))
+                (i32.ne (local.get $owner) (call $mere_container_tid)))
+      (then (drop (i32.atomic.rmw.or (local.get $word) (i32.const 1073741824))))))
+  (func $mere_map_write (param $word i32) (param $op i32) (result i32)
+    (local $owner i32)
+    (local.set $owner (i32.atomic.load (local.get $word)))
+    (if (i32.eq (local.get $owner) (call $mere_container_tid))
+      (then (return (i32.const 1))))
+%s
+    (unreachable))
+|} failures
     end
   in
   let data_section =
@@ -12591,7 +12664,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     else "  (memory (export \"memory\") 1024)\n")
     ^ boundary_shims
   in
-  let vec_runtime_section = vec_owner_section ^ (if !vec_used then vec_runtime else "") in
+  let vec_runtime_section = container_tid_section ^ vec_owner_section ^ map_owner_section ^ (if !vec_used then vec_runtime else "") in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
@@ -13836,7 +13909,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       if !uses_threads then wat
       else String.split_on_char '\n' wat
         |> List.filter_map (fun line ->
-            if String.ends_with ~suffix:";; vec-owner" line then None
+            if String.ends_with ~suffix:";; vec-owner" line || String.ends_with ~suffix:";; map-owner" line then None
             else if String.ends_with ~suffix:";; vec-owner-predicate" line then Some "    drop\n    i64.const 1"
             else Some line)
         |> String.concat "\n")

@@ -1,0 +1,15 @@
+// A Map made in one worker is frozen by a read in a second worker.
+let callbacks = channel_new ();
+let ready = channel_new ();
+let a = spawn (fn () ->
+  let m = map_new () in
+  let _ = map_set m 1 10 in
+  let _ = channel_send callbacks (fn () -> map_get m 1) in
+  let _ = channel_recv ready in
+  map_set m 1 20);
+let b = spawn (fn () ->
+  let read = channel_recv callbacks in
+  let _ = read () in
+  channel_send ready ());
+let _ = join b;
+print_int (try_or (fn () -> let _ = join a in 0) 7)

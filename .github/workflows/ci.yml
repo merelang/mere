@@ -845,7 +845,9 @@ jobs:
       # OwnedVec belongs to the thread spawn moved it into.
       - name: owner_check (a container is written only by the thread that made it)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
-        run: sh scripts/owner_check.sh --poison
+        run: |
+          sh scripts/owner_check.sh --poison
+          sh scripts/wasm_map_owner_check.sh --poison
 
       # A saturated call of a curried inner function allocates no closures on
       # C, LLVM and Wasm (Q-142, v0.1.583): mandelbrot's inner loop was 104
