@@ -1,0 +1,10 @@
+// A caught foreign write must neither mutate the Vec nor fail the worker.
+let mk = fn () -> let v = vec_new () in let _ = vec_push v 3 in v;
+let v = mk ();
+let result = channel_new ();
+let launch = fn (f: unit -> unit) -> spawn f;
+let h = launch (fn () ->
+  channel_send result (try_or (fn () -> let _ = vec_push v 4 in 0) 7));
+let _ = join h;
+let n = channel_recv result;
+print (str_of_int n ++ ":" ++ str_of_int (vec_len v))

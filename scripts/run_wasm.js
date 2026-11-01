@@ -228,6 +228,7 @@ const env = Object.assign({
   // in the spawned closure don't collide with other workers or the parent.
   if (instance.exports.__lang_bump) instance.exports.__lang_bump.value = bumpBase;
   if (instance.exports.__lang_in_thread) instance.exports.__lang_in_thread.value = 1;
+  if (instance.exports.__lang_thread_id) instance.exports.__lang_thread_id.value = tid + 1;
   // v0.1.600: the program's top-level values as they stood when this thread
   // was spawned. They are Wasm globals, one set per instance, so without this
   // the thread saw each of them as 0.
@@ -256,14 +257,19 @@ const env = Object.assign({
     }
     Atomics.store(s32, statusBase >> 2, failed ? 2 : 1);
   }
-  Atomics.store(st, 0, 1);
-  // v0.1.590: a failure is one line when it happens, whoever holds the handle
-  // (the main thread may be busy, so the worker writes it)
-  if (Atomics.load(st, 1) === 1 && Atomics.compareExchange(st, 3, 0, 1) === 0) {
-    const msg = Buffer.from(new Uint8Array(doneSab, 20, Atomics.load(st, 4))).toString("utf8");
-    fs.writeSync(2, "mere: thread " + tid + " failed: " + msg + "\\n");
+  try {
+    // v0.1.590: a failure is one line when it happens, whoever holds the handle
+    // (the main thread may be busy, so the worker writes it)
+    if (Atomics.load(st, 1) === 1 && Atomics.compareExchange(st, 3, 0, 1) === 0) {
+      const msg = Buffer.from(new Uint8Array(doneSab, 20, Atomics.load(st, 4))).toString("utf8");
+      fs.writeSync(2, "mere: thread " + tid + " failed: " + msg + "\\n");
+    }
+  } finally {
+    // join may observe completion and terminate the worker immediately. Try
+    // the diagnostic first, but always wake join even if that write throws.
+    Atomics.store(st, 0, 1);
+    Atomics.notify(st, 0);
   }
-  Atomics.notify(st, 0);
 })();
 `;
 
@@ -813,6 +819,9 @@ const wasmPath = process.argv[2];
   memory = needsSharedMem ? sharedMemory : instance.exports.memory;
   langBump = instance.exports.__lang_bump || null;
   mainInstance = instance;
+  // Main is 1; worker tid N is N+1. Zero means an embedding host omitted
+  // identity initialization and must never silently grant Vec ownership.
+  if (instance.exports.__lang_thread_id) instance.exports.__lang_thread_id.value = 1;
 
   // Phase 48.2 (C2 Stage 2): helper for invoking a Mere closure value
   // (an i32 pointer to a 2-word { env, fn_idx } record in linear memory)

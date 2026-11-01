@@ -1,6 +1,7 @@
 #!/bin/sh
 # scripts/owner_check.sh -- a container written by a thread other than the one
-# that made it fails by name, on the interpreter, C and LLVM (v0.1.575).
+# that made it fails by name, on the interpreter, C and LLVM (v0.1.575),
+# and for Vec on the Node Wasm host (v0.1.680).
 #
 # The type check (v0.1.574) follows what a spawned thread reaches through
 # functions whose definitions it can see. A closure that arrives as a PARAMETER
@@ -37,15 +38,30 @@
 # guards must then stop failing that way (the interpreter's check is not in
 # emitted text).
 #
-# Usage: sh scripts/owner_check.sh [--poison]
+# Wasm covers Vec only: its other containers and OwnedVec handoff are outside
+# this runtime guarantee. Deterministic join/channel barriers cover shared
+# Vecs, including two workers whose identities must differ. Generated cases
+# exercise each read/write API, including range-versioned and SIMD paths.
+#
+# Usage: sh scripts/owner_check.sh [--poison] [--wasm-only]
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "owner_check: $MERE not built" >&2; exit 2; }
 command -v clang >/dev/null 2>&1 || { echo "owner_check: no clang (LLVM IR needs it)" >&2; exit 2; }
+for tool in node wat2wasm; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "owner_check: no $tool (Wasm checks need it)" >&2; exit 2; }
+done
+poison=0; wasm_only=0
+for arg in "$@"; do
+  case "$arg" in --poison) poison=1 ;; --wasm-only) wasm_only=1 ;;
+    *) echo "owner_check: unknown option $arg" >&2; exit 2 ;; esac
+done
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-FX="$ROOT/test/owner"
+mkdir "$T/src"
+cp "$ROOT"/test/owner/*.mere "$T/src/"
+FX="$T/src"
 SENT="made by one thread was written by another"
 SHSENT="another thread has read was written"
 OVSENT="an OwnedVec belongs to one thread"
@@ -54,7 +70,7 @@ fail=0
 
 run() { perl -e 'alarm 20; exec @ARGV' "$@" 2>&1; }
 
-# $1 program, $2 c|ll, [$3 sed expression] -> $T/bin or prints why not
+# $1 program, $2 c|ll|w, [$3 sed expression] -> $T/bin[.wasm]
 build() {
   "$MERE" "-$2" "$FX/$1.mere" > "$T/g.$2" 2>"$T/e" || { echo "EMITFAIL $(head -1 "$T/e")"; return 1; }
   if [ -n "${3:-}" ]; then
@@ -62,13 +78,20 @@ build() {
     cmp -s "$T/p.$2" "$T/g.$2" && { echo "SEDNOMATCH"; return 1; }
     mv "$T/p.$2" "$T/g.$2"
   fi
-  if [ "$2" = c ]; then "$CC" -w -o "$T/bin" "$T/g.c" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(head -1 "$T/cc.err")"; return 1; }
+  if [ "$2" = w ]; then
+    wat2wasm --enable-tail-call --enable-threads "$T/g.w" -o "$T/bin.wasm" 2>"$T/cc.err" || { echo "WATFAIL $(head -1 "$T/cc.err")"; return 1; }
+  elif [ "$2" = c ]; then "$CC" -w -o "$T/bin" "$T/g.c" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(head -1 "$T/cc.err")"; return 1; }
   else clang -w -x ir -o "$T/bin" "$T/g.ll" -lm -lpthread 2>"$T/cc.err" || { echo "CCFAIL $(grep -m1 error "$T/cc.err")"; return 1; }
   fi
 }
 
 judge() {  # $1 program, $2 output, $3 status -> ok or why not
   case "$1" in
+    vec_caught) [ "$2" = '7:1' ] && [ "$3" = 0 ] && echo ok || echo "wanted caught failure without mutation, got [$2] status $3" ;;
+    vec_alignment) [ "$2" = 272 ] && [ "$3" = 0 ] && echo ok || echo "wanted 272, got [$2] status $3" ;;
+    shared_worker_ids)
+      case "$2" in *"$SHSENT"*7) [ "$3" = 0 ] && echo ok || echo "join recovery exited $3" ;;
+        *) echo "wanted a shared-write failure and recovered join, got [$2] status $3" ;; esac ;;
     ov_moved) [ "$2" = 3 ] && [ "$3" = 0 ] && echo ok || echo "printed [$(echo "$2" | head -1 | cut -c1-60)] status $3, wanted 3" ;;
     legit) [ "$2" = 31 ] && [ "$3" = 0 ] && echo ok || echo "printed [$(echo "$2" | head -1)] status $3, wanted 31" ;;
     legit_readonly) [ "$2" = "4495530
@@ -78,9 +101,11 @@ judge() {  # $1 program, $2 output, $3 status -> ok or why not
   esac
 }
 
+if [ "$wasm_only" = 0 ]; then
 for f in param_vec param_map param_strbuf param_reverse param_versioned \
          shared_map_race shared_vec_race shared_phase shared_versioned \
-         ov_param ov_after_move ov_moved legit legit_readonly; do
+         ov_param ov_after_move ov_moved legit legit_readonly \
+         shared_vec_phase shared_worker_ids vec_caught vec_alignment; do
   out=$(run "$MERE" "$FX/$f.mere"); st=$?
   v=$(judge "$f" "$out" "$st"); [ "$v" = ok ] && echo "  ok    interp $f" || { echo "  FAIL  interp $f: $v"; fail=1; }
   for be in c ll; do
@@ -90,10 +115,80 @@ for f in param_vec param_map param_strbuf param_reverse param_versioned \
   done
 done
 
-if [ "${1:-}" = --poison ]; then
+fi
+
+wasm_cases='param_vec param_reverse param_versioned shared_versioned legit legit_readonly ov_moved shared_vec_phase shared_worker_ids vec_caught vec_alignment'
+# Each reader is the only foreign access before join and the owner's write.
+# If its mark disappears, that write succeeds and this case goes red.
+while IFS='|' read -r name expr; do
+  [ -n "$name" ] || continue
+  cat > "$FX/shared_api_$name.mere" <<EOF
+let mk = fn () -> let v = vec_new () in let _ = vec_push v 1 in let _ = vec_push v 2 in v;
+let v = mk ();
+let launch = fn (f: unit -> unit) -> spawn f;
+let h = launch (fn () -> let _ = $expr in ());
+let _ = join h;
+vec_push v 3
+EOF
+  wasm_cases="$wasm_cases shared_api_$name"
+done <<'READERS'
+get|vec_get v 0
+len|vec_len v
+clone|vec_to_owned v
+concat|vec_concat v v
+iter|vec_iter v (fn x -> ())
+fold|vec_fold v 0 (fn a -> fn b -> a + b)
+map|vec_map v (fn x -> x + 1)
+filter|vec_filter v (fn x -> x > 0)
+to_list|vec_to_list v
+bytes|bytes_of_vec v
+READERS
+while IFS='|' read -r name expr; do
+  [ -n "$name" ] || continue
+  cat > "$FX/write_api_$name.mere" <<EOF
+let mk = fn () -> let v = vec_new () in let _ = vec_push v 1 in let _ = vec_push v 2 in v;
+let v = mk ();
+let launch = fn (f: unit -> unit) -> spawn f;
+let h = launch (fn () -> $expr);
+join h
+EOF
+  wasm_cases="$wasm_cases write_api_$name"
+done <<'WRITERS'
+set|vec_set v 0 3
+sort|vec_sort v (fn a -> fn b -> a - b)
+WRITERS
+for op in load store; do
+  if [ "$op" = load ]; then expr='let _ = f64x2_extract (f64x2_load v 0) 0 in ()'; name=shared_simd; tail='vec_push v 3.0'
+  else expr='f64x2_store v 0 (f64x2_splat 3.0)'; name=write_simd; tail='()'; fi
+  cat > "$FX/$name.mere" <<EOF
+let mk = fn () -> let v = vec_new () in let _ = vec_push v 1.0 in let _ = vec_push v 2.0 in v;
+let v = mk ();
+let launch = fn (f: unit -> unit) -> spawn f;
+let h = launch (fn () -> $expr);
+let _ = join h;
+$tail
+EOF
+  wasm_cases="$wasm_cases $name"
+done
+for f in $wasm_cases; do
+  if ! why=$(build "$f" w); then echo "  FAIL  wasm $f: $why"; fail=1; continue; fi
+  out=$(run node "$ROOT/scripts/run_wasm.js" "$T/bin.wasm"); st=$?
+  v=$(judge "$f" "$out" "$st"); [ "$v" = ok ] && echo "  ok    wasm $f" || { echo "  FAIL  wasm $f: $v"; fail=1; }
+done
+
+cp "$ROOT/test/range_version/sum_curried.mere" "$FX/vec_unthreaded.mere"
+if why=$(build vec_unthreaded w); then
+  out=$(run node "$ROOT/scripts/run_wasm.js" "$T/bin.wasm"); st=$?
+  if [ "$out" = 84 ] && [ "$st" = 0 ] && ! grep -Eq 'atomic\.|\$mere_vec_(read|write|owner_ok)|__lang_thread_id' "$T/g.w"; then
+    echo "  ok    wasm without spawn: range-versioned reads, no owner checks or atomics"
+  else echo "  FAIL  wasm without spawn: [$out] status $st, or ownership code remains"; fail=1; fi
+else echo "  FAIL  wasm without spawn: $why"; fail=1; fi
+
+if [ "$poison" = 1 ]; then
   pf=0
   # a poison either removes a check (the race must then go through unnoticed)
   # or removes a hand-over (prog ov_moved: the legitimate move must then fail)
+  if [ "$wasm_only" = 0 ]; then
   while IFS='|' read -r prog be what expr; do
     [ -n "$be" ] || continue
     if ! why=$(build "$prog" "$be" "$expr"); then echo "  FAIL  POISON $be ($what): $why"; pf=1; continue; fi
@@ -121,7 +216,87 @@ ov_param|ll|OwnedVec use is not checked|/call void @__lang_ov_use(ptr/d
 ov_moved|ll|spawn does not give the OwnedVec away|/store atomic i32 0, ptr %t[0-9]* monotonic, align 4/d
 shared_versioned|ll|the guard's vec_len leaves no mark|/^define i64 @mere_vec_int_len(/,/^}/{/call void @__lang_read_mark/d;}
 POISONS
+  fi
+  # These mutations must still assemble, run and produce the wrong successful
+  # result. A syntax error, trap or timeout does not witness an ownership gate.
+  while IFS='|' read -r prog expr; do
+    if ! why=$(build "$prog" w "$expr"); then echo "  FAIL  POISON wasm $prog: $why"; pf=1; continue; fi
+    out=$(run node "$ROOT/scripts/run_wasm.js" "$T/bin.wasm"); st=$?
+    case "$out" in *"$(sentence_of "$prog")"*) st=1 ;; esac
+    if [ "$st" = 0 ]; then echo "  ok    POISON wasm $prog: unchecked access succeeds"
+    else echo "  FAIL  POISON wasm $prog: expected successful unchecked access, status $st"; pf=1; fi
+  done <<'WASM_POISONS'
+param_vec|/call $mere_vec_write.*;; vec-owner$/d
+shared_vec_phase|/call $mere_vec_read.*;; vec-owner$/d
+WASM_POISONS
+  mkdir "$T/host"
+  cp "$ROOT"/scripts/*.js "$T/host/"
+  if why=$(build shared_worker_ids w); then
+    # Delay the diagnostic to make a premature completion observable on every
+    # run: join must wait for the line before it can terminate the worker.
+    sed '/fs.writeSync(2, "mere: thread " + tid/i\
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    cp "$T/host/run_wasm.js" "$T/delayed-host.js"
+    out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
+    v=$(judge shared_worker_ids "$out" "$st")
+    [ "$v" = ok ] && echo "  ok    wasm delayed diagnostic: join waits for the line" || { echo "  FAIL  wasm delayed diagnostic: $v"; pf=1; }
+    # Publish and notify completion before the delayed line: the ownership
+    # error reaches join, but the worker is terminated without its reason.
+    sed '/Atomics.store(st, 0, 1);/d; /Atomics.wait(new Int32Array(new SharedArrayBuffer(4))/i\
+    Atomics.store(st, 0, 1); Atomics.notify(st, 0);' "$T/delayed-host.js" > "$T/host/run_wasm.js"
+    out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
+    if [ "$out" = 7 ] && [ "$st" = 0 ]; then echo "  ok    POISON wasm premature completion: diagnostic is lost"
+    else echo "  FAIL  POISON wasm premature completion: [$out] status $st"; pf=1; fi
+    sed 's/__lang_thread_id.value = tid + 1/__lang_thread_id.value = 2/' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
+    if [ "$out" = 0 ] && [ "$st" = 0 ]; then echo "  ok    POISON wasm duplicate worker IDs: shared write succeeds"
+    else echo "  FAIL  POISON wasm duplicate worker IDs: [$out] status $st"; pf=1; fi
+  else echo "  FAIL  POISON wasm worker identities: $why"; pf=1; fi
+  cp "$ROOT/test/threadfail/join_caught.mere" "$FX/diagnostic_write.mere"
+  if why=$(build diagnostic_write w); then
+    # This host keeps the successful-write ordering but loses completion when
+    # a diagnostic throws. First prove it still runs an ordinary failed join.
+    sed 's/^  } finally {$/  } catch (error) { throw error; } {/' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    sh "$ROOT/scripts/bounded.sh" 5 node "$T/host/run_wasm.js" "$T/bin.wasm" > "$T/out" 2> "$T/err"; st=$?
+    if [ "$(cat "$T/out")" = 7 ] && [ "$st" = 0 ]; then
+      echo "  ok    wasm without finally: ordinary failed join still recovers"
+    else echo "  FAIL  wasm without finally: ordinary join status $st"; pf=1; fi
+    # Inject an EPIPE at the worker's diagnostic write. Its recorded Mere
+    # failure must still reach try_or in the parent, which prints 7.
+    sed '/^const st = new Int32Array(doneSab, 0, 5);$/a\
+const writeSync = fs.writeSync; fs.writeSync = (fd, ...args) => { if (fd === 2) throw Object.assign(new Error("diagnostic write failed"), { code: "EPIPE" }); return writeSync(fd, ...args); };' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    sh "$ROOT/scripts/bounded.sh" 5 node "$T/host/run_wasm.js" "$T/bin.wasm" > "$T/out" 2> "$T/err"; st=$?
+    if [ "$(cat "$T/out")" = 7 ] && [ "$st" = 0 ]; then
+      echo "  ok    wasm throwing diagnostic write: join recovers"
+    else echo "  FAIL  wasm throwing diagnostic write: status $st, stdout [$(cat "$T/out")]"; pf=1; fi
+    sed 's/^  } finally {$/  } catch (error) { throw error; } {/' "$T/host/run_wasm.js" > "$T/throw-no-finally.js"
+    mv "$T/throw-no-finally.js" "$T/host/run_wasm.js"
+    sh "$ROOT/scripts/bounded.sh" 3 node "$T/host/run_wasm.js" "$T/bin.wasm" > "$T/out" 2> "$T/err"; st=$?
+    if [ "$st" = 201 ] && [ ! -s "$T/out" ]; then
+      echo "  ok    POISON wasm throwing diagnostic without finally: join times out"
+    else echo "  FAIL  POISON wasm throwing diagnostic without finally: status $st, stdout [$(cat "$T/out")]"; pf=1; fi
+  else echo "  FAIL  wasm throwing diagnostic: $why"; pf=1; fi
+  if why=$(build param_vec w); then
+    sed '/__lang_thread_id.value = tid + 1/d' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
+    case "$out" in *'Wasm host must initialize a unique __lang_thread_id'*)
+      [ "$st" = 1 ] && echo "  ok    wasm host without worker identity: refused by name" || { echo "  FAIL  wasm missing identity exited $st"; pf=1; } ;;
+      *) echo "  FAIL  wasm host without worker identity: [$out] status $st"; pf=1 ;; esac
+    for identity in 0 1073741824 -1; do
+      sed "s/__lang_thread_id.value = 1;/__lang_thread_id.value = $identity;/" "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+      out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
+      case "$out" in *'Wasm host must initialize a unique __lang_thread_id'*)
+        [ "$st" = 1 ] && echo "  ok    wasm invalid identity $identity: refused by name" || { echo "  FAIL  wasm invalid identity $identity exited $st"; pf=1; } ;;
+        *) echo "  FAIL  wasm invalid identity $identity: [$out] status $st"; pf=1 ;; esac
+    done
+  else echo "  FAIL  wasm missing worker identity: $why"; pf=1; fi
+  if why=$(build vec_alignment w '/local.set $v (i32.and.*;; vec-owner$/d'); then
+    out=$(run node "$ROOT/scripts/run_wasm.js" "$T/bin.wasm"); st=$?
+    case "$out" in *'unaligned accesses'*)
+      [ "$st" = 1 ] && echo "  ok    POISON wasm alignment: unaligned atomic access traps" || { echo "  FAIL  POISON wasm alignment exited $st"; pf=1; } ;;
+      *) echo "  FAIL  POISON wasm alignment: [$out] status $st"; pf=1 ;; esac
+  else echo "  FAIL  POISON wasm alignment: $why"; pf=1; fi
   [ "$pf" = 0 ] || { echo "owner_check --poison: FAILED"; exit 1; }
 fi
 [ "$fail" = 0 ] || { echo "owner_check: FAILED"; exit 1; }
-if [ "${1:-}" = --poison ]; then echo "owner_check --poison: ok (the gate can go red)"; else echo "owner_check: ok"; fi
+if [ "$poison" = 1 ]; then echo "owner_check --poison: ok (the gate can go red)"; else echo "owner_check: ok"; fi

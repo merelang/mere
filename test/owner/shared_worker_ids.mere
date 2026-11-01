@@ -1,0 +1,16 @@
+// Both accesses happen in workers. Reusing one identity for every worker
+// would let the owner keep writing after the other worker reads its Vec.
+let callbacks = channel_new ();
+let ready = channel_new ();
+let a = spawn (fn () ->
+  let v = vec_new () in
+  let _ = vec_push v 1 in
+  let _ = channel_send callbacks (fn () -> vec_get v 0) in
+  let _ = channel_recv ready in
+  vec_push v 2);
+let b = spawn (fn () ->
+  let read = channel_recv callbacks in
+  let _ = read () in
+  channel_send ready ());
+let _ = join b;
+print_int (try_or (fn () -> let _ = join a in 0) 7)

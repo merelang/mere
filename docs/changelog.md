@@ -4,6 +4,36 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.680 — 2026-11-01
+
+_Wasm: enforce Vec ownership across workers._
+
+Threaded Wasm modules record a Vec's creator in aligned atomic metadata.
+A write from another worker fails before mutation; a read by another worker
+permanently freezes the Vec, so even its creator cannot write after readers
+have joined. Checked, range-versioned and SIMD paths follow the same rule.
+Failures remain catchable with `try_or`. Read-only sharing, worker-local
+mutation and existing `OwnedVec` moves continue to work.
+
+The Node host assigns distinct instance identities through the new exported
+`__lang_thread_id` global. Embedding hosts must initialize it before running
+Mere code; missing or invalid identities fail by name. Modules without thread
+or channel builtins omit the Vec owner checks and atomic accesses. Other Wasm containers
+and `OwnedVec` runtime handoff checks remain outside this guarantee; see the
+[memory and concurrency contract](memory-model.md#concurrency-and-sharing).
+
+`scripts/owner_check.sh` now exercises Wasm Vec access APIs, deterministic
+sharing across two workers, failure recovery and allocation alignment.
+Negative controls remove write/read guards and duplicate worker identities
+to verify that these tests detect the missing protection.
+
+The Node host publishes worker completion after attempting its failure message.
+Previously, `join` could observe completion and terminate the worker before
+that message was written. Completion is published and notified in `finally`,
+so an output error such as `EPIPE` cannot leave the joiner blocked. Delayed
+and throwing diagnostic tests, with negative controls, cover both ordering
+and progress when the write fails.
+
 ## v0.1.679 — 2026-11-01
 
 _C: generated programs and libraries compile with GCC 15's default C23 mode._

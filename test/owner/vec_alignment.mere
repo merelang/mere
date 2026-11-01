@@ -1,0 +1,13 @@
+// Vary allocation lengths before constructing Vecs on the main and worker
+// instances. Every atomic owner word must remain naturally aligned.
+let rec run = fn (n: int) -> fn (s: str) -> fn (total: int) ->
+  if n == 16 then total else
+  let next = s ++ "a" in
+  let v = vec_new () in
+  let _ = vec_push v (str_len next) in
+  run (n + 1) next (total + vec_get v 0);
+let result = channel_new ();
+let h = spawn (fn () -> channel_send result (run 0 "" 0));
+let own_total = run 0 "" 0;
+let _ = join h;
+print_int (own_total + channel_recv result)
