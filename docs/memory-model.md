@@ -494,8 +494,8 @@ linear compound keys follow the same rule. Wasm's `map_bytes` and
 Read-only sharing and each worker's own mutable containers remain valid.
 The cases and negative controls in
 [`owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/owner_check.sh)
-and its
-[Wasm Map helper](https://github.com/merelang/mere/blob/main/scripts/wasm_map_owner_check.sh)
+and the
+[Wasm Map matrix](https://github.com/merelang/mere/blob/main/scripts/wasm_map_owner_check.sh)
 cover these rules, worker identity separation and allocation alignment.
 
 An embedding host must set the exported mutable `__lang_thread_id` global

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Called by owner_check.sh; also runnable alone with [--poison].
+# Run alongside owner_check.sh in CI; also runnable alone with [--poison].
 # Exercise every storage-access API on hashed and linear Maps, including
 # caught writes that must preserve the original contents.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

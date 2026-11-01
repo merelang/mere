@@ -299,6 +299,5 @@ const writeSync = fs.writeSync; fs.writeSync = (fd, ...args) => { if (fd === 2) 
   else echo "  FAIL  POISON wasm alignment: $why"; pf=1; fi
   [ "$pf" = 0 ] || { echo "owner_check --poison: FAILED"; exit 1; }
 fi
-MERE="$MERE" sh "$ROOT/scripts/wasm_map_owner_check.sh" "$@" || fail=1
 [ "$fail" = 0 ] || { echo "owner_check: FAILED"; exit 1; }
 if [ "$poison" = 1 ]; then echo "owner_check --poison: ok (the gate can go red)"; else echo "owner_check: ok"; fi
