@@ -227,6 +227,16 @@ must be green before a release.
 
 ## Binary releases
 
+`release-build.yml` is shared by the distribution CI jobs and tagged
+releases. Build the Linux x86_64 asset on Ubuntu 24.04 with OCaml 5.1; an
+unversioned runner label must not change the distribution's build baseline.
+Before uploading, `scripts/release_runtime_check.sh --linux <binary> <version>`
+runs the same stripped binary on stock Ubuntu 24.04 and 26.04 images. It
+checks the exact version, thread execution, a caught failure, and C/LLVM/Wasm
+emission without installing additional packages. The macOS arm64 binary uses
+the same build workflow and native runtime check. PR runs retain the checked
+binaries as short-lived Actions artifacts for inspection.
+
 Push a version tag only after verifying its source and release notes.
 The Release workflow creates or reuses a **draft**, strips build metadata,
 checks the binaries for credential patterns and home-directory paths, then
@@ -237,6 +247,8 @@ uses this file, checks the version and runs a small program before replacing
 an existing binary with a rename on the same filesystem.
 A failed check leaves the release private. The workflow refuses to replace
 assets on an already published release, including on a rerun.
+Each downloaded binary must also match the staged bytes exactly and pass its
+runtime checks again before the checksum job can run.
 
 After the workflow and required CI checks pass, download both assets and
 `SHA256SUMS`, verify the checksums, check their contents with the local

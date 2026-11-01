@@ -97,6 +97,9 @@ Prebuilt binaries are produced by [`.github/workflows/release.yml`](.github/work
 for macOS (arm64) and Linux (x86_64) on every `v*` tag. The installer verifies
 the release checksum, version and execution before replacing an existing
 binary. A failed download or verification leaves the existing binary intact.
+The Linux x86_64 asset is built on Ubuntu 24.04. CI tests the distribution
+binary on stock Ubuntu 24.04 and 26.04 images without installing OCaml or
+additional runtime packages.
 Intel Macs require a source build. With an
 installed `mere`, `mere install` (see [docs/packages.md](docs/packages.md))
 fetches an app's dependencies *and* its Node runtime host, so no compiler

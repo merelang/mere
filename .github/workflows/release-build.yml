@@ -1,0 +1,110 @@
+name: Build distribution binary
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+      asset:
+        required: true
+        type: string
+      publish-draft:
+        default: false
+        type: boolean
+
+jobs:
+  binary:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 30
+    env:
+      ASSET_NAME: ${{ inputs.asset }}
+      PUBLISH_DRAFT: ${{ inputs.publish-draft }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require the distribution build platform
+        run: |
+          case "$RUNNER_OS:$RUNNER_ARCH:$ASSET_NAME" in
+            Linux:X64:mere-linux-x86_64)
+              . /etc/os-release
+              [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || {
+                echo "Linux distribution builds require Ubuntu 24.04" >&2; exit 1; }
+              ;;
+            macOS:ARM64:mere-macos-arm64) ;;
+            *) echo "Unsupported distribution platform" >&2; exit 1 ;;
+          esac
+
+      - name: Read the version and require a matching release tag
+        run: |
+          version="$(sed -n 's/^let v = "\(.*\)"$/\1/p' lib/version.ml)"
+          [ -n "$version" ] || { echo "Cannot read source version" >&2; exit 1; }
+          if [ "$PUBLISH_DRAFT" = true ]; then
+            [ "$GITHUB_REF_TYPE" = tag ] || { echo "A release tag is required" >&2; exit 1; }
+            tag="${GITHUB_REF_NAME#v}"; tag="${tag%%-*}"
+            [ "$tag" = "$version" ] || { echo "Release tag differs from source version" >&2; exit 1; }
+          fi
+          echo "MERE_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.1"
+
+      - name: Install dependencies
+        run: opam install . --deps-only
+
+      - name: Build release binary
+        run: opam exec -- dune build --release bin/mere.exe
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp _build/default/bin/mere.exe "dist/$ASSET_NAME"
+          chmod 755 "dist/$ASSET_NAME"
+          if [ "$RUNNER_OS" = macOS ]; then
+            strip -Sx "dist/$ASSET_NAME"
+            codesign --force --sign - "dist/$ASSET_NAME"
+          else
+            strip "dist/$ASSET_NAME"
+          fi
+
+      - name: Check the asset before uploading
+        run: |
+          python3 scripts/release_asset_check.py --self-test
+          python3 scripts/release_asset_check.py "dist/$ASSET_NAME"
+
+      - name: Check the distribution binary on its runtime platforms
+        run: |
+          mode=--native
+          [ "$RUNNER_OS" != Linux ] || mode=--linux
+          sh scripts/release_runtime_check.sh "$mode" "dist/$ASSET_NAME" "$MERE_RELEASE_VERSION"
+
+      - name: Keep the checked binary for inspection
+        if: ${{ !inputs.publish-draft }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.asset }}
+          path: dist/${{ inputs.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload to draft release and verify the served bytes
+        if: ${{ inputs.publish-draft }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          draft="$(gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          [ "$draft" = true ] || { echo "Release is already public" >&2; exit 1; }
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            "dist/$ASSET_NAME" --clobber
+          mkdir -p roundtrip
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ASSET_NAME" --dir roundtrip
+          cmp "dist/$ASSET_NAME" "roundtrip/$ASSET_NAME"
+          python3 scripts/release_asset_check.py "roundtrip/$ASSET_NAME"
+          chmod 755 "roundtrip/$ASSET_NAME"
+          mode=--native
+          [ "$RUNNER_OS" != Linux ] || mode=--linux
+          sh scripts/release_runtime_check.sh "$mode" "roundtrip/$ASSET_NAME" "$MERE_RELEASE_VERSION"
