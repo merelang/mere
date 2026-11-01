@@ -94,7 +94,10 @@ dune build            # binary at _build/default/bin/mere.exe
 ```
 
 Prebuilt binaries are produced by [`.github/workflows/release.yml`](.github/workflows/release.yml)
-for macOS (arm64 / x86_64) and Linux (x86_64) on every `v*` tag. With an
+for macOS (arm64) and Linux (x86_64) on every `v*` tag. The installer verifies
+the release checksum, version and execution before replacing an existing
+binary. A failed download or verification leaves the existing binary intact.
+Intel Macs require a source build. With an
 installed `mere`, `mere install` (see [docs/packages.md](docs/packages.md))
 fetches an app's dependencies *and* its Node runtime host, so no compiler
 source tree is needed to build or run an app.

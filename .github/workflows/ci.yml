@@ -51,6 +51,9 @@ jobs:
       - name: Release asset checker negative controls
         run: python3 scripts/release_asset_check.py --self-test
 
+      - name: Installer failure and replacement checks
+        run: python3 scripts/install_check.py
+
   # The gates that are not `dune runtest`: cross-backend parity, the differential
   # checks against other people's implementations (node's URL and TextDecoder,
   # QEMU), self-hosting, and the language server.
@@ -73,7 +76,8 @@ jobs:
   # platforms end up covered between CI and the working copy.
   gates:
     name: Gates (cross-backend and differential)
-    runs-on: ubuntu-latest
+    # Keep integration oracles on the validated image as ubuntu-latest moves.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v5

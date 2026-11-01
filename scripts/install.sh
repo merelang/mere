@@ -44,18 +44,60 @@ if [ "${os_unsupported:-0}" = "1" ]; then
   exit 1
 fi
 
-url="https://github.com/$REPO/releases/latest/download/$asset"
-
-echo "Installing mere ($asset) to $BINDIR/mere"
-mkdir -p "$BINDIR"
-if ! curl -fSL "$url" -o "$BINDIR/mere"; then
-  echo "download failed: $url" >&2
-  echo "(has a release been published yet? see https://github.com/$REPO/releases)" >&2
+die() {
+  echo "mere install: $*" >&2
   exit 1
-fi
-chmod +x "$BINDIR/mere"
+}
 
-echo "Installed: $("$BINDIR/mere" -v 2>/dev/null || echo "$BINDIR/mere")"
+if command -v sha256sum >/dev/null 2>&1; then
+  checksum() { sha256sum "$1"; }
+elif command -v shasum >/dev/null 2>&1; then
+  checksum() { shasum -a 256 "$1"; }
+else
+  die "sha256sum or shasum is required to verify the download"
+fi
+
+# Resolve latest once: the binary and its checksum must belong to one release,
+# even if another release is published while this script is running.
+release_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+  "https://github.com/$REPO/releases/latest")" || die "could not resolve the latest release"
+case "$release_url" in
+  "https://github.com/$REPO/releases/tag/"*) ;;
+  *) die "unexpected release URL" ;;
+esac
+tag="${release_url##*/}"
+version="$(printf '%s\n' "$tag" | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
+[ -n "$version" ] || die "unexpected release tag"
+url="https://github.com/$REPO/releases/download/$tag"
+
+echo "Installing mere $tag ($asset) to $BINDIR/mere"
+mkdir -p "$BINDIR"
+[ ! -d "$BINDIR/mere" ] || die "the destination is a directory"
+# Stage on the destination filesystem so the final rename is atomic.
+staging="$(mktemp -d "$BINDIR/.mere-install.XXXXXX")" || die "could not create a staging directory"
+trap 'rm -rf "$staging"' 0
+trap 'exit 1' 1 2 15
+
+curl -fSL "$url/SHA256SUMS" -o "$staging/SHA256SUMS" || die "checksum download failed"
+curl -fSL "$url/$asset" -o "$staging/$asset" || die "binary download failed"
+expected="$(awk -v asset="$asset" '$2 == asset { print tolower($1) }' "$staging/SHA256SUMS")"
+case "$expected" in
+  ''|*[!0-9a-f]*) die "missing or invalid checksum for $asset" ;;
+esac
+[ "${#expected}" -eq 64 ] || die "missing, duplicate or invalid checksum for $asset"
+hashed="$(checksum "$staging/$asset")" || die "checksum verification failed"
+actual="$(printf '%s\n' "$hashed" | awk '{ print $1 }')"
+[ "$actual" = "$expected" ] || die "checksum mismatch for $asset"
+
+chmod 755 "$staging/$asset"
+got="$("$staging/$asset" --version)" || die "the downloaded binary cannot run"
+[ "$got" = "mere v$version" ] || die "the binary version does not match $tag"
+printf 'let _ = print "install-ok";\n' > "$staging/smoke.mere"
+out="$("$staging/$asset" "$staging/smoke.mere")" || die "the downloaded binary could not run a program"
+[ "$out" = "install-ok" ] || die "the downloaded binary returned an unexpected result"
+
+mv -f "$staging/$asset" "$BINDIR/mere"
+echo "Installed: $got"
 case ":$PATH:" in
   *":$BINDIR:"*) ;;
   *) echo "Add $BINDIR to your PATH:  export PATH=\"$BINDIR:\$PATH\"" ;;

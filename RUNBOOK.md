@@ -222,12 +222,17 @@ Push a version tag only after verifying its source and release notes.
 The Release workflow creates or reuses a **draft**, strips build metadata,
 checks the binaries for credential patterns and home-directory paths, then
 downloads the uploaded assets and checks their version and execution again.
+After both binaries pass, it generates `SHA256SUMS` from the downloaded
+assets and verifies the uploaded checksum file against them. The installer
+uses this file, checks the version and runs a small program before replacing
+an existing binary with a rename on the same filesystem.
 A failed check leaves the release private. The workflow refuses to replace
 assets on an already published release, including on a rerun.
 
-After the workflow and required CI checks pass, download both assets, check
-their contents with the local publication policy, and review the release
-notes. Publish the reviewed draft explicitly:
+After the workflow and required CI checks pass, download both assets and
+`SHA256SUMS`, verify the checksums, check their contents with the local
+publication policy, and review the release notes. Publish the reviewed
+draft explicitly:
 
 ```sh
 gh release edit <tag> --repo merelang/mere --draft=false --latest
