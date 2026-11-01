@@ -1,6 +1,6 @@
 # Memory management model (mere)
 
-A summary of Mere's memory-management strategies, how `mere` currently handles them, and what's planned. Deeper design notes live in separate internal notes.
+A summary of Mere's memory-management strategies, implemented behavior and design goals. For the current thread-sharing rules and their limits, start with [Concurrency and sharing](#concurrency-and-sharing). Historical implementation milestones below are labeled separately.
 
 ---
 
@@ -14,15 +14,15 @@ A summary of Mere's memory-management strategies, how `mere` currently handles t
 | **Region (bulk per-region)** | The whole region scope is freed at once | Cone, Vale, Cyclone, ML/Talpin research | Fast alloc / bulk free; cyclic refs OK | Requires designing region lifetimes |
 | **Stack-only** | At stack-frame exit | C autos, Rust `let` | Zero cost | Strict size/lifetime constraints |
 
-Mere is designed to let you **mix and match**: the programmer chooses a strategy explicitly, and the compiler verifies safety.
+Mere lets the programmer choose region and ownership boundaries explicitly. Static checks and runtime checks enforce different parts of that contract; the concurrency section below states their coverage and limits.
 
 ---
 
 ## 2. Mere's memory strategies (5)
 
-Based on the design note `01_memory_model.md`:
+This section introduces the design vocabulary. The `owned T`, `&borrowed T` and `stack { ... }` sketches are design notation, not current Mere syntax. Use the implemented forms and limits in section 4 when writing a program.
 
-### ① `owned T` — sole ownership
+### ① `owned T` — sole ownership (design sketch)
 
 A value has one owner; freed when the owner leaves scope. Equivalent to Rust's `T`.
 ```
@@ -30,9 +30,9 @@ let x: owned String = String.from("hello")
 let y: owned String = x    // move; x is no longer usable
 ```
 
-### ② `&borrowed T` — borrow
+### ② `&borrowed T` — borrow (design vocabulary)
 
-Pass a reference without transferring ownership. Equivalent to Rust's `&T` / `&mut T`, except Mere plans to **refine the borrow annotations** (`&shared write` etc.; design Q-004).
+Pass a reference without transferring ownership. Equivalent to Rust's `&T` / `&mut T`, with implemented borrow modes `&R T`, `&shared write R T`, `&exclusive R T` and `&mut R T`. Their overlap rules are described below; they do not grant permission to share a region reference between threads.
 
 ### ③b `region R loop x { ... }` — the region-carrying loop (v0.1.296)
 
@@ -73,9 +73,9 @@ view DocumentView[R] of Document {
 }
 ```
 
-### ⑤ `stack { ... }` — stack-only
+### ⑤ `stack { ... }` — stack-only (design goal)
 
-Guarantees the value lives only on the stack. No heap allocation.
+The proposed construct would restrict allocation to the stack. It is not a current source-language construct; stack-size requests in `mere.toml` are a separate feature.
 
 ---
 
@@ -412,9 +412,130 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Current state in mere (as of 2026-06-24, Phase 46)
+## 4. Implemented memory behavior (v0.1.679)
 
-The "Phase 2" section below is a record of the first implementation slices (the region/view syntax layer). **Phase 11 → 31 implemented the 4 borrow modes (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) + borrow checker + `with` Drop integration + the 4 Q-010 collections (`Vec` / `OwnedVec` / `StrBuf` / `Map`) + 4-backend codegen (interp + C / LLVM / Wasm) parity.** Details: [language-reference.md §3 region/view/with](language-reference.md) / [codegen.md §4](codegen.md).
+### Concurrency and sharing
+
+Mere has five backends, with different execution models:
+
+| Backend | Execution of `spawn` |
+|---|---|
+| Interpreter | OCaml 5 domains |
+| C | Native POSIX threads |
+| LLVM IR | Native POSIX threads |
+| Wasm with `scripts/run_wasm.js` | Node.js workers over shared Wasm memory; other hosts must supply the required imports |
+| RISC-V (RV32IM / RV64IM) | The prelude's coroutine-based green threads |
+
+The interpreter uses OCaml-managed allocation. Compiled region storage and
+reclamation are described in section 3.5; availability of `spawn` does not
+imply identical allocation, scheduling or runtime guards on every backend.
+
+#### Static checks
+
+The interpreter and emission paths share type inference, borrow checking
+and spawn-capture analysis. These checks run before evaluation or emission.
+
+| Boundary | Implemented rule |
+|---|---|
+| `channel_send ch value` | The element must be Send. Obligations are tracked through inference, including polymorphic wrappers. `par_map` also requires Send input and output elements. |
+| A captured binding whose resolved type is Sync | It may be shared with the spawned thread. |
+| A captured binding that is Send and not Sync | It is moved into the thread. Subsequent use of that binding in the parent is rejected. Branches must agree on moves; repeated moves from a reusable closure are rejected. |
+| A captured binding that is neither Send nor Sync, or whose classification is unresolved | The capture is rejected. |
+| `local type` | Neither Send nor Sync; wrapping it in an ordinary record or variant preserves that restriction. |
+| Region references (`&R T`, `&shared write R T`, `&exclusive R T`, `&mut R T`) | Neither Send nor Sync, regardless of the borrow mode. Direct captures and channel sends of these references are rejected. |
+| Region-bound mutable containers (`Map`, `Vec`, `StrBuf`, `ByteBuf`, `ListBuf`) and `Coro` | Neither Send nor Sync. Direct captures are rejected. |
+
+Ordinary records and variants derive Send/Sync from their contents. A
+`Channel` is shareable. Types such as `File`, `ThreadHandle` and
+`OwnedVec[int]` are movable but not shareable. `sync type` is the type
+author's assertion that a capability is safe to share: it adds no lock.
+The compiler refuses a sync declaration that holds a builtin value such as
+a `Map`, `Vec`, `OwnedVec`, `File`, `ThreadHandle` or `Coro`, including
+through an ordinary record or variant. See the
+[standard-library ownership rules](https://github.com/merelang/mere/blob/v0.1.679/docs/stdlib-reference.md#what-a-spawned-thread-may-touch-v01574).
+
+Borrow modes govern overlapping borrows within a region. For a tracked
+variable or field place in the same region, two shared-read borrows may
+coexist, as may two shared-write borrows. Other mode pairs conflict while
+both borrows are active. A shared-write annotation adds no synchronization
+and does not override the thread-boundary rules above.
+
+#### Runtime guards and coverage limits
+
+Spawn analysis follows functions whose bodies are visible in the program.
+It rejects a reachable mutable container, with an exception for a table
+whose uses pass the whole-program read-only check. A handler received as a
+function parameter, a channel message or a call result has no visible body
+to follow. Such callbacks can be accepted even when they reach a mutable
+container. Type acceptance alone therefore does not establish that the
+callback's accesses are safe.
+
+In standalone interpreter, C and LLVM programs, mutable containers track
+their owner thread. A foreign write fails. A foreign read makes the
+container permanently shared and read-only: a later write by its owner
+fails too, even after readers have been joined. `OwnedVec` has a separate
+ownership handoff when moved into a spawned closure. These behaviors are
+exercised by [`owner_check.sh`](https://github.com/merelang/mere/blob/v0.1.679/scripts/owner_check.sh).
+
+**Wasm and RISC-V do not implement these native container-owner guards.**
+The frontend checks still apply, but an opaque callback accepted by those
+checks does not gain the native runtime protection. For example,
+[`test/owner/param_vec.mere`](https://github.com/merelang/mere/blob/v0.1.679/test/owner/param_vec.mere) passes a handler
+through a function parameter: native ownership checks reject its foreign
+write, while the shipped Node Wasm host currently runs it and prints `2`.
+Keep mutable containers within one worker and exchange messages over
+channels when targeting Wasm. RISC-V green threads also have different
+runtime semantics from native threads.
+
+FFI code and the implementation behind a `sync type` require the capability
+author to provide the promised synchronization. The `--lib` host boundary
+has separate lifecycle and overlapping-call rules, documented in the
+[standard-library ownership section](https://github.com/merelang/mere/blob/v0.1.679/docs/stdlib-reference.md#what-a-spawned-thread-may-touch-v01574).
+
+#### Small examples
+
+A channel carrying an integer is accepted. With the interpreter, C, LLVM or
+the Node Wasm host, this program prints `42`:
+
+```mere
+let ch = channel_new ();
+let h = spawn (fn () -> channel_send ch 42);
+let n = channel_recv ch;
+let _ = join h;
+print_int n
+```
+
+A thread-local value cannot be sent, including when wrapped in an ordinary
+record or variant. This program is rejected with `is not Send`:
+
+```mere
+local type Conn = MkConn of int;
+let ch = channel_new ();
+channel_send ch (MkConn 0)
+```
+
+A shared-write borrow also cannot be captured by a spawned closure. This
+program is rejected with `neither Send nor Sync`; the same applies to the
+other three borrow modes:
+
+```mere
+region R {
+  let v = 5 in
+  let b = &shared write R v in
+  let h = spawn (fn () -> let _ = b in ()) in
+  join h
+}
+```
+
+The rules above are backed by the Send, move and borrow cases in
+[`test/test_basic.ml`](https://github.com/merelang/mere/blob/v0.1.679/test/test_basic.ml), container ownership cases in
+[`test/owner/`](https://github.com/merelang/mere/tree/v0.1.679/test/owner), and the native allocation and failure
+checks in [`threads_alloc_check.sh`](https://github.com/merelang/mere/blob/v0.1.679/scripts/threads_alloc_check.sh) and
+[`thread_fail_check.sh`](https://github.com/merelang/mere/blob/v0.1.679/scripts/thread_fail_check.sh).
+
+### Earlier implementation milestones
+
+The "Phase 2" section below is a record of the first implementation slices (the region/view syntax layer). **Phase 11 → 31 implemented the 4 borrow modes (`&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T`) + borrow checker + `with` Drop integration + the 4 Q-010 collections (`Vec` / `OwnedVec` / `StrBuf` / `Map`) + parity across the interpreter, C, LLVM and Wasm.** Details: [language-reference.md §3 region/view/with](language-reference.md) / [codegen.md §4](codegen.md).
 
 **Added in Phase 36 (2026-06-22)**: a narrow value restriction in the typer. `let v = map_get m k in ...`-style **let-binds through mutable containers** are no longer generalized (so `'a` doesn't leak). Details:
 - `is_value e` decides whether an expression is in value form (literal / fn / Var / Tuple of values / etc.).
@@ -432,13 +553,13 @@ applied by the `let` arm of each declaration loop and inlined by hand in the
 spellings — `let`, `let rec`, a member of a `let rec ... and ...`, and both
 inside a `module` — and fails when they disagree, whichever one is right.
 
-**Added in Phase 38.G-1 (2026-06-22)**: **automatic scope-bound Drop** for `let v = owned_vec_new () in body` (Level 1). Implements N1 of the N1/N2/N3 decomposition from the `39_nll_linear_design.md` design notes:
+**Added in Phase 38.G-1 (2026-06-22)**: **automatic scope-bound Drop** for `let v = owned_vec_new () in body` (Level 1). This is lexical scope cleanup:
 
 - If body doesn't let v escape lexically, `free(v->data)` is auto-emitted at scope end (same shape as the Phase 15.13 `with`).
 - Static analysis: `no_value_leak v body` (v doesn't appear inside Tuple / Constr / Record_lit / Fun) + `tail_does_not_return_v v body` (body's tail expression's type doesn't include OwnedVec).
 - If both pass → auto-Drop; if either fails → fall back to the existing registry + main-end sweep (safe-by-default).
 - Implemented in C + LLVM; Wasm uses a bump-arena scheme that doesn't need per-allocation free.
-- Level 2 (NLL Light: drop at last use) and Level 3 (Full Linear: static use-after-move detection) remain deferred (see DEFERRED §1.3).
+- General last-use cleanup and a full linear type system are not provided by this analysis. Spawn-capture move checking is a separate, implemented check described in [Concurrency and sharing](#concurrency-and-sharing).
 
 This is a compromise from Mere's "explicitness > brevity" philosophy: explicit `with` is still supported and recommended (for custom Drop types), and the typical OwnedVec pattern (build → query → return scalar) gets auto-Drop.
 
@@ -480,12 +601,13 @@ ERROR: region escape: `&R int` cannot leave region `R`
 ERROR: view Node must be constructed inside a region block
 ```
 
-### What doesn't work yet
+### Remaining region design work
 
-- **Child regions (`region S of R { ... }`)** — promotion across nested regions.
-- **Integration of `with` + Drop** — lifecycle of Drop-bearing caps.
+- **Child regions (`region S of R { ... }`)** and promotion across nested regions remain design work.
 
-### Why "syntax only"
+`with` and scope cleanup are implemented. General last-use cleanup and full linear analysis have the limits described above.
+
+### The original syntax layer and compiled region storage
 
 `mere` is a **tree-walking interpreter** written in OCaml, and in interpreter mode the actual memory management is done by OCaml's GC.
 
@@ -507,9 +629,12 @@ let b = Node { value = 2, next = a }    // but a should also point to b
 
 In ownership-based languages, cyclic references are fundamentally hard (`Rc<RefCell<T>>`, `unsafe`, custom arenas, etc.). Inside a region, **everyone shares the same lifetime**, so cycles are fine. View types capture this "in-region relational structure" as a type.
 
-### Three axioms (Q-009 paper-validated)
+### View design goals
 
-| Axiom | Meaning |
+The table describes the design goals. The implemented view-typing rules and
+the remaining tightening work are listed separately below.
+
+| Goal | Meaning |
 |---|---|
 | **immutable** | View values cannot be modified after construction; cannot be reassigned. |
 | **region-scoped** | Always tied to some region R; cannot leave R (the type bakes in `[R]`). |
@@ -530,7 +655,7 @@ view Node[R] of int { value: int };    // view: bundle type tied to region R
 
 The physical layout (the inner type `of T`) and what the programmer manipulates (the `Node` type) are **viewed as different things**. Enables expressions like "internally a sequential int, but viewed as a Node struct" (a planned future feature).
 
-### Current state (Phase 2.4, 2026-06-17)
+### Implemented view typing
 
 View construction is **restricted to inside a region block**; the region parameter `R` at the declaration site is substituted with the innermost active region's name at construction time; and **the view value's type itself carries the region tag as `Name[R]`**. Field accesses / record updates propagate the region, and the view value is subject to escape checking.
 
@@ -564,9 +689,9 @@ The detailed design lives in the internal design notes (Q-009 resolved).
 
 ---
 
-## 6. Roadmap
+## 6. Implementation milestones and remaining design work
 
-### Phase 2 (medium-sized, ~600-800 LoC, multiple slices) — in progress
+### Phase 2: completed syntax and view milestones
 - [x] `&R v` value expressions (Phase 2.1, 2026-06-16).
 - [x] Region escape check (`&R T` cannot leak outside R, Phase 2.1).
 - [x] `view V[R] of T { ... }` declarations (Phase 2.2, 2026-06-16, Q-009 paper-validated).
@@ -576,27 +701,20 @@ The detailed design lives in the internal design notes (Q-009 resolved).
 - [x] `Trivial[R]` type constraint (declare Drop types with `drop type Name = ...`; type error when a region holds a value containing such a type; Phase 2.6, 2026-06-17).
 
 ### Phase 3 (larger; some design needs to be revisited)
-- [x] Refined borrow annotations: `&shared write` / `&exclusive write` (Q-004 resolved in Phase 11.1-11.3; the borrow checker covers all 4 mode × 4 mode = 10 conflict pairs by Phase 17.1/17.2).
+- [x] Refined borrow annotations: `&shared write` / `&mut` (Q-004 resolved in Phase 11.1-11.3; the borrow checker covers all 4 mode × 4 mode = 10 conflict pairs by Phase 17.1/17.2).
 - [ ] Child regions and promotion (`region S of R`, `R.promote(...)`).
-- [ ] Region std-types like `Vec[R, T]` / `StrBuf[R]` (Q-010 narrowed).
-- [ ] Mechanizing `with` + Drop ordering (per Q-011 resolved).
+- [x] Region collections, including `Vec[R, T]`, `StrBuf[R]` and `Map[R, K, V]`, plus the owned `OwnedVec[T]`.
+- Formal reasoning about cleanup ordering remains separate from the implemented `with` and scope cleanup described in section 4.
 
-### Current state of borrow modes and concurrency safety (2026-06-23 update)
+### Borrow modes and concurrency
 
-The syntax and borrow checker for all 4 borrow modes are complete (Phase 11-17). However, **with no concurrent backend yet**, type-level requirements that T be "internally safe" (Rust's Send/Sync) for `&shared write R T` are **not yet enforced**:
-
-| Mode | Concurrency-safety requirement (future) |
-|---|---|
-| `&R T` (default = shared read) | Safe — read-only access on immutable T |
-| `&shared write R T` | **Requires: T is internally safe** (atomic / Mutex etc.) — not yet enforced |
-| `&exclusive R T` (= exclusive read) | Safe — single-thread access only |
-| `&mut R T` (= exclusive write) | Safe — single-thread access only |
-
-Concurrent-backend prerequisites are collected in DEFERRED §2.4. Currently Mere is **single-threaded interpreter + 3 single-threaded backends (C / LLVM / Wasm)**; `&shared write` is only a syntactic distinction and runtime-wise behaves like a plain `&R T` pointer. Introducing a concurrent backend (e.g. via OCaml domains / Wasm threads) is the trigger for adding Send/Sync-equivalent type bounds for T.
+The current contract is described in [Concurrency and sharing](#concurrency-and-sharing).
+Borrow-mode compatibility and thread-sharing checks are separate checks; a
+shared-write borrow does not make its referent thread-safe.
 
 ### Phase 4 (codegen)
 
-In progress — see [codegen.md](codegen.md).
+The milestones below record the original C implementation. Current compiled targets are C, LLVM IR, Wasm and RISC-V; their support differs. See [codegen.md](codegen.md) and [bare-metal.md](bare-metal.md).
 
 - [x] C codegen MVP (int + arithmetic + if + let, 2026-06-17).
 - [x] Function lifting + recursion (factorial / fibonacci works, 2026-06-17).
@@ -610,26 +728,19 @@ In progress — see [codegen.md](codegen.md).
 - [x] View construction over region (2026-06-18; view values become bump-alloc + pointer).
 - [x] Default-region closure env (2026-06-18, Phase 4.20; program-lifetime arena `__lang_default_region` is init/freed in `main`; closure env alloc moves to bump).
 - [x] Default-region for strings / recursive variant nodes (2026-06-18, Phase 4.21; `__lang_str_concat` and recursive Constr's malloc go through the default region — user-visible malloc disappears entirely).
-- [ ] Move to LLVM IR or Wasm.
+- [x] LLVM IR and Wasm code generation.
+- [x] RISC-V code generation for RV32IM and RV64IM.
 
 ---
 
-## 7. Design context (in detail)
+## 7. Public implementation references
 
-Specific design decisions live in the internal design notes:
-
-| Doc | Content | Status |
-|---|---|---|
-| `00_design_principles.md` | Mere's philosophy and assumptions | — |
-| `01_memory_model.md` | Overview of the 5 strategies | — |
-| `02_json_parser_example.md` | Region's canonical use case | — |
-| `03_lifetime_and_mutability.md` | Lifetime subtyping | — |
-| `04_fundamental_tradeoffs.md` | Staged annotations, etc. | — |
-| `08_effect_granularity.md` | Q-004 borrow refinement | narrowed |
-| `11_region_vs_arena.md` | Q-008 unification | resolved |
-| `12_drop_and_with.md` | Q-011 Drop ordering | resolved |
-| `13_region_std_types.md` | Q-010 region std types | narrowed |
-| `14_view_types.md` | Q-009 view-type axioms | resolved |
+- [Type inference and borrow checks](https://github.com/merelang/mere/blob/v0.1.679/lib/typer.ml).
+- [Spawn-capture and move checks](https://github.com/merelang/mere/blob/v0.1.679/lib/move_check.ml).
+- [Shared frontend checks](https://github.com/merelang/mere/blob/v0.1.679/lib/pipeline.ml).
+- [Standard library: what a spawned thread may touch](https://github.com/merelang/mere/blob/v0.1.679/docs/stdlib-reference.md#what-a-spawned-thread-may-touch-v01574).
+- [Behavioral checks](https://github.com/merelang/mere/blob/v0.1.679/test/test_basic.ml), [container ownership cases](https://github.com/merelang/mere/tree/v0.1.679/test/owner),
+  and [region escape routes](https://github.com/merelang/mere/blob/v0.1.679/test/escape/ROUTES).
 
 ---
 

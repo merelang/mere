@@ -68,6 +68,10 @@ docs/stdlib-reference.md|`scripts/wasm_stub_check.sh` is the gate|exists|scripts
 docs/stdlib-reference.md|test/parity/region_fail_unwind.mere|exists|test/parity/region_fail_unwind.mere
 docs/stdlib-reference.md|test/parity/shift_counts.mere|exists|test/parity/shift_counts.mere
 docs/stdlib-reference.md|test/parity/int_width_boundary.mere|exists|test/parity/int_width_boundary.mere
+docs/memory-model.md|A channel carrying an integer is accepted.|accept|channel_integer
+docs/memory-model.md|A thread-local value cannot be sent|refuse|local_channel
+docs/memory-model.md|A shared-write borrow also cannot be captured|refuse|borrowed_spawn
+docs/memory-model.md|The compiler refuses a sync declaration|refuse|sync_container
 ROWS
 }
 
@@ -90,6 +94,7 @@ no octal or binary literal syntax and no digit separator
 File-level visibility has nothing to enforce
 codegen support only inside fn bodies
 `while` only inside fn bodies
+with no concurrent backend yet
 RETIRED
 }
 
@@ -133,6 +138,10 @@ write_probe() {
     record_redecl)    printf 'type t = \\{ a: int };\ntype t = \\{ b: str };\nprint_int 0\n' > "$2" ;;
     toplevel_while)   printf 'let v = vec_new ();\nlet _ = vec_push v 0;\nlet _ = while vec_len v < 5 do vec_push v (vec_len v);\nprint_int (vec_len v)\n' > "$2" ;;
     try_or_reason)    printf 'let r = try_or_msg (fn () -> fail "REASON_XYZ") (fn (m: str) -> m) in\nprint r\n' > "$2" ;;
+    channel_integer)  printf 'let ch = channel_new ();\nlet h = spawn (fn () -> channel_send ch 42);\nlet n = channel_recv ch;\nlet _ = join h;\nprint_int n\n' > "$2" ;;
+    local_channel)    printf 'local type Conn = MkConn of int;\nlet ch = channel_new ();\nchannel_send ch (MkConn 0)\n' > "$2" ;;
+    borrowed_spawn)   printf 'region R { let v = 5 in let b = &shared write R v in let h = spawn (fn () -> let _ = b in ()) in join h }\n' > "$2" ;;
+    sync_container)   printf 'sync type Shared = MkShared of Vec[__heap, int];\n0\n' > "$2" ;;
     *) return 1 ;;
   esac
 }

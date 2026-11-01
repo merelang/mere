@@ -26,8 +26,14 @@ effective.
 
 Please include in your PR:
 - The motivation for the change (what problem it solves / what feature it adds)
-- Which of the 4 backends (interp + C + LLVM + Wasm) are affected
+- Which backends are affected: interpreter, C, LLVM IR, Wasm, or RISC-V
+  (RV32IM / RV64IM)
 - A description of any new tests you added
+
+State which checks actually ran and which required tools were unavailable.
+The default parity suite compares the interpreter, C, LLVM and Wasm; RISC-V
+has separate hosted-execution and QEMU checks. Feature support and execution
+models differ by backend; see [the memory and concurrency contract](docs/memory-model.md#concurrency-and-sharing).
 
 ## Bug Reports / Feature Requests
 
@@ -36,13 +42,12 @@ Please file them on GitHub Issues. Reproduction steps plus the output of
 
 ## Design Discussions
 
-Language-design OPEN_QUESTIONS and paper-validated decisions are
-managed in a separate repository (see the README for details). Proposals
-that involve large design changes should first be discussed in an Issue
-before opening a PR.
+Discuss large language-design changes in a public Issue before opening a PR.
+Include a small example, the proposed behavior and the affected backends.
+Use public specifications, code and tests as references.
 
 ## Code Style
 
 - The OCaml core uses dune's standard formatting (`dune fmt`)
-- `.mere` examples should follow the style of existing files (a test to
-  maintain diff = 0 across the 4 backends may be required)
+- `.mere` examples should follow the style of existing files. Compare output
+  across the supported backends and record any backend-specific limitations.

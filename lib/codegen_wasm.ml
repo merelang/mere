@@ -4104,7 +4104,8 @@ and emit_expr (e : Ast.expr) : unit =
     vec_used := true;
     emit_instr "call $mere_vec_new"
   | Ast.App ({ node = Ast.Var "__vec_owned"; _ }, arg) ->
-    (* v0.1.579: one thread here, so a container is always this thread's *)
+    (* Container ownership is not tracked on this backend. The Node host can
+       run workers, so this constant does not establish thread ownership. *)
     emit_expr arg;
     emit_instr "drop";
     emit_instr "i64.const 1"
@@ -9324,9 +9325,9 @@ let strbuf_runtime_wasm = {|
    also why `bytes_of_bytebuf` needs nothing special to leave a block: the
    frozen `bytes` is a plain value the block's copy-out already handles.
 
-   No owner field and no owner check: this backend has one thread (see how
-   `__vec_owned` is lowered here -- always true), so the question the C
-   backend's `__LANG_OWNED` asks has one answer.
+   No owner field and no owner check on this backend. The Node host runs
+   workers, but the native container-owner guard is not implemented here;
+   `__vec_owned` is lowered to true. See the public memory-model contract.
 
    The two index failures and the negative length are the interpreter's
    messages, built the way vec_get's are ($__lang_fail_idx with the shared

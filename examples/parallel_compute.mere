@@ -1,30 +1,24 @@
 // parallel_compute: data-parallel fan-out / fan-in (the CPU-parallel workload)
 //
-// spawn + channel already give real multicore on the interpreter and the
-// native (C / LLVM) backends. The workload that most wants this — and the one
-// that would justify porting concurrency to Wasm shared-memory threads for
-// the browser — is CPU-heavy data parallelism: split the work into chunks,
-// run the chunks on separate threads, and combine the partial results.
+// The interpreter and native C / LLVM backends use native threads. The Node
+// Wasm host uses workers over shared memory; RISC-V uses coroutine-based green
+// threads. Parallel execution depends on the backend and host. See
+// docs/memory-model.md for the sharing rules and runtime coverage limits.
 //
 // Here four workers each fold a CPU-heavy function over their share of the
 // work and post a partial sum to a channel; the main thread sums the four
-// partials. On a multicore machine this runs close to 4x faster than the
-// sequential version, which is exactly the motivation for wanting the same
-// parallelism inside a Wasm module.
+// partials. A multicore host can run the workers in parallel; scheduling and
+// communication overhead determine the speedup.
 
 let rec fib = fn n -> if n < 2 then n else fib (n - 1) + fib (n - 2);
 
 // One worker's share: sum fib(28) over `count` iterations (a CPU-work proxy).
-// Single-argument (not curried) on purpose: a curried call would allocate an
-// intermediate closure, and a spawned Wasm worker can't allocate yet (the
-// bump allocator is per-instance) — this way the same program runs on every
-// backend, interpreter / C / LLVM / Wasm.
+// A single argument keeps the worker call free of an intermediate curried
+// closure. The Node Wasm host gives each worker a separate allocation range.
 let rec partial = fn count ->
   if count < 1 then 0 else fib 28 + partial (count - 1);
 
-// The program's result is the combined total. Ending in a bare int (rather
-// than print_int) keeps this compilable on the C and LLVM backends too, so
-// the same parallel program runs on every native target — 4 workers *
+// The program's result is the combined total — 4 workers *
 // 10 * fib(28) = 40 * 317811 = 12712440.
 let results = channel_new () in
 // Fan out: four workers, each on its own thread. They share `results` and

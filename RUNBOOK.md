@@ -208,9 +208,14 @@ bindings for storage.
 ## Running the test suite
 
 ```sh
-dune test              # 1849+ tests
+dune test              # run the tests available with the installed tools
 dune test --force      # bypass dune's cache if a run reports 0 tests
 ```
+
+The reported total depends on optional tools. The full suite with Node.js
+and WABT (`wat2wasm`) includes the Wasm execution checks; a source build
+without them runs fewer tests and reports the omitted checks. Use the full
+CI environment when validating the README's test count.
 
 CI (`.github/workflows/ci.yml`) runs the suite on ubuntu + macOS ×
 OCaml 5.1 / 5.4 (4-matrix). Integration checks use the validated Ubuntu 24.04

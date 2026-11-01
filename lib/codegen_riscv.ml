@@ -3387,7 +3387,8 @@ and compile_app env e =
        emit (Jal (ra, request_store "__vpush_" t))
      | _ -> emit (Jal (ra, "__vec_push")))
   | Ast.Var "__vec_owned" when List.length args = 1 ->
-    (* v0.1.579: one hart, one thread: always this thread's *)
+    (* No container-owner tracking. Coroutine-based green threads share the
+       hart; this constant does not check which logical thread owns a Vec. *)
     li a0 1
   | Ast.Var "vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
