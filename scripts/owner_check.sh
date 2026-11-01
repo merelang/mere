@@ -252,6 +252,30 @@ WASM_POISONS
     if [ "$out" = 0 ] && [ "$st" = 0 ]; then echo "  ok    POISON wasm duplicate worker IDs: shared write succeeds"
     else echo "  FAIL  POISON wasm duplicate worker IDs: [$out] status $st"; pf=1; fi
   else echo "  FAIL  POISON wasm worker identities: $why"; pf=1; fi
+  cp "$ROOT/test/threadfail/join_caught.mere" "$FX/diagnostic_write.mere"
+  if why=$(build diagnostic_write w); then
+    # This host keeps the successful-write ordering but loses completion when
+    # a diagnostic throws. First prove it still runs an ordinary failed join.
+    sed 's/^  } finally {$/  } catch (error) { throw error; } {/' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    sh "$ROOT/scripts/bounded.sh" 5 node "$T/host/run_wasm.js" "$T/bin.wasm" > "$T/out" 2> "$T/err"; st=$?
+    if [ "$(cat "$T/out")" = 7 ] && [ "$st" = 0 ]; then
+      echo "  ok    wasm without finally: ordinary failed join still recovers"
+    else echo "  FAIL  wasm without finally: ordinary join status $st"; pf=1; fi
+    # Inject an EPIPE at the worker's diagnostic write. Its recorded Mere
+    # failure must still reach try_or in the parent, which prints 7.
+    sed '/^const st = new Int32Array(doneSab, 0, 5);$/a\
+const writeSync = fs.writeSync; fs.writeSync = (fd, ...args) => { if (fd === 2) throw Object.assign(new Error("diagnostic write failed"), { code: "EPIPE" }); return writeSync(fd, ...args); };' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    sh "$ROOT/scripts/bounded.sh" 5 node "$T/host/run_wasm.js" "$T/bin.wasm" > "$T/out" 2> "$T/err"; st=$?
+    if [ "$(cat "$T/out")" = 7 ] && [ "$st" = 0 ]; then
+      echo "  ok    wasm throwing diagnostic write: join recovers"
+    else echo "  FAIL  wasm throwing diagnostic write: status $st, stdout [$(cat "$T/out")]"; pf=1; fi
+    sed 's/^  } finally {$/  } catch (error) { throw error; } {/' "$T/host/run_wasm.js" > "$T/throw-no-finally.js"
+    mv "$T/throw-no-finally.js" "$T/host/run_wasm.js"
+    sh "$ROOT/scripts/bounded.sh" 3 node "$T/host/run_wasm.js" "$T/bin.wasm" > "$T/out" 2> "$T/err"; st=$?
+    if [ "$st" = 201 ] && [ ! -s "$T/out" ]; then
+      echo "  ok    POISON wasm throwing diagnostic without finally: join times out"
+    else echo "  FAIL  POISON wasm throwing diagnostic without finally: status $st, stdout [$(cat "$T/out")]"; pf=1; fi
+  else echo "  FAIL  wasm throwing diagnostic: $why"; pf=1; fi
   if why=$(build param_vec w); then
     sed '/__lang_thread_id.value = tid + 1/d' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
     out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?

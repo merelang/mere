@@ -27,10 +27,12 @@ sharing across two workers, failure recovery and allocation alignment.
 Negative controls remove write/read guards and duplicate worker identities
 to verify that these tests detect the missing protection.
 
-The Node host publishes worker completion after writing its failure message.
+The Node host publishes worker completion after attempting its failure message.
 Previously, `join` could observe completion and terminate the worker before
-that message was written. A delayed-diagnostic test and its negative control
-exercise this ordering deterministically.
+that message was written. Completion is published and notified in `finally`,
+so an output error such as `EPIPE` cannot leave the joiner blocked. Delayed
+and throwing diagnostic tests, with negative controls, cover both ordering
+and progress when the write fails.
 
 ## v0.1.679 — 2026-11-01
 

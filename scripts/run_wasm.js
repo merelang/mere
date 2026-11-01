@@ -257,16 +257,19 @@ const env = Object.assign({
     }
     Atomics.store(s32, statusBase >> 2, failed ? 2 : 1);
   }
-  // v0.1.590: a failure is one line when it happens, whoever holds the handle
-  // (the main thread may be busy, so the worker writes it)
-  if (Atomics.load(st, 1) === 1 && Atomics.compareExchange(st, 3, 0, 1) === 0) {
-    const msg = Buffer.from(new Uint8Array(doneSab, 20, Atomics.load(st, 4))).toString("utf8");
-    fs.writeSync(2, "mere: thread " + tid + " failed: " + msg + "\\n");
+  try {
+    // v0.1.590: a failure is one line when it happens, whoever holds the handle
+    // (the main thread may be busy, so the worker writes it)
+    if (Atomics.load(st, 1) === 1 && Atomics.compareExchange(st, 3, 0, 1) === 0) {
+      const msg = Buffer.from(new Uint8Array(doneSab, 20, Atomics.load(st, 4))).toString("utf8");
+      fs.writeSync(2, "mere: thread " + tid + " failed: " + msg + "\\n");
+    }
+  } finally {
+    // join may observe completion and terminate the worker immediately. Try
+    // the diagnostic first, but always wake join even if that write throws.
+    Atomics.store(st, 0, 1);
+    Atomics.notify(st, 0);
   }
-  // join may skip Atomics.wait when it observes completion, then terminate
-  // the worker immediately. Publish completion only after its diagnostic.
-  Atomics.store(st, 0, 1);
-  Atomics.notify(st, 0);
 })();
 `;
 
