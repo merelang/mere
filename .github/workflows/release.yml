@@ -146,3 +146,30 @@ jobs:
             *release-ok*) echo "served ${{ matrix.asset }} runs a program" ;;
             *) echo "release: the served binary did not run a one-line program" >&2; exit 1 ;;
           esac
+
+  checksums:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Publish checksums of the verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          draft="$(gh release view "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)"
+          [ "$draft" = true ] || {
+            echo "release is already public; refusing to replace checksums" >&2; exit 1; }
+          mkdir -p dist roundtrip
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern mere-linux-x86_64 --pattern mere-macos-arm64 --dir dist
+          python3 scripts/release_asset_check.py dist/mere-linux-x86_64 dist/mere-macos-arm64
+          (cd dist && sha256sum mere-linux-x86_64 mere-macos-arm64 > SHA256SUMS)
+          gh release upload "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" dist/SHA256SUMS --clobber
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern SHA256SUMS --dir roundtrip
+          (cd dist && sha256sum -c ../roundtrip/SHA256SUMS)
