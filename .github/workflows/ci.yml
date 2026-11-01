@@ -76,7 +76,8 @@ jobs:
   # platforms end up covered between CI and the working copy.
   gates:
     name: Gates (cross-backend and differential)
-    runs-on: ubuntu-latest
+    # Keep integration oracles on the validated image as ubuntu-latest moves.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v5
