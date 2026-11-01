@@ -9615,19 +9615,6 @@ let str_concat_helper =
          needed. When combined with show-style helpers we need to return a
          str, so we provide two variants (__lang_fail_int / __lang_fail_str)
          depending on the return type. *)
-      (* v0.1.310: one jmpbuf PER THREAD. The single global slot meant a fail
-         in a spawned thread could longjmp into a jmp_buf that some OTHER
-         thread's try_or had armed -- a jump into a foreign stack. try_or's
-         save/restore protects against re-entry on one thread; only
-         _Thread_local protects against a neighbour. A thread with no try_or
-         of its own now takes the uncaught path (print + exit 1), which is
-         what the interpreter does. The message slot exists for boundaries
-         that must REPORT the failure rather than print it (--lib wrappers):
-         the fail_* helpers build messages in stack buffers that longjmp
-         abandons, so the message is copied somewhere that survives the jump. *)
-      "static _Thread_local int __lang_fail_jmpbuf_set = 0;";
-      "static _Thread_local jmp_buf __lang_fail_jmpbuf;";
-      "static _Thread_local char __lang_fail_msg[256];";
       (* v0.1.271: a stack overflow used to be a bare SIGSEGV -- no output, exit
          139, nothing to read. Deep recursion is the most common way a Mere
          program dies on a compiled backend (three of this week's findings were
@@ -17018,8 +17005,13 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       (* Q-178: defined with the SIGSEGV handler, which is emitted after this *)
       "static void* __lang_thread_segv_enter(void);";
       "static void __lang_thread_segv_leave(void*);";
-      (* defined with the failure runtime, which is emitted after this *)
-      "static _Thread_local int __lang_fail_jmpbuf_set;";
+      (* Define the failure state once, before both the thread trampoline and
+         the failure runtime. C23 does not permit repeated definitions of an
+         object with thread storage duration, even without an initializer.
+         Each thread needs its own jump target: a shared slot could longjmp
+         into another thread's stack. The message must survive the longjmp
+         for thread joins and --lib wrappers to report the failure. *)
+      "static _Thread_local int __lang_fail_jmpbuf_set = 0;";
       "static _Thread_local jmp_buf __lang_fail_jmpbuf;";
       "static _Thread_local char __lang_fail_msg[256];";
       "static void __lang_region_unwind(int to_n);";
