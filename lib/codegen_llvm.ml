@@ -4585,8 +4585,8 @@ let emit_keep_above_field (struct_name : string) (idx : int) (c : string) : unit
 (* v0.1.575/582: the writes that check their owner, and their messages (see
    owner_runtime_llvm below) *)
 let owner_msgs = [ ("Vec", "vec_push"); ("Vec", "vec_set"); ("Vec", "f64x2_store");
-                   ("Vec", "vec_reverse"); ("Vec", "vec_sort"); ("ListBuf", "lb_to_list");
-                   ("Map", "map_set"); ("Map", "map_delete");
+                   ("Vec", "vec_reverse"); ("Vec", "vec_sort"); ("Vec", "vec_recycle"); ("ListBuf", "lb_to_list");
+                   ("Map", "map_set"); ("Map", "map_delete"); ("Map", "map_clear"); ("Map", "map_recycle");
                    ("StrBuf", "strbuf_push"); ("ListBuf", "lb_push");
                    ("ByteBuf", "bytebuf_set"); ("ByteBuf", "bytebuf_push") ]
 let owner_msg_name (kind : string) (op : string) =
@@ -6975,9 +6975,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   (* v0.1.661: the container upkeep calls. This backend gives a container no
      arena of its own (C and RISC-V do, v0.1.614), so there is nothing to pack:
      compact keeps every value where it is -- a Map's dense arrays already skip
-     the deleted, in insertion order -- and recycle empties. vec_recycle is the
-     length set to 0; map_recycle writes a fresh map's struct over the old one,
-     so the handle the program holds is the same map, empty. *)
+     the deleted, in insertion order -- and recycle empties. Guarded runtime
+     helpers reset storage in place, preserving the region and owner word. *)
   (* v0.1.663: stdin (stdin_runtime_llvm) *)
   | Ast.App ({ node = Ast.Var ("read_line" | "read_stdin" as op); _ }, arg) ->
     ignore (emit_expr env arg);
@@ -6989,21 +6988,18 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
   | Ast.App ({ node = Ast.Var "vec_recycle"; _ }, arg) ->
     let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
     let av = emit_expr env arg in
-    let lp = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = getelementptr %%mere_vec_%s, ptr %s, i32 0, i32 1" lp elem_tag av);
-    emit_instr (Printf.sprintf "  store i32 0, ptr %s" lp);
+    let result = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @mere_vec_%s_recycle(ptr %s)" result elem_tag av);
     "0"
   | Ast.App ({ node = Ast.Var ("vec_compact" | "map_compact"); _ }, arg) ->
     ignore (emit_expr env arg);
     "0"
-  | Ast.App ({ node = Ast.Var ("map_recycle" | "map_clear"); _ }, arg) ->
+  | Ast.App ({ node = Ast.Var ("map_recycle" | "map_clear" as op); _ }, arg) ->
     let (k_tag, v_tag) = map_kv_tags_of arg.Ast.ty arg.Ast.loc in
     let av = emit_expr env arg in
-    let fr = fresh_reg () and szp = fresh_reg () and sz = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call ptr @mere_map_%s_%s_new(ptr @__lang_default_region)" fr k_tag v_tag);
-    emit_instr (Printf.sprintf "  %s = getelementptr %%mere_map_%s_%s, ptr null, i32 1" szp k_tag v_tag);
-    emit_instr (Printf.sprintf "  %s = ptrtoint ptr %s to i64" sz szp);
-    emit_instr (Printf.sprintf "  call ptr @memcpy(ptr %s, ptr %s, i64 %s)" av fr sz);
+    let suffix = if op = "map_clear" then "clear" else "recycle" in
+    let result = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i32 @mere_map_%s_%s_%s(ptr %s)" result k_tag v_tag suffix av);
     "0"
   | Ast.App ({ node = Ast.Var "vec_len"; _ }, arg) ->
     let elem_tag = vec_elem_tag_of arg.Ast.ty arg.Ast.loc in
@@ -10508,7 +10504,7 @@ let owner_runtime_llvm =
 (* load field [idx] of the container at [c] (a %[sn]) and check it *)
 let owner_check_lines ~(sn : string) ~(idx : int) ~(c : string) (kind : string) (op : string) : string list =
   [ Printf.sprintf "  %%__own_p = getelementptr %%%s, ptr %s, i32 0, i32 %d" sn c idx;
-    "  %__own = load i32, ptr %__own_p";
+    "  %__own = load atomic i32, ptr %__own_p monotonic, align 4";
     owner_call "%__own" kind op ]
 
 (* v0.1.582: a read of the container at [c] marks it shared if this thread is
@@ -11131,6 +11127,14 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       Printf.sprintf "  store ptr %%r, ptr %%rp";
     ] @ owner_store_lines ~sn:struct_name ~idx:4 ~c:"%v" @ [
       "  ret ptr %v";
+      "}";
+      "";
+      Printf.sprintf "define i32 @mere_vec_%s_recycle(ptr %%v) {" tag;
+      "entry:";
+    ] @ owner_check_lines ~sn:struct_name ~idx:4 ~c:"%v" "Vec" "vec_recycle" @ [
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
+      "  store i32 0, ptr %lp";
+      "  ret i32 0";
       "}";
       "";
       (* push *)
@@ -13329,10 +13333,55 @@ let emit_map_runtime_llvm_hashed (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  ret i32 0";
       "}" ]
 
+(* Guarded upkeep for both generated Map layouts. *)
+let emit_map_upkeep_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
+  let sn = Printf.sprintf "mere_map_%s_%s" (ty_tag k_ty) (ty_tag v_ty) in
+  let hashed = map_key_index_safe k_ty in
+  let owner_idx = if hashed then 10 else 5 in
+  let storage =
+    [ Printf.sprintf "define internal void @%s_clear_storage(ptr %%m) {" sn;
+      "entry:";
+      Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%m, i32 0, i32 2" sn;
+      "  store i32 0, ptr %lp" ]
+    @ (if not hashed then [] else
+      [ Printf.sprintf "  %%livep = getelementptr %%%s, ptr %%m, i32 0, i32 8" sn;
+        "  store i32 0, ptr %livep";
+        Printf.sprintf "  %%usedp = getelementptr %%%s, ptr %%m, i32 0, i32 9" sn;
+        "  store i32 0, ptr %usedp";
+        Printf.sprintf "  %%ip = getelementptr %%%s, ptr %%m, i32 0, i32 5" sn;
+        "  %idx = load ptr, ptr %ip";
+        Printf.sprintf "  %%icp = getelementptr %%%s, ptr %%m, i32 0, i32 6" sn;
+        "  %cap = load i32, ptr %icp";
+        "  br label %loop";
+        "loop:";
+        "  %i = phi i32 [ 0, %entry ], [ %next, %body ]";
+        "  %done = icmp sge i32 %i, %cap";
+        "  br i1 %done, label %end, label %body";
+        "body:";
+        "  %slot = getelementptr i32, ptr %idx, i32 %i";
+        "  store i32 -1, ptr %slot";
+        "  %next = add i32 %i, 1";
+        "  br label %loop";
+        "end:" ])
+    @ [ "  ret void"; "}"; "" ]
+  in
+  (* Never overwrite the owner word: a foreign read may set its shared bit
+     after the entry check. Region, capacity and buffers remain with the Map. *)
+  let wrappers = List.concat_map (fun (suffix, op) ->
+    [ Printf.sprintf "define i32 @%s_%s(ptr %%m) {" sn suffix;
+      "entry:" ]
+    @ owner_check_lines ~sn ~idx:owner_idx ~c:"%m" "Map" op
+    @ [ Printf.sprintf "  call void @%s_clear_storage(ptr %%m)" sn;
+        "  ret i32 0"; "}"; "" ])
+    ["clear", "map_clear"; "recycle", "map_recycle"]
+  in
+  String.concat "\n" (storage @ wrappers)
+
 (* Dispatch: index-safe keys get the O(1) hash runtime, others the linear one. *)
 let emit_map_runtime_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
-  if map_key_index_safe k_ty then emit_map_runtime_llvm_hashed k_ty v_ty
-  else emit_map_runtime_llvm_linear k_ty v_ty
+  (if map_key_index_safe k_ty then emit_map_runtime_llvm_hashed k_ty v_ty
+   else emit_map_runtime_llvm_linear k_ty v_ty)
+  ^ "\n" ^ emit_map_upkeep_runtime_llvm k_ty v_ty
 
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic type. Region-
    allocated mutable byte buffer; to_str returns a null-terminated copy

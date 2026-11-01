@@ -477,11 +477,12 @@ fails too, even after readers have been joined. `OwnedVec` has a separate
 ownership handoff when moved into a spawned closure. These behaviors are
 exercised by [`owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/owner_check.sh).
 
-LLVM's inline lowerings of `vec_recycle`, `map_clear` and `map_recycle`
-currently bypass these owner checks. The write-rejection and freezing rules
-therefore apply to its guarded entrypoints. Use those three LLVM operations
-only on containers that remain confined to their owner thread, without
-foreign reads. Opaque callbacks do not gain runtime protection for them.
+LLVM also guards `vec_recycle`, `map_clear` and `map_recycle` as of
+v0.1.682. Rejected calls leave the contents intact. Map clearing and recycling
+empty the existing storage while preserving its owner, shared bit, region
+and capacity; they do not replace the header with a fresh Map. LLVM does not
+give these containers private arenas, so recycling does not reclaim their
+backing storage.
 
 **Threaded Wasm modules also guard `Vec` (v0.1.680) and `Map` (v0.1.681).**
 A foreign write fails before mutation, and a foreign storage read permanently

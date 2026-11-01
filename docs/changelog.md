@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.682 — 2026-11-02
+
+_LLVM: guard Vec recycling and Map clearing/recycling._
+
+`vec_recycle`, `map_clear` and `map_recycle` now check the container's owner
+before modifying storage. A write from a foreign thread or to a shared
+container fails by name, including through an opaque callback. Caught
+failures leave the original contents intact. Owner checks load the metadata
+atomically, matching the atomic shared-bit updates made by foreign reads.
+
+Both LLVM Map layouts empty their existing storage, preserving owner and
+shared metadata, region, buffers and capacity. Hashed Maps also clear their
+index and live-entry counters. LLVM containers have no private arenas, so
+this reuses storage without reclaiming it.
+
+The existing ownership gate covers foreign and shared upkeep with six key
+families, local reuse on main and worker threads, repeated clearing after
+growth and deletion, and pointer-valued entries. Negative controls remove
+the new guards and reset owner metadata to verify that the gate detects
+both missing checks and accidental loss of the shared bit.
+
 ## v0.1.681 — 2026-11-01
 
 _Wasm: enforce Map ownership across workers and guard Vec recycling._

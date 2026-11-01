@@ -1,0 +1,30 @@
+// Repeated reuse after growth and deletion, with pointer-valued entries in
+// hashed and linear Maps. Old indexes, tombstones and entries must disappear.
+let work = fn () ->
+  let ints = map_new () in let pairs = map_new () in
+  let rec fill = fn (i: int) -> if i == 128 then () else
+    let _ = map_set ints i (str_of_int i) in
+    let _ = map_set pairs (i, "key") (str_of_int i) in fill (i + 1) in
+  let rec erase = fn (i: int) -> if i == 40 then () else
+    let _ = map_delete ints i in let _ = map_delete pairs (i, "key") in erase (i + 1) in
+  let rec reuse = fn (n: int) -> if n == 0 then 0 else
+    let _ = fill 0 in let _ = erase 0 in
+    let _ = map_clear ints in let _ = map_recycle pairs in
+    let first = map_len ints == 0 && map_len pairs == 0 &&
+      not (map_has ints 127) && not (map_has pairs (127, "key")) in
+    let _ = fill 0 in let _ = erase 0 in
+    let _ = map_recycle ints in let _ = map_clear pairs in
+    let _ = map_clear ints in let _ = map_recycle pairs in
+    let _ = map_set ints 127 "ready" in let _ = map_set pairs (127, "key") "ready" in
+    let values = vec_new () in
+    let _ = map_iter ints (fn k -> fn v -> vec_push values v) in
+    let _ = map_iter pairs (fn k -> fn v -> vec_push values v) in
+    let valid = first && map_len ints == 1 && map_len pairs == 1 &&
+      vec_len values == 2 && vec_get values 0 == "ready" && vec_get values 1 == "ready" in
+    (if valid then 7 else 0) + reuse (n - 1) in
+  reuse 6;
+let results = channel_new ();
+let h = spawn (fn () -> channel_send results (work ()));
+let own = work ();
+let _ = join h;
+print_int (own + channel_recv results)
