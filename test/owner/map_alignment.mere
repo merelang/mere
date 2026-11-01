@@ -1,0 +1,16 @@
+// Odd-sized strings precede hashed and linear Map headers on both instances.
+let rec run = fn (n: int) -> fn (s: str) -> fn (total: int) ->
+  if n == 16 then total else
+  let next = s ++ "a" in
+  let ints = map_new () in
+  let _ = map_set ints n (str_len next) in
+  let strings = map_new () in
+  let _ = map_set strings next 7 in
+  let pairs = map_new () in
+  let _ = map_set pairs (n, next) n in
+  run (n + 1) next (total + map_get ints n + map_get strings next + map_get pairs (n, next));
+let result = channel_new ();
+let h = spawn (fn () -> channel_send result (run 0 "" 0));
+let own_total = run 0 "" 0;
+let _ = join h;
+print_int (own_total + channel_recv result)

@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.681 — 2026-11-01
+
+_Wasm: enforce Map ownership across workers and guard Vec recycling._
+
+Threaded Wasm modules give both hashed and linear Maps aligned atomic owner
+metadata. Foreign writes fail before mutation. A foreign storage read makes
+the Map permanently read-only, including after readers have joined. Checks
+cover `map_set`, `map_delete`, `map_clear`, `map_recycle`, `map_get`, `map_has`,
+`map_len` and `map_iter`. Read-only sharing and worker-local mutation remain
+valid. The existing instance-identity protocol is reused; modules without
+thread or channel builtins retain their existing Map layouts and omit the
+owner checks and atomic accesses. The memory contract also records existing
+LLVM inline clearing/recycling coverage limits.
+
+`vec_recycle` now uses Vec's write guard. Its previous inline length reset
+let an opaque callback clear another worker's Vec or a shared Vec. Caught
+failures preserve the original contents, and local recycling still works.
+
+The ownership gate now checks scalar and compound keys, caught writes,
+read-only sharing, worker identities, allocation alignment, growth and
+pointer-valued entries. Negative controls remove each layout's read/write
+protection, duplicate worker identities and remove header alignment.
+
 ## v0.1.680 — 2026-11-01
 
 _Wasm: enforce Vec ownership across workers._

@@ -412,7 +412,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.680)
+## 4. Implemented memory behavior (v0.1.681)
 
 ### Concurrency and sharing
 
@@ -477,31 +477,43 @@ fails too, even after readers have been joined. `OwnedVec` has a separate
 ownership handoff when moved into a spawned closure. These behaviors are
 exercised by [`owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/owner_check.sh).
 
-**Threaded Wasm modules also guard `Vec` (v0.1.680).** A foreign write
-fails before mutation, and a foreign read permanently prevents later writes,
-including after `join`. The checks cover ordinary, range-versioned and SIMD
-accesses. Read-only sharing and a worker's own mutable Vec remain valid.
-For example, [`test/owner/param_vec.mere`](https://github.com/merelang/mere/blob/main/test/owner/param_vec.mere)
-now rejects the foreign write on the Node Wasm host as it does natively.
-The Wasm cases and negative controls in
+LLVM's inline lowerings of `vec_recycle`, `map_clear` and `map_recycle`
+currently bypass these owner checks. The write-rejection and freezing rules
+therefore apply to its guarded entrypoints. Use those three LLVM operations
+only on containers that remain confined to their owner thread, without
+foreign reads. Opaque callbacks do not gain runtime protection for them.
+
+**Threaded Wasm modules also guard `Vec` (v0.1.680) and `Map` (v0.1.681).**
+A foreign write fails before mutation, and a foreign storage read permanently
+prevents later writes, including after `join`. Vec checks cover ordinary,
+range-versioned and SIMD accesses, plus `vec_recycle`. Map checks cover
+`map_set`, `map_delete`, `map_clear` and `map_recycle`; reads through `map_get`,
+`map_has`, `map_len` and `map_iter` freeze the Map. Hashed scalar keys and
+linear compound keys follow the same rule. Wasm's `map_bytes` and
+`map_compact` remain constant/no-op operations without a storage access.
+Read-only sharing and each worker's own mutable containers remain valid.
+The cases and negative controls in
 [`owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/owner_check.sh)
-cover these rules and worker identity separation.
+and its
+[Wasm Map helper](https://github.com/merelang/mere/blob/main/scripts/wasm_map_owner_check.sh)
+cover these rules, worker identity separation and allocation alignment.
 
 An embedding host must set the exported mutable `__lang_thread_id` global
 before executing Mere code: use a distinct integer in `1..1073741823` for
 each instance sharing memory. `scripts/run_wasm.js` uses `1` for the main
-instance and `tid + 1` for each worker. Zero or an out-of-range identity is
-refused by name when a Vec is used. The existing `__lang_in_thread` global
-remains a boolean for failure propagation. Modules that use neither thread nor channel builtins omit the Vec owner
-checks and atomic metadata accesses.
+instance and `tid + 1` for each worker. A zero or out-of-range identity causes
+execution to fail when a Vec or Map is used. The existing `__lang_in_thread` global
+remains a boolean for failure propagation. Modules that use neither thread
+nor channel builtins omit the Vec and Map owner checks and atomic metadata
+accesses.
 
-**Wasm's `Map`, `StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` still lack
+**Wasm's `StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` still lack
 these runtime owner guards.** `OwnedVec` keeps its existing move behavior
 without a runtime handoff check. RISC-V also lacks the native container-owner
 guards. Frontend checks still apply on both backends, but an opaque callback
 accepted by them gains no additional protection for these containers. Keep
 mutable containers within one worker and exchange messages over channels.
-The Vec checks enforce access rules at operation boundaries; they do not
+The Vec and Map checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
 
 FFI code and the implementation behind a `sync type` require the capability

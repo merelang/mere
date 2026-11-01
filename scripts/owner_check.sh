@@ -1,7 +1,7 @@
 #!/bin/sh
 # scripts/owner_check.sh -- a container written by a thread other than the one
 # that made it fails by name, on the interpreter, C and LLVM (v0.1.575),
-# and for Vec on the Node Wasm host (v0.1.680).
+# and for Vec (v0.1.680) and Map (v0.1.681) on the Node Wasm host.
 #
 # The type check (v0.1.574) follows what a spawned thread reaches through
 # functions whose definitions it can see. A closure that arrives as a PARAMETER
@@ -38,9 +38,9 @@
 # guards must then stop failing that way (the interpreter's check is not in
 # emitted text).
 #
-# Wasm covers Vec only: its other containers and OwnedVec handoff are outside
+# Wasm covers Vec and Map: other containers and OwnedVec handoff are outside
 # this runtime guarantee. Deterministic join/channel barriers cover shared
-# Vecs, including two workers whose identities must differ. Generated cases
+# containers, including two workers whose identities must differ. Generated cases
 # exercise each read/write API, including range-versioned and SIMD paths.
 #
 # Usage: sh scripts/owner_check.sh [--poison] [--wasm-only]
@@ -87,7 +87,7 @@ build() {
 
 judge() {  # $1 program, $2 output, $3 status -> ok or why not
   case "$1" in
-    vec_caught) [ "$2" = '7:1' ] && [ "$3" = 0 ] && echo ok || echo "wanted caught failure without mutation, got [$2] status $3" ;;
+    vec_caught|vec_recycle_caught) [ "$2" = '7:1' ] && [ "$3" = 0 ] && echo ok || echo "wanted caught failure without mutation, got [$2] status $3" ;;
     vec_alignment) [ "$2" = 272 ] && [ "$3" = 0 ] && echo ok || echo "wanted 272, got [$2] status $3" ;;
     shared_worker_ids)
       case "$2" in *"$SHSENT"*7) [ "$3" = 0 ] && echo ok || echo "join recovery exited $3" ;;
@@ -117,7 +117,7 @@ done
 
 fi
 
-wasm_cases='param_vec param_reverse param_versioned shared_versioned legit legit_readonly ov_moved shared_vec_phase shared_worker_ids vec_caught vec_alignment'
+wasm_cases='param_vec param_map shared_phase param_reverse param_versioned shared_versioned legit legit_readonly ov_moved shared_vec_phase shared_worker_ids vec_caught vec_alignment vec_recycle_caught shared_vec_recycle'
 # Each reader is the only foreign access before join and the owner's write.
 # If its mark disappears, that write succeeds and this case goes red.
 while IFS='|' read -r name expr; do
@@ -228,6 +228,7 @@ POISONS
   done <<'WASM_POISONS'
 param_vec|/call $mere_vec_write.*;; vec-owner$/d
 shared_vec_phase|/call $mere_vec_read.*;; vec-owner$/d
+shared_vec_recycle|/call $mere_vec_write.*i32.const 5.*;; vec-owner$/d
 WASM_POISONS
   mkdir "$T/host"
   cp "$ROOT"/scripts/*.js "$T/host/"
@@ -298,5 +299,6 @@ const writeSync = fs.writeSync; fs.writeSync = (fd, ...args) => { if (fd === 2) 
   else echo "  FAIL  POISON wasm alignment: $why"; pf=1; fi
   [ "$pf" = 0 ] || { echo "owner_check --poison: FAILED"; exit 1; }
 fi
+MERE="$MERE" sh "$ROOT/scripts/wasm_map_owner_check.sh" "$@" || fail=1
 [ "$fail" = 0 ] || { echo "owner_check: FAILED"; exit 1; }
 if [ "$poison" = 1 ]; then echo "owner_check --poison: ok (the gate can go red)"; else echo "owner_check: ok"; fi
