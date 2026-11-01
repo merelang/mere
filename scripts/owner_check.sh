@@ -232,6 +232,21 @@ WASM_POISONS
   mkdir "$T/host"
   cp "$ROOT"/scripts/*.js "$T/host/"
   if why=$(build shared_worker_ids w); then
+    # Delay the diagnostic to make a premature completion observable on every
+    # run: join must wait for the line before it can terminate the worker.
+    sed '/fs.writeSync(2, "mere: thread " + tid/i\
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
+    cp "$T/host/run_wasm.js" "$T/delayed-host.js"
+    out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
+    v=$(judge shared_worker_ids "$out" "$st")
+    [ "$v" = ok ] && echo "  ok    wasm delayed diagnostic: join waits for the line" || { echo "  FAIL  wasm delayed diagnostic: $v"; pf=1; }
+    # Publish and notify completion before the delayed line: the ownership
+    # error reaches join, but the worker is terminated without its reason.
+    sed '/Atomics.store(st, 0, 1);/d; /Atomics.wait(new Int32Array(new SharedArrayBuffer(4))/i\
+    Atomics.store(st, 0, 1); Atomics.notify(st, 0);' "$T/delayed-host.js" > "$T/host/run_wasm.js"
+    out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
+    if [ "$out" = 7 ] && [ "$st" = 0 ]; then echo "  ok    POISON wasm premature completion: diagnostic is lost"
+    else echo "  FAIL  POISON wasm premature completion: [$out] status $st"; pf=1; fi
     sed 's/__lang_thread_id.value = tid + 1/__lang_thread_id.value = 2/' "$ROOT/scripts/run_wasm.js" > "$T/host/run_wasm.js"
     out=$(run node "$T/host/run_wasm.js" "$T/bin.wasm"); st=$?
     if [ "$out" = 0 ] && [ "$st" = 0 ]; then echo "  ok    POISON wasm duplicate worker IDs: shared write succeeds"

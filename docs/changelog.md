@@ -27,6 +27,11 @@ sharing across two workers, failure recovery and allocation alignment.
 Negative controls remove write/read guards and duplicate worker identities
 to verify that these tests detect the missing protection.
 
+The Node host publishes worker completion after writing its failure message.
+Previously, `join` could observe completion and terminate the worker before
+that message was written. A delayed-diagnostic test and its negative control
+exercise this ordering deterministically.
+
 ## v0.1.679 — 2026-11-01
 
 _C: generated programs and libraries compile with GCC 15's default C23 mode._
