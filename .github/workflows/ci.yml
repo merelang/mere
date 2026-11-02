@@ -848,6 +848,7 @@ jobs:
         run: |
           sh scripts/owner_check.sh --poison
           sh scripts/wasm_map_owner_check.sh --poison
+          sh scripts/wasm_buffer_owner_check.sh --poison
 
       # A saturated call of a curried inner function allocates no closures on
       # C, LLVM and Wasm (Q-142, v0.1.583): mandelbrot's inner loop was 104

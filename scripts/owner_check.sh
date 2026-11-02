@@ -38,8 +38,9 @@
 # guards must then stop failing that way (the interpreter's check is not in
 # emitted text).
 #
-# Wasm covers Vec and Map: other containers and OwnedVec handoff are outside
-# this runtime guarantee. Deterministic join/channel barriers cover shared
+# Wasm covers Vec and Map here, with StrBuf/ByteBuf in wasm_buffer_owner_check.sh.
+# ListBuf and OwnedVec handoff remain outside this runtime guarantee.
+# Deterministic join/channel barriers cover shared
 # containers, including two workers whose identities must differ. Generated cases
 # exercise each read/write API, including range-versioned and SIMD paths.
 #

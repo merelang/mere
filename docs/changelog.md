@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.684 — 2026-11-02
+
+_Wasm: guard StrBuf and ByteBuf ownership across workers._
+
+Threaded modules give StrBuf and ByteBuf atomic owner/shared metadata in
+their existing 16-byte headers. Foreign writes fail before mutation, and a
+foreign read permanently makes the source buffer read-only. Checks cover
+every buffer read/write API, including immutable snapshot conversions and
+generic StrBuf `len`. Caught failures preserve the contents. Buffers created
+by `bytebuf_of_bytes` belong to their calling worker; immutable snapshots
+remain independent. Modules without thread/channel builtins omit these
+checks and atomic accesses.
+
+`wasm_buffer_owner_check.sh --poison` runs in CI. It covers opaque callbacks,
+empty buffers, growth, region reuse, allocation alignment, distinct worker
+identities and invalid host identities. Negative controls remove each access
+guard, remove StrBuf alignment, and give workers duplicate identities.
+ListBuf guards and OwnedVec ownership handoff remain outside this change.
+
 ## v0.1.683 — 2026-11-02
 
 _LLVM: guard Vec recycling and Map clearing/recycling._
