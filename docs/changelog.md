@@ -4,7 +4,7 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
-## v0.1.685 — 2026-11-02
+## v0.1.685 — 2026-11-03
 
 _Wasm: require ListBuf's owner for both append and conversion._
 
@@ -19,6 +19,28 @@ The new CI matrix exercises empty and nonempty builders, rejected appends and
 conversions, frozen builders, immutable list messages, region reuse and worker
 identities. Negative controls remove each guard, remove header alignment and
 give workers duplicate identities. OwnedVec handoff remains a separate limit.
+
+_C: an arena retired under a stopped coroutine is not asked about again until one of the stacks that pinned it has run._
+
+When a region is released while a suspended coroutine's stack may point
+into it, the C runtime retires it instead of freeing it, and tries it again
+at the next retirement. Each retirement tried every retired arena again, and
+each try walked every suspended stack. A suspended stack's words change only
+when it runs, so for an arena whose pinning stacks have all stayed suspended
+the answer could only be "still pinned". mere-ruby, left with a thousand
+fibers suspended (an Enumerator stepped once and dropped, in a loop), spent
+95% of its time in that walk under a collection every 50 safepoints, and
+did not finish a 3000-iteration loop in 300 s; it now takes 46 s.
+
+A retired arena now records the region epoch at which it was last tried.
+`__lang_coro_unmoved` answers whether each of its pinning stacks is still
+suspended and stopped no later than that epoch; then the arena is kept
+without the walk. Otherwise it is tried as before. An arena is freed at the
+same retirement as before, never earlier.
+
+`test/coro/retire_moved` retires 300 arenas of 200 KB under a stack that
+then runs: a correct run holds about 3 MiB. `coro_check --poison` C 16
+takes every stack for one that has not run, and the run holds 126 MiB.
 
 ## v0.1.684 — 2026-11-02
 
