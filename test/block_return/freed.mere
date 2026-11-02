@@ -1,0 +1,15 @@
+// A region grown to some 400 MB of blocks, then left: on macOS the blocks of
+// 16 KB and more are unmapped when they are freed (v0.1.686), so what stays
+// resident afterwards is the program, not the region. Under malloc they were
+// kept: 841 MB resident after the region was gone.
+let n = region R {
+  let v = vec_new () in
+  let rec fill = fn (i: int) ->
+    if i == 0 then 0
+    else (let _ = vec_push v (str_repeat "w" (40000 + (i * 7919) % 30000)) in fill (i - 1)) in
+  let _ = fill 8000 in
+  vec_len v
+};
+let _ = print_int n;
+let _ = print "freed";
+sleep_ms 3000

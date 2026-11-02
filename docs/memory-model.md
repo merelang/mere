@@ -382,6 +382,17 @@ allocation-heavy program (e.g. a per-pixel renderer) silently overran the
 `test/parity/region_growth.mere` (a checksum over ~6 MB of live region
 allocations, matching across all four backends).
 
+**On macOS a block of 16 KB or more is mapped, not malloc'd (v0.1.686).**
+The C runtime maps it with `mmap` and unmaps it when the block is freed, so
+what a released region held goes back to the system at once. On macOS 26,
+by default, malloc keeps freed memory in both the resident size and the
+footprint, and a program that compacts or recycles arenas over and over grew
+without bound under it. Linux keeps
+malloc: glibc maps large allocations and trims its heap itself, and a mapping
+per block would count toward `vm.max_map_count`. Guarded by
+`scripts/block_return_check.sh` (a 400 MB region left, then the resident size
+read from outside: 1 MB, against 841 MB under malloc).
+
 **Containers grow in place when they can (v0.1.414).** `vec_push`,
 `strbuf_push` and `bytebuf_push` double their buffer when it fills. In a bump
 arena the old buffer cannot be handed back, so before v0.1.414 a container

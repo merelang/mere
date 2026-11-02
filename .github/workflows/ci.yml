@@ -529,6 +529,14 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/extern_host_check.sh
 
+      # v0.1.686: macOS only (Linux keeps malloc), so here it is optional and
+      # not run -- exit 3, which gate.sh passes and says so
+      - name: block_return (a freed region's blocks go back to the system)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: |
+          sh scripts/gate.sh scripts/block_return_check.sh
+          sh scripts/gate.sh scripts/block_return_check.sh --poison
+
       - name: wasm_stub (which builtins answer without reaching the host)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/wasm_stub_check.sh

@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.686 — 2026-11-03
+
+_C on macOS: a region block of 16 KB or more is mapped, and unmapped when it is freed._
+
+The C runtime took every region block from malloc. On macOS 26, by default,
+malloc keeps what is freed in both the resident size and the phys_footprint,
+and `malloc_zone_pressure_relief` answers 0 bytes. (`MallocSpaceEfficient=1`
+or `MallocLargeCache=0` take freed memory out of the footprint but not the
+resident size, and they are a process's launch settings, not something the
+runtime can set.) A
+program that compacts or recycles arenas over and over grew without bound:
+mere-ruby with a thousand suspended fibers under a collection every 50
+safepoints held 2.6 GB of empty small regions and passed 6 GB, and ruby's
+`test_kwarg_eval_memory_leak` measured the same growth.
+
+A block of 16 KB or more is now mapped with `mmap` and unmapped when freed;
+smaller ones still come from malloc. The same mere-ruby run peaks at 3.9 GB
+and finishes, its plain run holds 31% less, and across mere-ruby's 472
+corpus programs the time is unchanged and the peaks are 1.6% lower. Linux
+keeps malloc: glibc maps large allocations and trims its heap itself, and a
+mapping per block would count toward `vm.max_map_count`.
+
+`scripts/block_return_check.sh` grows a region to 400 MB, leaves it, and
+reads the resident size from outside: 1 MB, against 841 MB under malloc
+(`--poison` puts malloc back). On Linux it is optional and not run (exit 3).
+
 ## v0.1.685 — 2026-11-03
 
 _C: an arena retired under a stopped coroutine is not asked about again until one of the stacks that pinned it has run._
