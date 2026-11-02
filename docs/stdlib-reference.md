@@ -263,6 +263,8 @@ and comes out as the text `getnameinfo(3)` writes, and the family comes out as a
 | `sys_setlogmask` | `int -> int` | `setlogmask(3)`: the mask that was in force; `0` asks without changing it |
 | `sock_getopt` | `int -> int -> int -> str` | `fd level name`: `getsockopt(2)` (v0.1.678). The numbers are the platform's (`SOL_SOCKET` is `0xffff` on macOS and `1` on Linux; ask `sys_os`). The option's bytes as lowercase hex, up to 256 bytes — an int is `01000000` on both hosts, and a flag reads back as nonzero (`1` on Linux, the option's own bit on macOS). `""` with errno kept |
 | `sock_setopt` | `int -> int -> int -> str -> int` | `fd level name hex`: `setsockopt(2)` with those bytes. `0`, or `-1` with errno kept (`EINVAL` for hex that is not whole bytes). RISC-V: memu translates the guest's Linux numbers to a macOS host's |
+| `sock_send` | `int -> int -> int -> int -> int` | `fd p len flags`: `send(2)` of the arena's bytes with the platform's `MSG_*` flags (v0.1.682; `MSG_OOB` is `1` on both hosts). The count, or `-1` with errno kept. RISC-V: memu translates the guest's Linux `MSG_EOR`, `MSG_DONTWAIT` and `MSG_NOSIGNAL` for a macOS host |
+| `fd_except_ready` | `int -> int` | Is an exceptional condition — TCP's out-of-band byte — pending on `fd` now (v0.1.682)? `select(2)`'s third set with no wait: `1`, `0`, or `-1` with errno kept (`EINVAL` past `FD_SETSIZE`). Not `poll`: Darwin's does not report out-of-band data as `POLLPRI`. Darwin also calls a device such as `/dev/null` exceptional |
 | `sock_local_addr` | `int -> str` | `getsockname(2)` as `"<family> <port> <address>"` — `"inet 5000 127.0.0.1"`, `"inet6 5000 ::1"`, `"unix 0 <path>"` (the path last: it may hold spaces), `"other 0 "`. `""` on failure |
 | `sock_peer_addr` | `int -> str` | `getpeername(2)`, the same text; `""` with `ENOTCONN` for a socket with no peer |
 | `fd_last_errno` | `unit -> int` | The errno the last of these **and of the `fd_*` family** left, `0` when it succeeded. Per thread |
@@ -338,6 +340,8 @@ word. C, and RISC-V through memu's host device (which spawns on the host).
 | `proc_spawn` | `str -> str -> str -> str -> int -> str -> int` | `path argv envp actions pgroup chdir`. `path` is absolute (no `PATH` search). `argv` and `envp` are their elements with `chr 0` **between** them: argv `""` is one empty argument, envp `""` the empty environment (the parent's is never inherited). `actions` are `chr 1` between actions, `chr 2` between an action's fields, applied in order: `d fd newfd` (dup2), `c fd` (close), `o fd flags mode path` (open; flags are Linux's `O_RDONLY`/`WRONLY`/`RDWR`, `CREAT`, `EXCL`, `NOCTTY`, `TRUNC`, `APPEND`, `NONBLOCK`, `CLOEXEC` in decimal, anything else is `-22`). `pgroup` `-1` leaves it, `0` makes a new group, `n > 0` joins `n`. `chdir` `""` is none; it is applied **after** the actions, so a relative open path is the parent's; where the platform has no `addchdir_np` it is `-38`. SIGPIPE, SIGINT, SIGQUIT, SIGTERM and SIGHUP are reset to their defaults and the signal mask is emptied. The child's pid, or `-errno` |
 | `proc_waitpid` | `int -> int -> int` | `pid flags`; `pid` `-1` is any child, `< -1` a group; flags `1` WNOHANG, `2` WUNTRACED (others `-22`). The pid taken, `0` (WNOHANG, none ready), or `-errno` (`-10` ECHILD) |
 | `proc_wait_status` | `unit -> int` | The status the last `proc_waitpid` took, as Linux words it: an exit is `code << 8`, a signal its number (`+ 0x80` with a core), a stop `(sig << 8) \| 0x7f`. Per thread |
+| `proc_exec` | `str -> str -> str -> str -> str -> int` | `path argv envp actions chdir` (v0.1.682): `proc_spawn`'s arguments without the group, and this process **becomes** the program — exec(2), the pid stays. Buffered output is flushed first. Darwin uses `POSIX_SPAWN_SETEXEC`; elsewhere the actions, the directory and the five signals are applied here and `execve(2)` is called, so an action applied before a failure stays applied. Returns only on failure: `-errno` |
+| `proc_set_title` | `str -> int` | The title `ps(1)` shows (v0.1.682): the argument strings, and the environment strings that follow them (copied out first, so `getenv` still answers), are written over, the title cut to fit. The area is found by the runtime (Darwin's `_NSGetArgv`, Linux's `/proc/self/stat`), so an LLVM program sets it too. The bytes that fit, or `-1`. Read `args` first: they see the title afterwards. RISC-V: memu's own title |
 
 **Why errno is kept here when `file_*` does not keep it** (and `fd_*` did not
 until v0.1.555, when it got `fd_last_errno`). `file_*` answers
@@ -1403,7 +1407,7 @@ Two things are allowed through on purpose:
 **At run time (v0.1.575)**, a `Map`, `Vec`, `StrBuf`, `ByteBuf` or `ListBuf`
 remembers the thread that made it, and a WRITE from any other thread stops the
 program on the interpreter, C and LLVM. LLVM includes `vec_recycle`,
-`map_clear` and `map_recycle` as of v0.1.682. Threaded Wasm modules also
+`map_clear` and `map_recycle` as of v0.1.683. Threaded Wasm modules also
 guard `Vec` as of v0.1.680 and `Map` as of v0.1.681; other Wasm containers
 and `OwnedVec` handoff remain unguarded. See the [backend coverage and host identity
 requirements](memory-model.md#runtime-guards-and-coverage-limits). A foreign

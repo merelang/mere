@@ -478,7 +478,7 @@ ownership handoff when moved into a spawned closure. These behaviors are
 exercised by [`owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/owner_check.sh).
 
 LLVM also guards `vec_recycle`, `map_clear` and `map_recycle` as of
-v0.1.682. Rejected calls leave the contents intact. Map clearing and recycling
+v0.1.683. Rejected calls leave the contents intact. Map clearing and recycling
 empty the existing storage while preserving its owner, shared bit, region
 and capacity; they do not replace the header with a fresh Map. LLVM does not
 give these containers private arenas, so recycling does not reclaim their

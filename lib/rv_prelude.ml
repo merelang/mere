@@ -688,6 +688,21 @@ let __libm_proc_spawn = fn (path: str) -> fn (argv: str) -> fn (envp: str) -> fn
   let _ = __rv_syscall 1036 (__rv_addr path) (__rv_addr argv) (__rv_addr envp) 0 in
   __rv_syscall 1037 (__rv_addr acts) pg (__rv_addr dir) 0;
 let __libm_proc_waitpid = fn (pid: int) -> fn (flags: int) -> __rv_syscall 1038 pid flags 0 0;
+// v0.1.682: proc_exec -- 1036 hands over the path, argv and envp as for a
+// spawn, 1048 the actions and the directory, and memu becomes the program on
+// the host (exec: memu's pid, which is the one the guest's parent knows).
+// proc_set_title is memu's own title (1049), the process ps lists;
+// fd_except_ready asks the host's select (1050).
+let __libm_proc_exec = fn (path: str) -> fn (argv: str) -> fn (envp: str) -> fn (acts: str) -> fn (dir: str) ->
+  let _ = __rv_syscall 1036 (__rv_addr path) (__rv_addr argv) (__rv_addr envp) 0 in
+  __rv_syscall 1048 (__rv_addr acts) (__rv_addr dir) 0 0;
+let __libm_proc_set_title = fn (t: str) -> __rv_syscall 1049 (__rv_cstr t) 0 0 0;
+let __libm_fd_except_ready = fn (fd: int) -> __rv_hc_fd 1050 fd 0 0;
+// sock_send: 1051 hands over the flags (Linux's MSG_* numbers, which memu
+// translates for a macOS host), 1052 sends the bytes as udp_send does
+let __libm_sock_send = fn (fd: int) -> fn (p: int) -> fn (len: int) -> fn (fl: int) ->
+  let _ = __rv_syscall 1051 fl 0 0 0 in
+  __rv_hc_fd 1052 fd (__rv_mem_at p) len;
 let __libm_proc_wait_status = fn (u: unit) -> __rv_syscall 1039 0 0 0 0;
 // libc's socket(2): Linux's call 198 with Linux's numbers (AF_INET6 is 10);
 // memu makes the host's. The descriptor, or -1

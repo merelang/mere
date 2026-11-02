@@ -589,7 +589,10 @@ let libm_sigs : (string * string) list =
       ("chroot", "s>i"); ("file_umask", "i>i"); ("file_flock", "ii>i");
       ("file_readlink", "sii>i"); ("file_utime", "sii>i");
       (* v0.1.660: posix_spawn with file actions, and waitpid (memu's host device) *)
-      ("proc_spawn", "ssssis>i"); ("proc_waitpid", "ii>i"); ("proc_wait_status", "u>i") ]
+      ("proc_spawn", "ssssis>i"); ("proc_waitpid", "ii>i"); ("proc_wait_status", "u>i");
+      (* v0.1.682: exec, the title ps shows, an out-of-band byte waiting *)
+      ("proc_exec", "sssss>i"); ("proc_set_title", "s>i"); ("fd_except_ready", "i>i");
+      ("sock_send", "iiii>i") ]
 let libm_bound : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec libm_sig_of (t : Ast.ty) : string =
   match Ast.walk t with
