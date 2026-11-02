@@ -412,7 +412,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.681)
+## 4. Implemented memory behavior (v0.1.684)
 
 ### Concurrency and sharing
 
@@ -499,22 +499,35 @@ and the
 [Wasm Map matrix](https://github.com/merelang/mere/blob/main/scripts/wasm_map_owner_check.sh)
 cover these rules, worker identity separation and allocation alignment.
 
+**Threaded Wasm modules also guard `StrBuf` and `ByteBuf` (v0.1.684).**
+`strbuf_push`, `bytebuf_set` and `bytebuf_push` reject foreign writes and
+writes after a foreign read, before modifying storage. Reads through
+`strbuf_len` (including `len`), `strbuf_to_str`, `bytebuf_len`, `bytebuf_get`
+and `bytes_of_bytebuf` permanently freeze the source buffer, including empty
+buffers. Conversions produce independent immutable snapshots; reading a
+snapshot in another worker does not freeze its source. `bytebuf_of_bytes`
+creates a buffer owned by the calling worker. The
+[`wasm_buffer_owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/wasm_buffer_owner_check.sh)
+matrix covers these operations, caught and uncaught failures, worker-local
+growth, region reuse, allocation alignment and distinct worker identities,
+with negative controls for guards, alignment and identity assignment.
+
 An embedding host must set the exported mutable `__lang_thread_id` global
 before executing Mere code: use a distinct integer in `1..1073741823` for
 each instance sharing memory. `scripts/run_wasm.js` uses `1` for the main
 instance and `tid + 1` for each worker. A zero or out-of-range identity causes
-execution to fail when a Vec or Map is used. The existing `__lang_in_thread` global
+execution to fail when a guarded container is used. The existing `__lang_in_thread` global
 remains a boolean for failure propagation. Modules that use neither thread
-nor channel builtins omit the Vec and Map owner checks and atomic metadata
+nor channel builtins omit container owner checks and atomic metadata
 accesses.
 
-**Wasm's `StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` still lack
+**Wasm's `ListBuf` and `OwnedVec` still lack
 these runtime owner guards.** `OwnedVec` keeps its existing move behavior
 without a runtime handoff check. RISC-V also lacks the native container-owner
 guards. Frontend checks still apply on both backends, but an opaque callback
 accepted by them gains no additional protection for these containers. Keep
 mutable containers within one worker and exchange messages over channels.
-The Vec and Map checks enforce access rules at operation boundaries; they do not
+The container checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
 
 FFI code and the implementation behind a `sync type` require the capability

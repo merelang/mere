@@ -1408,8 +1408,8 @@ Two things are allowed through on purpose:
 remembers the thread that made it, and a WRITE from any other thread stops the
 program on the interpreter, C and LLVM. LLVM includes `vec_recycle`,
 `map_clear` and `map_recycle` as of v0.1.683. Threaded Wasm modules also
-guard `Vec` as of v0.1.680 and `Map` as of v0.1.681; other Wasm containers
-and `OwnedVec` handoff remain unguarded. See the [backend coverage and host identity
+guard `Vec` as of v0.1.680, `Map` as of v0.1.681, and `StrBuf`/`ByteBuf` as of
+v0.1.684. Wasm `ListBuf` and `OwnedVec` handoff remain unguarded. See the [backend coverage and host identity
 requirements](memory-model.md#runtime-guards-and-coverage-limits). A foreign
 Vec write reports:
 

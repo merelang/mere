@@ -9259,23 +9259,27 @@ let bytes_vec_bridge_runtime_wasm = {|
 
 (* Phase 15.9: StrBuf[R] runtime — single non-polymorphic helper set.
    Uses Wasm's bump allocator ($__lang_bump). Layout:
-   { data_ptr:i32, len:i32, cap:i32, _pad:i32 } = 16 bytes (same as Vec). *)
+   { data_ptr:i32, len:i32, cap:i32, owner:i32 } = 16 bytes (same as Vec).
+   Threaded modules align the header and use atomic owner metadata. *)
 let strbuf_runtime_wasm = {|
   (func $mere_strbuf_new (result i64)
     (local $sb i32) (local $buf i32)
     (local.set $sb (global.get $__lang_bump))
+    (local.set $sb (i32.and (i32.add (local.get $sb) (i32.const 7)) (i32.const -8))) ;; buffer-owner
     (global.set $__lang_bump (i32.add (local.get $sb) (i32.const 16)))
     (local.set $buf (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $buf) (i32.const 16)))
     (i32.store offset=0 (local.get $sb) (local.get $buf))
     (i32.store offset=4 (local.get $sb) (i32.const 0))
     (i32.store offset=8 (local.get $sb) (i32.const 16))
+    (call $mere_strbuf_owner_init (local.get $sb)) ;; buffer-owner
     (i64.extend_i32_s (local.get $sb)))
   (func $mere_strbuf_push (param $sb8 i64) (param $s8 i64) (result i64)
     (local $slen i32) (local $len i32) (local $cap i32) (local $buf i32)
     (local $new_buf i32) (local $i i32)
     (local $sb i32)
     (local $s i32)
+    (if (i32.eqz (call $mere_strbuf_write (local.get $sb8) (i32.const 0))) (then (return (i64.const 0)))) ;; buffer-owner
     (local.set $sb (i32.wrap_i64 (local.get $sb8)))
     (local.set $s (i32.wrap_i64 (local.get $s8)))
     (local.set $slen (i32.wrap_i64 (call $__lang_strlen (i64.extend_i32_s (local.get $s)))))
@@ -9323,6 +9327,7 @@ let strbuf_runtime_wasm = {|
   (func $mere_strbuf_to_str (param $sb8 i64) (result i64)
     (local $len i32) (local $out i32) (local $buf i32) (local $i i32)
     (local $sb i32)
+    (call $mere_strbuf_read (local.get $sb8)) ;; buffer-owner
     (local.set $sb (i32.wrap_i64 (local.get $sb8)))
     (local.set $len (i32.load offset=4 (local.get $sb)))
     (local.set $buf (i32.load offset=0 (local.get $sb)))
@@ -9346,6 +9351,7 @@ let strbuf_runtime_wasm = {|
     (i64.extend_i32_s (local.get $out)))
   (func $mere_strbuf_len (param $sb8 i64) (result i64)
     (local $sb i32)
+    (call $mere_strbuf_read (local.get $sb8)) ;; buffer-owner
     (local.set $sb (i32.wrap_i64 (local.get $sb8)))
     (i64.extend_i32_s (i32.load offset=4 (local.get $sb))))|}
 
@@ -9353,7 +9359,7 @@ let strbuf_runtime_wasm = {|
    ("has no Wasm lowering yet"), so a program that builds a file a byte at a
    time -- the PNG / zlib / tar dogfoods -- ran on interp + C only.
 
-   Layout: the StrBuf header, { data_ptr:i32, len:i32, cap:i32, _pad:i32 } =
+   Layout: the StrBuf header, { data_ptr:i32, len:i32, cap:i32, owner:i32 } =
    16 bytes, followed directly by the first data buffer, one byte per byte.
    Like StrBuf there is no region in the struct: the bump is a single global,
    and a region block reclaims whatever was allocated inside it by rolling the
@@ -9361,9 +9367,8 @@ let strbuf_runtime_wasm = {|
    also why `bytes_of_bytebuf` needs nothing special to leave a block: the
    frozen `bytes` is a plain value the block's copy-out already handles.
 
-   No owner field and no owner check on this backend. The Node host runs
-   workers, but the native container-owner guard is not implemented here;
-   `__vec_owned` is lowered to true. See the public memory-model contract.
+   Threaded modules align the header and use its final word for the same
+   atomic owner/shared protocol as StrBuf. Unthreaded modules omit it.
 
    The two index failures and the negative length are the interpreter's
    messages, built the way vec_get's are ($__lang_fail_idx with the shared
@@ -9405,13 +9410,16 @@ let bytebuf_runtime_wasm ~get_pre ~set_pre ~neg_msg = Printf.sprintf {|
     (i32.store offset=0 (local.get $bb) (local.get $buf))
     (i32.store offset=4 (local.get $bb) (i32.wrap_i64 (local.get $n8)))
     (i32.store offset=8 (local.get $bb) (local.get $cap))
+    (call $mere_bytebuf_owner_init (local.get $bb)) ;; buffer-owner
     (i64.extend_i32_u (local.get $bb)))
   (func $mere_bytebuf_len (param $bb8 i64) (result i64)
+    (call $mere_bytebuf_read (local.get $bb8)) ;; buffer-owner
     (i64.extend_i32_s (i32.load offset=4 (i32.wrap_i64 (local.get $bb8)))))
   ;; Checked at full width, before the wrap -- the lesson of v0.1.275's vec_get:
   ;; 4294967297 must not become 1.
   (func $mere_bytebuf_get (param $bb8 i64) (param $i8 i64) (result i64)
     (local $bb i32) (local $len i32)
+    (call $mere_bytebuf_read (local.get $bb8)) ;; buffer-owner
     (local.set $bb (i32.wrap_i64 (local.get $bb8)))
     (local.set $len (i32.load offset=4 (local.get $bb)))
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
@@ -9429,6 +9437,7 @@ let bytebuf_runtime_wasm ~get_pre ~set_pre ~neg_msg = Printf.sprintf {|
   ;; buffer does not move, so nothing outside a block comes to point into it.
   (func $mere_bytebuf_set (param $bb8 i64) (param $i8 i64) (param $x i64) (result i64)
     (local $bb i32) (local $len i32)
+    (if (i32.eqz (call $mere_bytebuf_write (local.get $bb8) (i32.const 0))) (then (return (i64.const 0)))) ;; buffer-owner
     (local.set $bb (i32.wrap_i64 (local.get $bb8)))
     (local.set $len (i32.load offset=4 (local.get $bb)))
     (if (i32.or (i64.lt_s (local.get $i8) (i64.const 0))
@@ -9448,6 +9457,7 @@ let bytebuf_runtime_wasm ~get_pre ~set_pre ~neg_msg = Printf.sprintf {|
   (func $mere_bytebuf_push (param $bb8 i64) (param $x i64) (result i64)
     (local $bb i32) (local $len i32) (local $cap i32) (local $buf i32)
     (local $new_cap i32) (local $new_buf i32) (local $i i32)
+    (if (i32.eqz (call $mere_bytebuf_write (local.get $bb8) (i32.const 1))) (then (return (i64.const 0)))) ;; buffer-owner
     (local.set $bb (i32.wrap_i64 (local.get $bb8)))
     (local.set $len (i32.load offset=4 (local.get $bb)))
     (local.set $cap (i32.load offset=8 (local.get $bb)))
@@ -9500,6 +9510,7 @@ let bytebuf_bytes_runtime_wasm = {|
   ;; through a `bytes`, which is immutable.
   (func $mere_bytes_of_bytebuf (param $bb8 i64) (result i64)
     (local $bb i32) (local $len i32) (local $buf i32) (local $b i32) (local $i i32)
+    (call $mere_bytebuf_read (local.get $bb8)) ;; buffer-owner
     (local.set $bb (i32.wrap_i64 (local.get $bb8)))
     (local.set $len (i32.load offset=4 (local.get $bb)))
     (local.set $buf (i32.load offset=0 (local.get $bb)))
@@ -12211,7 +12222,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
 
   let container_tid_section =
     if not !uses_threads ||
-       not (!vec_used || !simd_used || Hashtbl.length map_key_types > 0) then ""
+       not (!vec_used || !simd_used || !strbuf_used || !bytebuf_used || Hashtbl.length map_key_types > 0) then ""
     else
       let missing = fresh_str_offset "Wasm host must initialize a unique __lang_thread_id for every instance" in
       Printf.sprintf {|
@@ -12291,6 +12302,39 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (unreachable))
 |} failures
     end
+  in
+  let buffer_owner_section =
+    let emit kind label ops used =
+      if not !uses_threads || not used then ""
+      else
+        let failures = List.mapi (fun i op ->
+          let foreign = fresh_str_offset (Printf.sprintf "%s: a %s made by one thread was written by another -- a %s is not safe to share between threads; give it one owner thread and send it messages over a Channel" op label label) in
+          let shared = fresh_str_offset (Printf.sprintf "%s: a %s another thread has read was written -- once a second thread reads a %s it is shared, and a shared %s is read-only; give it one owner thread and send it messages over a Channel" op label label label) in
+          Printf.sprintf
+            "    (if (i32.eq (local.get $op) (i32.const %d)) (then (drop (call $__lang_fail (if (result i64) (i32.eq (local.get $owner) (i32.or (call $mere_container_tid) (i32.const 1073741824))) (then (i64.const %d)) (else (i64.const %d))))) (return (i32.const 0))))\n"
+            i shared foreign) ops |> String.concat "" in
+        let runtime = Printf.sprintf {|
+  (func $mere_BUFFER_owner_init (param $b i32)
+    (i32.atomic.store offset=12 (local.get $b) (call $mere_container_tid)))
+  (func $mere_BUFFER_read (param $b8 i64)
+    (local $b i32) (local $owner i32)
+    (local.set $b (i32.wrap_i64 (local.get $b8)))
+    (local.set $owner (i32.atomic.load offset=12 (local.get $b)))
+    (if (i32.and (i32.eqz (i32.and (local.get $owner) (i32.const 1073741824)))
+                (i32.ne (local.get $owner) (call $mere_container_tid)))
+      (then (drop (i32.atomic.rmw.or offset=12 (local.get $b) (i32.const 1073741824))))))
+  (func $mere_BUFFER_write (param $b8 i64) (param $op i32) (result i32)
+    (local $owner i32)
+    (local.set $owner (i32.atomic.load offset=12 (i32.wrap_i64 (local.get $b8))))
+    (if (i32.eq (local.get $owner) (call $mere_container_tid))
+      (then (return (i32.const 1))))
+%s
+    (unreachable))
+|} failures in
+        Str.global_replace (Str.regexp_string "$mere_BUFFER_") ("$mere_" ^ kind ^ "_") runtime
+    in
+    emit "strbuf" "StrBuf" ["strbuf_push"] !strbuf_used
+    ^ emit "bytebuf" "ByteBuf" ["bytebuf_set"; "bytebuf_push"] !bytebuf_used
   in
   let data_section =
     if !str_data_decls = [] then ""
@@ -12664,7 +12708,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     else "  (memory (export \"memory\") 1024)\n")
     ^ boundary_shims
   in
-  let vec_runtime_section = container_tid_section ^ vec_owner_section ^ map_owner_section ^ (if !vec_used then vec_runtime else "") in
+  let vec_runtime_section = container_tid_section ^ vec_owner_section ^ map_owner_section ^ buffer_owner_section ^ (if !vec_used then vec_runtime else "") in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
@@ -13909,7 +13953,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       if !uses_threads then wat
       else String.split_on_char '\n' wat
         |> List.filter_map (fun line ->
-            if String.ends_with ~suffix:";; vec-owner" line || String.ends_with ~suffix:";; map-owner" line then None
+            if String.ends_with ~suffix:";; vec-owner" line || String.ends_with ~suffix:";; map-owner" line
+               || String.ends_with ~suffix:";; buffer-owner" line then None
             else if String.ends_with ~suffix:";; vec-owner-predicate" line then Some "    drop\n    i64.const 1"
             else Some line)
         |> String.concat "\n")
