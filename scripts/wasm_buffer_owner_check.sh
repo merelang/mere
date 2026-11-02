@@ -174,7 +174,7 @@ done
 
 # Allocate after odd-sized strings and buffers, grow through many capacities,
 # and reuse scratch regions on both instances. Conversions retain their bytes.
-cat > "$T/local.mere" <<'EOF'
+cat > "$T/work.mere" <<'EOF'
 let rec work = fn (n: int) -> fn (total: int) ->
   if n == 24 then total else
   let result = region R {
@@ -193,13 +193,14 @@ let rec work = fn (n: int) -> fn (total: int) ->
     if bytes_get saved 0 == 255 && bytebuf_get copy 0 == 7 && strbuf_len s == str_len (strbuf_to_str s)
     then bytebuf_len b + strbuf_len s else 0
   } in work (n + 1) (total + result);
-print_int (work 0 0)
 EOF
+cp "$T/work.mere" "$T/local.mere"
+echo 'print_int (work 0 0)' >> "$T/local.mere"
 expect local 4392
 if grep -Eq 'atomic\.|\$mere_(strbuf|bytebuf)_(read|write|owner_init)|\$mere_container_tid|__lang_thread_id' "$T/module.wat"; then
   echo "  FAIL  wasm buffer local: ownership code remains without threads"; fail=1
 fi
-sed '$d' "$T/local.mere" > "$T/threaded.mere"
+cp "$T/work.mere" "$T/threaded.mere"
 cat >> "$T/threaded.mere" <<'EOF'
 let results = channel_new ();
 let h = spawn (fn () -> channel_send results (work 0 0));
