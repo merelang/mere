@@ -105,7 +105,8 @@ if [ "$wasm_only" = 0 ]; then
 for f in param_vec param_map param_strbuf param_reverse param_versioned \
          shared_map_race shared_vec_race shared_phase shared_versioned \
          ov_param ov_after_move ov_moved legit legit_readonly \
-         shared_vec_phase shared_worker_ids vec_caught vec_alignment; do
+         shared_vec_phase shared_worker_ids vec_caught vec_alignment \
+         vec_recycle_caught shared_vec_recycle; do
   out=$(run "$MERE" "$FX/$f.mere"); st=$?
   v=$(judge "$f" "$out" "$st"); [ "$v" = ok ] && echo "  ok    interp $f" || { echo "  FAIL  interp $f: $v"; fail=1; }
   for be in c ll; do
@@ -114,6 +115,99 @@ for f in param_vec param_map param_strbuf param_reverse param_versioned \
     v=$(judge "$f" "$out" "$st"); [ "$v" = ok ] && echo "  ok    $be $f" || { echo "  FAIL  $be $f: $v"; fail=1; }
   done
 done
+
+# Upkeep must reject foreign/shared writes before mutation on both Map layouts.
+# Each generated callback is hidden behind a parameter, so the runtime guard
+# rather than the static spawn check must enforce the rule.
+upkeep_expect() {
+  prog=$1; want=$2
+  for be in interp c ll; do
+    if [ "$be" = interp ]; then
+      out=$(run "$MERE" "$FX/$prog.mere"); st=$?
+    else
+      if ! why=$(build "$prog" "$be"); then echo "  FAIL  $be $prog: $why"; fail=1; continue; fi
+      out=$(run "$T/bin"); st=$?
+    fi
+    if [ "$st" = 0 ] && [ "$out" = "$want" ]; then echo "  ok    $be $prog"
+    else echo "  FAIL  $be $prog: wanted [$want], got [$out] status $st"; fail=1; fi
+  done
+}
+while IFS='|' read -r kind decl key1 key2; do
+  decl=$(printf '%s' "$decl" | tr '@' '|')
+  for op in clear recycle; do
+    for access in foreign shared; do
+      cat > "$FX/upkeep_$access-$kind-$op.mere" <<EOF
+$decl
+let k1 = $key1;
+let k2 = $key2;
+let mk = fn () -> let m = map_new () in let _ = map_set m k1 10 in m;
+let m = mk ();
+let launch = fn (f: unit -> unit) -> spawn f;
+EOF
+      if [ "$access" = foreign ]; then
+        cat >> "$FX/upkeep_$access-$kind-$op.mere" <<EOF
+let results = channel_new ();
+let h = launch (fn () -> channel_send results (try_or (fn () -> let _ = map_$op m in 0) 7));
+let _ = join h;
+let result = channel_recv results;
+EOF
+      else
+        cat >> "$FX/upkeep_$access-$kind-$op.mere" <<EOF
+let h = launch (fn () -> let _ = map_get m k1 in ());
+let _ = join h;
+let result = try_or (fn () -> let _ = map_$op m in 0) 7;
+EOF
+      fi
+      cat >> "$FX/upkeep_$access-$kind-$op.mere" <<'EOF'
+print (str_of_int result ++ ":" ++ str_of_int (map_len m) ++ ":" ++ (if map_has m k1 && map_get m k1 == 10 then "true" else "false"))
+EOF
+      upkeep_expect "upkeep_$access-$kind-$op" '7:1:true'
+    done
+    cat > "$FX/upkeep_local-$kind-$op.mere" <<EOF
+$decl
+let k1 = $key1;
+let k2 = $key2;
+let work = fn () ->
+  let m = map_new () in
+  let _ = map_set m k1 10 in let _ = map_set m k2 20 in
+  let _ = map_delete m k1 in let _ = map_$op m in
+  let empty = map_len m == 0 && not (map_has m k1) && not (map_has m k2) in
+  let _ = map_$op m in
+  let _ = map_set m k1 42 in
+  let values = vec_new () in
+  let _ = map_iter m (fn k -> fn v -> vec_push values v) in
+  if empty && map_len m == 1 && vec_len values == 1 then vec_get values 0 else 0;
+let results = channel_new ();
+let h = spawn (fn () -> channel_send results (work ()));
+let own = work ();
+let _ = join h;
+print_int (own + channel_recv results)
+EOF
+    upkeep_expect "upkeep_local-$kind-$op" 84
+    # If the upkeep guard alone is removed, the subsequent map_set must still
+    # see the shared bit. Resetting the owner as well must make it succeed.
+    cat > "$FX/upkeep_retained-$kind-$op.mere" <<EOF
+$decl
+let k1 = $key1;
+let mk = fn () -> let m = map_new () in let _ = map_set m k1 10 in m;
+let m = mk ();
+let launch = fn (f: unit -> unit) -> spawn f;
+let h = launch (fn () -> let _ = map_get m k1 in ());
+let _ = join h;
+let _ = map_$op m;
+let _ = map_set m k1 7;
+print_int (map_get m k1)
+EOF
+  done
+done <<'UPKEEP_KEYS'
+int||1|2
+str||"one"|"two"
+bool||false|true
+tuple||(1, "one")|(2, "two")
+record|type key = { kx: int, kname: str };|key { kx = 1, kname = "one" }|key { kx = 2, kname = "two" }
+variant|type key = First of int @ Second of str;|First 1|Second "two"
+UPKEEP_KEYS
+upkeep_expect map_upkeep_growth 84
 
 fi
 
@@ -216,6 +310,44 @@ ov_param|ll|OwnedVec use is not checked|/call void @__lang_ov_use(ptr/d
 ov_moved|ll|spawn does not give the OwnedVec away|/store atomic i32 0, ptr %t[0-9]* monotonic, align 4/d
 shared_versioned|ll|the guard's vec_len leaves no mark|/^define i64 @mere_vec_int_len(/,/^}/{/call void @__lang_read_mark/d;}
 POISONS
+  for op in clear recycle; do
+    for kind in int tuple; do
+      drop="/call void @__lang_owned(i32 .*@.own_map_map_$op,/d"
+      prog="upkeep_foreign-$kind-$op"
+      if why=$(build "$prog" ll "$drop"); then
+        out=$(run "$T/bin"); st=$?
+        if [ "$st" = 0 ] && [ "$out" = '0:0:false' ]; then echo "  ok    POISON LLVM $kind map_$op: foreign mutation succeeds"
+        else echo "  FAIL  POISON LLVM $prog: [$out] status $st"; pf=1; fi
+      else echo "  FAIL  POISON LLVM $prog: $why"; pf=1; fi
+      prog="upkeep_retained-$kind-$op"
+      if why=$(build "$prog" ll "$drop"); then
+        out=$(run "$T/bin"); st=$?
+        case "$out" in
+          *"map_set: a Map $SHSENT"*)
+            if [ "$st" != 0 ]; then echo "  ok    LLVM $kind map_$op preserves shared metadata without its entry check"
+            else echo "  FAIL  LLVM $prog: shared write exited 0"; pf=1; fi ;;
+          *) echo "  FAIL  LLVM $prog: expected shared map_set failure, got [$out] status $st"; pf=1 ;;
+        esac
+      else echo "  FAIL  LLVM $prog: $why"; pf=1; fi
+      # The mutation is confined to the public wrapper, where %__own_p is the
+      # original header's owner address. The storage helper never touches it.
+      reset="$drop
+/^define i32 @mere_map_.*_$op(/,/^}/{
+/call void @mere_map_.*_clear_storage(ptr %m)/a\\
+  store atomic i32 1, ptr %__own_p monotonic, align 4
+}"
+      if why=$(build "$prog" ll "$reset"); then
+        out=$(run "$T/bin"); st=$?
+        if [ "$st" = 0 ] && [ "$out" = 7 ]; then echo "  ok    POISON LLVM $kind map_$op resets shared metadata: later write succeeds"
+        else echo "  FAIL  POISON LLVM $prog owner reset: [$out] status $st"; pf=1; fi
+      else echo "  FAIL  POISON LLVM $prog owner reset: $why"; pf=1; fi
+    done
+  done
+  if why=$(build vec_recycle_caught ll '/call void @__lang_owned(i32 .*@.own_vec_vec_recycle,/d'); then
+    out=$(run "$T/bin"); st=$?
+    if [ "$st" = 0 ] && [ "$out" = '0:0' ]; then echo "  ok    POISON LLVM vec_recycle: foreign mutation succeeds"
+    else echo "  FAIL  POISON LLVM vec_recycle: [$out] status $st"; pf=1; fi
+  else echo "  FAIL  POISON LLVM vec_recycle: $why"; pf=1; fi
   fi
   # These mutations must still assemble, run and produce the wrong successful
   # result. A syntax error, trap or timeout does not witness an ownership gate.
