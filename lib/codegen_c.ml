@@ -11124,9 +11124,18 @@ let region_runtime_helpers =
          frame pool's next compaction freed the old str_store under it.) A
          retired arena keeps the handles of the stacks that pinned it, and is
          not tried while one of them is the one running. *)
+      (* v0.1.685: and is not tried while none of them has run since it was
+         last tried. A suspended stack's words change only when it runs, so
+         the answer could only be "still pinned" -- but each retirement tried
+         every retired arena again, every one a walk of every suspended stack:
+         mere-ruby left with thousands of fibers suspended (an Enumerator
+         stepped once and dropped, in a loop) spent 95% of its time here under
+         a collection every 50 safepoints, and did not finish in 300 s.
+         __lang_region_unmoved answers from the stacks' stop epochs. *)
       "static _Thread_local int (*__lang_region_pinners)(__lang_region*, unsigned long long**) = 0;";
+      "static _Thread_local int (*__lang_region_unmoved)(unsigned long long*, int, unsigned long) = 0;";
       "static _Thread_local unsigned long long (*__lang_coro_cur_h)(void) = 0;";
-      "typedef struct { __lang_region* r; unsigned long long* by; int nby; } __lang_retiree;";
+      "typedef struct { __lang_region* r; unsigned long long* by; int nby; unsigned long ep; } __lang_retiree;";
       "static _Thread_local __lang_retiree* __lang_retired = NULL;";
       "static _Thread_local int __lang_retired_n = 0, __lang_retired_cap = 0;";
       "static void __lang_region_retire(__lang_region* r) {";
@@ -11137,7 +11146,8 @@ let region_runtime_helpers =
       "      __lang_retiree o = __lang_retired[i];";
       "      int keep = 0;";
       "      for (int j = 0; j < o.nby; j++) if (o.by[j] == curh) keep = 1;";
-      "      if (!keep) { free(o.by); o.by = NULL; o.nby = __lang_region_pinners(o.r, &o.by); keep = o.nby > 0; }";
+      "      if (!keep && __lang_region_unmoved && __lang_region_unmoved(o.by, o.nby, o.ep)) keep = 1;";
+      "      if (!keep) { free(o.by); o.by = NULL; o.nby = __lang_region_pinners(o.r, &o.by); o.ep = __lang_region_epoch; keep = o.nby > 0; }";
       "      if (keep) __lang_retired[w++] = o;";
       "      else { free(o.by); __lang_region_free(o.r); free(o.r); }";
       "    }";
@@ -11154,6 +11164,7 @@ let region_runtime_helpers =
       "      __lang_retired[__lang_retired_n].r = r;";
       "      __lang_retired[__lang_retired_n].by = by;";
       "      __lang_retired[__lang_retired_n].nby = nby;";
+      "      __lang_retired[__lang_retired_n].ep = __lang_region_epoch;";
       "      __lang_retired_n++;";
       "      return;";
       "    }";
@@ -12632,6 +12643,15 @@ let coro_runtime ~(stack_bytes : int) =
       "  *out = hs;";
       "  return n;";
       "}";
+      "/* has none of these stacks run since epoch ep? Each still suspended, and";
+      "   stopped no later than ep (a stop stamps the epoch it starts) */";
+      "static int __lang_coro_unmoved(unsigned long long* hs, int n, unsigned long ep) {";
+      "  for (int i = 0; i < n; i++) {";
+      "    __lang_coro* c = __lang_coro_of(hs[i]);";
+      "    if (!c || c->state != 2 || !c->x || c->x->sep > ep) return 0;";
+      "  }";
+      "  return 1;";
+      "}";
       "static unsigned long long __lang_coro_cur_handle(void) {";
       "  return __lang_coro_cur ? __lang_coro_handle(__lang_coro_cur) : 0;";
       "}";
@@ -13111,6 +13131,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  __lang_coro_link(&__lang_coro_root);";
       "  __lang_region_pinned = __lang_coro_pins;";
       "  __lang_region_pinners = __lang_coro_pinners;";
+      "  __lang_region_unmoved = __lang_coro_unmoved;";
       "  __lang_coro_cur_h = __lang_coro_cur_handle;";
       "  __lang_coro_cur = &__lang_coro_root;";
       "}";

@@ -1,0 +1,26 @@
+// A stopped coroutine holds a string read out of a map, so the arena the map
+// gives back at its next compaction is retired, not freed. Then it runs, takes
+// the string the map holds now, and stops again: the arena it held before is
+// one no stopped stack reaches, and the next retirement frees it. Three
+// hundred rounds of 200 KB. A runtime that took the coroutine for one that has
+// not run since (v0.1.685 skips re-asking about those) keeps every one.
+let root = coro_root ();
+let m = map_new ();
+let _ = map_compact m;
+let big = str_repeat "v" 200000;
+let _ = map_set m "a" big;
+let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+  let rec go = fn (k: int) -> fn (ok: int) ->
+    (let held = map_get m "a" in
+     let _ = coro_switch root in
+     let ok2 = (if str_len held == 200000 then ok + 1 else ok) in
+     if k == 1 then (let _ = print_int ok2 in root) else go (k - 1) ok2) in
+  go 300 0) ());
+let rec cycle = fn (i: int) ->
+  if i == 0 then 0
+  else (let _ = coro_switch c in
+        let _ = map_set m "a" big in
+        let _ = map_compact m in
+        cycle (i - 1));
+let _ = cycle 300;
+coro_switch c

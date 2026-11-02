@@ -78,6 +78,7 @@ region_chain_grow|icl|206509500|0
 region_loop_chain|ic|22700|0
 builtins_as_values|icl|42;7|0
 release_walk|ic|2250|0
+retire_moved|ic|300|0
 scan_outer|icl|all found;200880;0|0'
 
 # The interpreter prints a failure with its position and a code frame; the
@@ -152,6 +153,17 @@ for be in c ll; do
   elif [ "$r" -lt "$(cap_for "$be")" ]; then printf '  ok    %s\n' "$name: a million finished coroutines hold $((r / 1048576)) MiB"
   else printf '  FAIL  %s\n' "$name: a million finished coroutines hold $((r / 1048576)) MiB"; fail=1; fi
 done
+# v0.1.685: an arena retired under a stopped stack is not asked about again
+# while that stack has not run -- but once it has, it is, and freed when no
+# stack reaches it. retire_moved retires 300 arenas of 200 KB that way; a
+# correct run holds about 4 MiB, one that keeps them 126.
+if ! why=$(build retire_moved -O2 c); then printf '  FAIL  %s\n' "C retire_moved: $why"; fail=1
+else
+  r=$(rss_of "$T/bin")
+  if [ -z "$r" ]; then printf '  FAIL  %s\n' "C retire_moved: no /usr/bin/time here, so the question was not asked"; fail=1
+  elif [ "$r" -lt "$RSS_CAP_C" ]; then printf '  ok    %s\n' "C: 300 arenas retired under a stack that then ran hold $((r / 1048576)) MiB"
+  else printf '  FAIL  %s\n' "C: 300 arenas retired under a stack that then ran hold $((r / 1048576)) MiB"; fail=1; fi
+fi
 
 # --- refusals -------------------------------------------------------------
 refuse() {  # $1 = label, $2 = flag ("" = interpreter), $3 = program, $4 = text the refusal must contain
@@ -344,19 +356,22 @@ if [ "$MODE" = "--poison" ]; then
   poison c "C 15 (the pool hands out a stack of another size)" 's/^    if (__lang_coro_pools\[i\].size != size || !__lang_coro_pools\[i\].head) continue;$/    if (!__lang_coro_pools[i].head) continue;/' sized_reuse
   poison ll "LLVM 15 (the pool hands out a stack of another size)" 's/^  %ok = and i1 %same, %some$/  %ok = and i1 %some, %some/' sized_reuse
   poison ll "LLVM 7 (no hand-over check)" 's/^  br i1 %bad0, label %nowhere, label %chk$/  br label %chk/' self_handoff
-  poison_rss() {  # $1 = c|ll, $2 = label, $3 = sed expression
-    if ! why=$(build million -O2 "$1" "$3"); then
+  poison_rss() {  # $1 = c|ll, $2 = label, $3 = sed expression, $4 = fixture (million)
+    fx="${4:-million}"
+    if ! why=$(build "$fx" -O2 "$1" "$3"); then
       printf '  FAIL  %s\n' "POISON $2: $why -- the runtime no longer has the shape this poison removes"; pfail=1; return
     fi
     r=$(rss_of "$T/bin")
     if [ -z "$r" ]; then printf '  FAIL  %s\n' "POISON $2: no /usr/bin/time here, so the question was not asked"; pfail=1
-    elif [ "$r" -ge "$(cap_for "$1")" ]; then printf '  ok    %s\n' "POISON $2: million goes red ($((r / 1048576)) MiB)"
-    else printf '  FAIL  %s\n' "POISON $2: million still under the cap without it ($((r / 1048576)) MiB)"; pfail=1; fi
+    elif [ "$r" -ge "$(cap_for "$1")" ]; then printf '  ok    %s\n' "POISON $2: $fx goes red ($((r / 1048576)) MiB)"
+    else printf '  FAIL  %s\n' "POISON $2: $fx still under the cap without it ($((r / 1048576)) MiB)"; pfail=1; fi
   }
   poison_rss c "C 14 (a finished coroutine's record is never freed)" 's/ __lang_coro_drop_slot(z); free(z); }$/ __lang_coro_drop_slot(z); }/'
   poison_rss c "C 8 (the saved state is never freed)" 's/ free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }$/ __lang_coro_drop_slot(z); }/'
   poison_rss ll "LLVM 8 (the saved state is never freed)" '/^  call void @free(ptr %zx)$/d'
   poison_rss ll "LLVM 14 (a finished coroutine's record is never freed)" '/^  call void @free(ptr %z)$/d'
+  # v0.1.685: a stack that ran is taken for one that has not
+  poison_rss c "C 16 (an arena's stopped stack is never asked about again)" 's/^static int __lang_coro_unmoved(unsigned long long\* hs, int n, unsigned long ep) {$/static int __lang_coro_unmoved(unsigned long long* hs, int n, unsigned long ep) { return 1;/' retire_moved
   # v0.1.623: RISC-V. The runtime is prelude text, so the poison edits what
   # `mere --rv-prelude` prints and the fixture is built with it (RV64).
   rv_poison() {  # $1 = label, $2 = sed expression, $3... = fixtures that must go red
