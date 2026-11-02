@@ -412,7 +412,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.684)
+## 4. Implemented memory behavior (v0.1.685)
 
 ### Concurrency and sharing
 
@@ -512,6 +512,18 @@ matrix covers these operations, caught and uncaught failures, worker-local
 growth, region reuse, allocation alignment and distinct worker identities,
 with negative controls for guards, alignment and identity assignment.
 
+**Threaded Wasm modules guard `ListBuf` as of v0.1.685.** Both `lb_push`
+and `lb_to_list` require the builder's owner: converting it to a list also
+writes its frozen flag. A rejected call does not append an element or freeze
+the builder. The owner may continue building after a rejected foreign call.
+Completed immutable lists can still be shared or sent when their elements
+satisfy the frontend's Send/Sync rules. Existing frozen-builder and region
+checks remain in force. The
+[`wasm_listbuf_owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/wasm_listbuf_owner_check.sh)
+matrix checks empty/nonempty builders, caught failures, immutable messages,
+worker-local use, region reuse and distinct identities, with negative controls
+for each operation's guard, alignment and identity assignment.
+
 An embedding host must set the exported mutable `__lang_thread_id` global
 before executing Mere code: use a distinct integer in `1..1073741823` for
 each instance sharing memory. `scripts/run_wasm.js` uses `1` for the main
@@ -521,9 +533,8 @@ remains a boolean for failure propagation. Modules that use neither thread
 nor channel builtins omit container owner checks and atomic metadata
 accesses.
 
-**Wasm's `ListBuf` and `OwnedVec` still lack
-these runtime owner guards.** `OwnedVec` keeps its existing move behavior
-without a runtime handoff check. RISC-V also lacks the native container-owner
+**Wasm's `OwnedVec` still lacks runtime ownership handoff checks.**
+RISC-V also lacks the native container-owner
 guards. Frontend checks still apply on both backends, but an opaque callback
 accepted by them gains no additional protection for these containers. Keep
 mutable containers within one worker and exchange messages over channels.

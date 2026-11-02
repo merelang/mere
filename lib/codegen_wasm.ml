@@ -12222,7 +12222,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
 
   let container_tid_section =
     if not !uses_threads ||
-       not (!vec_used || !simd_used || !strbuf_used || !bytebuf_used || Hashtbl.length map_key_types > 0) then ""
+       not (!vec_used || !simd_used || !strbuf_used || !bytebuf_used || !lb_used || Hashtbl.length map_key_types > 0) then ""
     else
       let missing = fresh_str_offset "Wasm host must initialize a unique __lang_thread_id for every instance" in
       Printf.sprintf {|
@@ -12335,6 +12335,25 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     in
     emit "strbuf" "StrBuf" ["strbuf_push"] !strbuf_used
     ^ emit "bytebuf" "ByteBuf" ["bytebuf_set"; "bytebuf_push"] !bytebuf_used
+  in
+  let lb_owner_section =
+    if not !uses_threads || not !lb_used then ""
+    else
+      let failures = List.mapi (fun i op ->
+        let msg = fresh_str_offset (Printf.sprintf "%s: a ListBuf made by one thread was written by another -- a ListBuf is not safe to share between threads; give it one owner thread and send it messages over a Channel" op) in
+        Printf.sprintf
+          "    (if (i32.eq (local.get $op) (i32.const %d)) (then (drop (call $__lang_fail (i64.const %d))) (return (i32.const 0))))\n"
+          i msg) ["lb_push"; "lb_to_list"] |> String.concat "" in
+      Printf.sprintf {|
+  (func $mere_lb_owner_init (param $b i32)
+    (i32.atomic.store offset=20 (local.get $b) (call $mere_container_tid)))
+  (func $mere_lb_write (param $b8 i64) (param $op i32) (result i32)
+    (if (i32.eq (i32.atomic.load offset=20 (i32.wrap_i64 (local.get $b8)))
+                (call $mere_container_tid))
+      (then (return (i32.const 1))))
+%s
+    (unreachable))
+|} failures
   in
   let data_section =
     if !str_data_decls = [] then ""
@@ -12708,7 +12727,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     else "  (memory (export \"memory\") 1024)\n")
     ^ boundary_shims
   in
-  let vec_runtime_section = container_tid_section ^ vec_owner_section ^ map_owner_section ^ buffer_owner_section ^ (if !vec_used then vec_runtime else "") in
+  let vec_runtime_section = container_tid_section ^ vec_owner_section ^ map_owner_section ^ buffer_owner_section ^ lb_owner_section ^ (if !vec_used then vec_runtime else "") in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
@@ -12875,7 +12894,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       nil_tag_v cons_tag_v
   in
   (* Q-106: the in-order list builder -- 32 bytes { head:i32, tail:i32,
-     depth:i32, frozen:i32, nil:i32 }, cells laid out exactly as
+     depth:i32, frozen:i32, nil:i32, owner:i32 }, cells laid out exactly as
      $mere_vec_to_list lays them: a 16-byte Cons { tag, payload } whose payload
      is a 16-byte tuple { f0 = x, f1 = next }. A refusal returns what
      $__lang_fail returns, the way $mere_vec_get's bounds check does. *)
@@ -12885,6 +12904,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   (func $mere_lb_new (result i64)
     (local $b i32) (local $nil i32)
     (local.set $b (global.get $__lang_bump))
+    (local.set $b (i32.and (i32.add (local.get $b) (i32.const 7)) (i32.const -8))) ;; lb-owner
     (global.set $__lang_bump (i32.add (local.get $b) (i32.const 32)))
     (local.set $nil (global.get $__lang_bump))
     (global.set $__lang_bump (i32.add (local.get $nil) (i32.const 16)))
@@ -12894,12 +12914,14 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (i32.store offset=8 (local.get $b) (global.get $__lang_region_depth))
     (i32.store offset=12 (local.get $b) (i32.const 0))
     (i32.store offset=16 (local.get $b) (local.get $nil))
+    (call $mere_lb_owner_init (local.get $b)) ;; lb-owner
     (i64.extend_i32_u (local.get $b)))
   (func $mere_lb_push (param $b8 i64) (param $x i64) (result i64)
     (local $b i32) (local $tup i32) (local $node i32) (local $tail i32)
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (if (i32.ne (i32.load offset=12 (local.get $b)) (i32.const 0))
       (then (return (call $__lang_fail (i64.const %d)))))
+    (if (i32.eqz (call $mere_lb_write (local.get $b8) (i32.const 0))) (then (return (i64.const 0)))) ;; lb-owner
     (if (i32.ne (i32.load offset=8 (local.get $b)) (global.get $__lang_region_depth))
       (then (return (call $__lang_fail (i64.const %d)))))
     (local.set $tup (global.get $__lang_bump))
@@ -12922,6 +12944,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (i64.const 0))
   (func $mere_lb_to_list (param $b8 i64) (result i64)
     (local $b i32) (local $hd i32)
+    (if (i32.eqz (call $mere_lb_write (local.get $b8) (i32.const 1))) (then (return (i64.const 0)))) ;; lb-owner
     (local.set $b (i32.wrap_i64 (local.get $b8)))
     (i32.store offset=12 (local.get $b) (i32.const 1))
     (local.set $hd (i32.load offset=0 (local.get $b)))
@@ -13954,7 +13977,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       else String.split_on_char '\n' wat
         |> List.filter_map (fun line ->
             if String.ends_with ~suffix:";; vec-owner" line || String.ends_with ~suffix:";; map-owner" line
-               || String.ends_with ~suffix:";; buffer-owner" line then None
+               || String.ends_with ~suffix:";; buffer-owner" line
+               || String.ends_with ~suffix:";; lb-owner" line then None
             else if String.ends_with ~suffix:";; vec-owner-predicate" line then Some "    drop\n    i64.const 1"
             else Some line)
         |> String.concat "\n")
