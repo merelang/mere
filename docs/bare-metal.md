@@ -465,8 +465,15 @@ As of v0.1.693, user StrBufs carry an owner word after their three original
 fields in threaded programs. Length queries and string conversion freeze a
 foreign buffer; push rejects foreign/shared writes before changing storage.
 Prelude and formatting buffers stay untracked. Thread-free programs keep the
-three-word header and omit ownership helpers. OwnedVec access and handoff
-still lack runtime ownership checks. See the
+three-word header and omit ownership helpers.
+
+As of v0.1.695, user OwnedVecs use the Vec header's ownership word for
+exclusive access. Foreign reads fail; inline `spawn` closures release direct
+OwnedVec captures, and their first user claims the storage without a
+scheduling point. Opaque callback values do not release hidden captures.
+Retained aliases fail after another thread claims ownership. Constructors,
+growth and conversion preserve these rules; thread-free programs omit the
+ownership helpers. See the
 [memory contract](memory-model.md#runtime-guards-and-coverage-limits).
 
 ## Vector extension (Q-110, v0.1.426)

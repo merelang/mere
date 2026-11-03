@@ -2239,8 +2239,14 @@ let rec no_tainted_leak_llvm (tainted : string list) (e : Ast.expr) : bool =
   | Ast.Fun (param, _, fbody) ->
     List.mem param tainted || g fbody
   | Ast.Annot (a, _) | Ast.Neg a | Ast.Field_get (a, _) -> g a
-  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-  | Ast.App (a, b) -> g a && g b
+  | Ast.App (a, b) ->
+    (* A ThreadHandle can outlive this scope and keep a captured OwnedVec.
+       Leave its buffer to the registry even when the closure returns unit. *)
+    let async = match e.Ast.ty with
+      | Some t -> (match Ast.walk t with Ast.TyCon ("ThreadHandle", _) -> true | _ -> false)
+      | None -> false in
+    (not async || not (appears e)) && g a && g b
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> g a && g b
   | Ast.Let (_, value, body) -> g value && g body
   | Ast.Let_rec (bs, body) ->
     List.for_all (fun (_, _, v') -> g v') bs && g body
@@ -10499,7 +10505,7 @@ let owner_runtime_llvm =
         [ Printf.sprintf "%s_h = internal constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\\00\" }"
             name (n + 1) n (n + 1) m;
           Printf.sprintf "%s = internal alias [%d x i8], getelementptr inbounds ({ i64, [%d x i8] }, ptr %s_h, i32 0, i32 1)"
-            name (n + 1) (n + 1) name ]) [ "owned_vec_push"; "owned_vec_get"; "owned_vec_len" ])
+            name (n + 1) (n + 1) name ]) [ "owned_vec_push"; "owned_vec_get"; "owned_vec_len"; "owned_vec_to_vec" ])
 
 (* load field [idx] of the container at [c] (a %[sn]) and check it *)
 let owner_check_lines ~(sn : string) ~(idx : int) ~(c : string) (kind : string) (op : string) : string list =
@@ -12079,6 +12085,8 @@ let emit_owned_vec_to_vec_helper_llvm (elem_ty : Ast.ty) : string =
   String.concat "\n"
     [ Printf.sprintf "define ptr @mere_owned_vec_to_vec_%s(ptr %%o, ptr %%region) {" tag;
       "entry:";
+      Printf.sprintf "  %%__ov_p = getelementptr %%%s, ptr %%o, i32 0, i32 3" ov_struct;
+      "  call void @__lang_ov_use(ptr %__ov_p, ptr @.ov_owned_vec_to_vec) ; ov-to-vec-owner";
       Printf.sprintf "  %%new = call ptr @mere_vec_%s_new(ptr %%region)" tag;
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%o, i32 0, i32 1" ov_struct;
       "  %len = load i32, ptr %lp";

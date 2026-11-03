@@ -144,7 +144,7 @@ def checked(command, cwd, env=None):
     return result.stdout
 
 
-def run_suite(name, cases, poisons, plain, forbidden, poison):
+def run_suite(name, cases, poisons, plain, forbidden, poison, poison_check=None):
     memu = Path(os.environ.get("MEMU", ""))
     if not (memu / "riscv-runc/rv32i_run.mere").is_file():
         raise RuntimeError("set MEMU to a memu checkout; both widths must run")
@@ -197,8 +197,10 @@ def run_suite(name, cases, poisons, plain, forbidden, poison):
                         data[offset:offset + 4] = struct.pack("<I", 0x8067)
                     (tmp / "prog.bin").write_bytes(data)
                     actual = run(width)
-                    if actual[0] or b"allowed\n" not in actual[1] or actual == references[case]:
-                        raise RuntimeError(f"POISON {case}: RV{width} remained green without {labels}")
+                    valid = (poison_check(case, actual, references[case]) if poison_check else
+                             actual[0] == 0 and b"allowed\n" in actual[1] and actual != references[case])
+                    if not valid:
+                        raise RuntimeError(f"POISON {case}: RV{width} did not expose the removed guard {labels}: {actual!r}")
                     checks += 1
                 print(f"  ok    POISON {case}: removed {', '.join(labels)}", flush=True)
             prelude = checked([MERE, "--rv-prelude"], tmp).decode()

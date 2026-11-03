@@ -442,7 +442,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.693)
+## 4. Implemented memory behavior (v0.1.695)
 
 ### Concurrency and sharing
 
@@ -628,10 +628,24 @@ can be read by another thread without freezing its source. Prelude and
 formatting buffers stay untracked; thread-free programs keep the original
 three-word header and omit ownership helpers.
 
-**RISC-V OwnedVec access and handoff still lack runtime guards.** Frontend
-checks still apply, but accepted opaque callbacks gain no additional ownership
-protection for OwnedVec. Keep mutable containers within one worker
-and exchange messages over channels.
+**RISC-V OwnedVec guards (v0.1.695).** Constructors record the current
+logical thread. Push, get, length (including `len`) and Vec conversion
+require exclusive ownership, including empty access and failed lookups.
+Foreign reads fail rather than making the source shared. Inline `spawn`
+closures release directly captured OwnedVec bindings, and the first user
+claims released storage. There is no scheduler switch within a claim.
+Opaque callback values do not release hidden OwnedVecs. Once another thread
+claims the value, retained aliases fail even after that thread is joined.
+Growth and default-arena promotion preserve ownership; converted Vecs are
+independent and belong to their caller. Thread-free programs omit the
+checks and retain the existing storage layout.
+
+As of v0.1.695, C, LLVM and the interpreter check ownership before
+`owned_vec_to_vec`, including empty conversion, and claim released storage
+before copying. C and LLVM defer automatic scope cleanup when a captured
+OwnedVec may outlive the scope through a ThreadHandle; the program registry
+retains its buffer until shutdown.
+
 The container checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
 
