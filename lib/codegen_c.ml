@@ -6256,7 +6256,7 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
        \  char* buf = (char*)__lang_region_alloc(__lang_current_region, cap); buf[0] = '[';\n\
        \  for (int i = 0; i < v->len; i++) {\n\
        \    const char* part = %s(v->data[i]); size_t n = __lang_str_size(part);\n\
-       \    if (n > SIZE_MAX - used - 2) __lang_fail_impl(\"out of memory\");\n\
+       \    if (used > SIZE_MAX - 2 || n > SIZE_MAX - used - 2) __lang_fail_impl(\"out of memory\");\n\
        \    size_t need = used + n + 2;\n\
        \    if (need > cap) {\n\
        \      size_t next = cap;\n\
