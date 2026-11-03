@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.687 — 2026-11-03
+
+_Wasm: enforce exclusive OwnedVec access and inline spawn handoff._
+
+OwnedVec construction and Vec-to-OwnedVec conversion retain the creator's
+owner metadata. Reads, writes, generic `len` and OwnedVec-to-Vec conversion
+check exclusive ownership before storage access, including empty vectors.
+An opaque callback cannot silently share an OwnedVec; caught failures leave
+its contents intact.
+
+Inline spawn closures release the direct OwnedVec bindings they capture,
+matching the native protocol. The next user claims released storage with an
+atomic compare/exchange. Subsequent access from another worker, including a
+retained parent alias, fails. Frontend move rules still apply; first-use
+claiming does not predetermine which alias arrives first. Opaque function
+values do not release their hidden vectors. Unthreaded modules omit the
+new machinery, and threaded programs without OwnedVec omit its helpers.
+
+The CI matrix covers both constructors, all access APIs, caught failures,
+handoff and retained aliases, local growth/conversions and worker identities.
+Negative controls remove guards, release and claiming, and duplicate worker
+identities. Existing ownership witnesses also run on Wasm.
+
 ## v0.1.686 — 2026-11-03
 
 _C on macOS: a region block of 16 KB or more is mapped, and unmapped when it is freed._

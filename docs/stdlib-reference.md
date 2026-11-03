@@ -1410,8 +1410,11 @@ program on the interpreter, C and LLVM. LLVM includes `vec_recycle`,
 `map_clear` and `map_recycle` as of v0.1.683. Threaded Wasm modules also
 guard `Vec` as of v0.1.680, `Map` as of v0.1.681, and `StrBuf`/`ByteBuf` as of
 v0.1.684, and `ListBuf` as of v0.1.685. ListBuf requires its owner for both
-`lb_push` and `lb_to_list`, which freezes the builder. Wasm `OwnedVec` handoff
-remains unguarded. See the [backend coverage and host identity
+`lb_push` and `lb_to_list`, which freezes the builder. As of v0.1.687, threaded
+Wasm also guards OwnedVec reads, writes and conversions, and releases direct
+OwnedVec bindings captured by inline spawn closures for atomic first-use
+claiming. Opaque callback values do not transfer their hidden OwnedVecs.
+See the [backend coverage and host identity
 requirements](memory-model.md#runtime-guards-and-coverage-limits). A foreign
 Vec write reports:
 

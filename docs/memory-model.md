@@ -423,7 +423,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.685)
+## 4. Implemented memory behavior (v0.1.687)
 
 ### Concurrency and sharing
 
@@ -535,6 +535,28 @@ matrix checks empty/nonempty builders, caught failures, immutable messages,
 worker-local use, region reuse and distinct identities, with negative controls
 for each operation's guard, alignment and identity assignment.
 
+**Threaded Wasm modules guard `OwnedVec` access and handoff (v0.1.687).**
+`owned_vec_new` and `vec_to_owned` create storage owned by the current worker.
+`owned_vec_push`, `owned_vec_get`, `owned_vec_len` (including `len`) and
+`owned_vec_to_vec` require ownership before accessing storage, including
+empty-vector reads and conversions. Foreign reads fail rather than freezing
+the vector as a shared Vec. Caught failures leave its contents intact.
+
+As on the native backends, direct OwnedVec bindings captured by an inline
+`spawn (fn ... -> ...)` are released, then claimed atomically by the next
+thread to use them. Once claimed, other threads fail, including a retained
+function alias in the parent. Frontend move checks reject direct parent use;
+runtime claiming does not predetermine which alias reaches released storage
+first. An opaque function value passed to `spawn` does not release the
+OwnedVecs hidden in its environment. The
+[`wasm_ownedvec_owner_check.sh`](https://github.com/merelang/mere/blob/main/scripts/wasm_ownedvec_owner_check.sh)
+matrix checks both constructors, every access API, transfer and retained
+aliases, worker-local growth and conversions, and distinct identities.
+Negative controls remove access guards, release and claiming, and duplicate
+worker identities. Unthreaded modules use the storage helpers directly and
+omit the ownership machinery; threaded modules without OwnedVec omit its
+ownership helpers.
+
 An embedding host must set the exported mutable `__lang_thread_id` global
 before executing Mere code: use a distinct integer in `1..1073741823` for
 each instance sharing memory. `scripts/run_wasm.js` uses `1` for the main
@@ -544,10 +566,9 @@ remains a boolean for failure propagation. Modules that use neither thread
 nor channel builtins omit container owner checks and atomic metadata
 accesses.
 
-**Wasm's `OwnedVec` still lacks runtime ownership handoff checks.**
-RISC-V also lacks the native container-owner
-guards. Frontend checks still apply on both backends, but an opaque callback
-accepted by them gains no additional protection for these containers. Keep
+**RISC-V lacks the native container-owner guards.** Frontend checks still
+apply there, but an opaque callback accepted by them gains no additional
+protection for these containers. Keep
 mutable containers within one worker and exchange messages over channels.
 The container checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
