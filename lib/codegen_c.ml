@@ -4358,6 +4358,7 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf
          "({ __auto_type __vc = %s; __auto_type __cl = %s; \
+          __LANG_READ(__vc); /* vec-iter-read */ \
           for (int __i = 0; __i < __vc->len; __i++) { \
             __cl.fn(__cl.env, mere_vec_%s_get(__vc, __i)); \
           } 0; })"
@@ -4371,6 +4372,7 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf
          "({ __auto_type __vc = %s; __auto_type __acc = %s; \
           __auto_type __outer = %s; \
+          __LANG_READ(__vc); /* vec-fold-read */ \
           for (int __i = 0; __i < __vc->len; __i++) { \
             __auto_type __e = mere_vec_%s_get(__vc, __i); \
             __acc = __outer.fn2 \
@@ -4579,6 +4581,7 @@ let rec emit_expr (e : Ast.expr) : string =
         with Not_found -> ());
        Printf.sprintf
          "({ __auto_type __vc = %s; __auto_type __new = mere_owned_vec_%s_new(); \
+          __LANG_READ(__vc); /* vec-to-owned-read */ \
           for (int __i = 0; __i < __vc->len; __i++) { \
             mere_owned_vec_%s_push(__new, mere_vec_%s_get(__vc, __i)); \
           } __new; })"
@@ -6127,8 +6130,11 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
   | Ast.TyCon (("Vec" | "OwnedVec"), args) when args <> [] ->
     let elem_ty = Ast.walk (List.nth args (List.length args - 1)) in
     let elem_show = "show_" ^ ty_tag elem_ty in
+    let read_mark = match Ast.walk t with
+      | Ast.TyCon ("Vec", _) -> "__LANG_READ(v); /* vec-show-read */"
+      | _ -> "" in
     Printf.sprintf
-      "%s {\n  \
+      "%s {\n  %s\n  \
          if (v->len == 0) return __lang_str_of_cstr(\"Vec[]\");\n  \
          const char* __acc = \"Vec[\";\n  \
          for (int __i = 0; __i < v->len; __i++) {\n    \
@@ -6139,7 +6145,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
          }\n  \
          { char* __buf; asprintf(&__buf, \"%%s]\", __acc); return __lang_str_take_cstr(__buf); }\n\
        }"
-      header elem_show elem_show
+      header read_mark elem_show elem_show
   (* v0.1.668: a handle shows as the interpreter shows it, not as a variant
      with no constructors ("<unknown>") *)
   | Ast.TyCon (("Channel" | "File" | "ThreadHandle" | "Coro") as h, _) ->
@@ -6241,6 +6247,30 @@ let emit_to_json_fn (tag : string) (t : Ast.ty) : string =
     let fmt = "[" ^ String.concat "," (List.map (fun _ -> "%s") ts) ^ "]" in
     Printf.sprintf "%s {\n  char* buf; asprintf(&buf, \"%s\", %s); return __lang_str_take_cstr(buf);\n}"
       header fmt (String.concat ", " parts)
+  | Ast.TyCon ("Vec", args) when args <> [] ->
+    let elem = "to_json_" ^ ty_tag (Ast.walk (List.nth args (List.length args - 1))) in
+    Printf.sprintf
+      "%s {\n\
+       \  __LANG_READ(v); /* vec-json-read */\n\
+       \  size_t used = 1, cap = 32;\n\
+       \  char* buf = (char*)__lang_region_alloc(__lang_current_region, cap); buf[0] = '[';\n\
+       \  for (int i = 0; i < v->len; i++) {\n\
+       \    const char* part = %s(v->data[i]); size_t n = __lang_str_size(part);\n\
+       \    if (n > SIZE_MAX - used - 2) __lang_fail_impl(\"out of memory\");\n\
+       \    size_t need = used + n + 2;\n\
+       \    if (need > cap) {\n\
+       \      size_t next = cap;\n\
+       \      while (next < need) next = next > SIZE_MAX / 2 ? need : next * 2;\n\
+       \      char* fresh = (char*)__lang_region_alloc(__lang_current_region, next);\n\
+       \      memcpy(fresh, buf, used); buf = fresh; cap = next;\n\
+       \    }\n\
+       \    if (i) buf[used++] = ',';\n\
+       \    memcpy(buf + used, part, n); used += n;\n\
+       \  }\n\
+       \  buf[used++] = ']';\n\
+       \  char* result = __lang_str_alloc(__lang_current_region, used);\n\
+       \  memcpy(result, buf, used); return result;\n}"
+      header elem
   | Ast.TyCon ("list", [elem_ty]) when Hashtbl.mem polymorphic_variants "list" ->
     let elem = "to_json_" ^ ty_tag (Ast.walk elem_ty) in
     Printf.sprintf
@@ -12325,6 +12355,7 @@ let emit_ffi_companion (prog : Ast.program) : string =
 let bytes_vec_bridge_runtime =
   String.concat "\n"
     [ "static mere_bytes* __lang_bytes_of_vec(mere_vec_int* v) {";
+      "  __LANG_READ(v); /* vec-bytes-read */";
       "  mere_bytes* b = __lang_bytes_alloc((long long)v->len);";
       "  for (int i = 0; i < v->len; i++) b->data[i] = (unsigned char)(v->data[i] & 0xFF);";
       "  return b;";

@@ -433,7 +433,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.689)
+## 4. Implemented memory behavior (v0.1.690)
 
 ### Concurrency and sharing
 
@@ -586,11 +586,9 @@ and does not mark element storage shared. Vec-producing conversions and file
 read results belong to their caller; arena promotion and compaction preserve
 ownership metadata.
 Programs without green threads omit the checks and keep the four-word header.
-RISC-V marks reads through `show`, JSON and byte conversion, and through
-empty iteration, folding and Vec-to-OwnedVec conversion. These paths are
-more conservative than C's current unmarked read paths: they can prevent a
-later owner write even when C permits it. The ownership gate pins these
-differences separately and requires the remaining fixtures to match C.
+RISC-V and C mark reads through `show`, JSON and byte conversion, and through
+empty iteration, folding and Vec-to-OwnedVec conversion. C covers these paths
+as of v0.1.690; the ownership gate requires all its fixtures to match C.
 
 **RISC-V's other containers still lack runtime owner guards.** This includes
 `Map`, `StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` handoff. Frontend checks
