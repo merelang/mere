@@ -1468,6 +1468,16 @@ for the answer to come back on.
 
 ---
 
+### Thread operations inside Node Wasm workers (v0.1.688)
+
+The Node host supports `spawn`, `join` and `detach` from the main instance.
+Calling one of these operations inside a worker terminates that worker with
+`trap: <operation>: not supported inside a Wasm worker`. The parent can
+catch the failure raised by `join`; a `try_or` inside the worker cannot
+catch the host exception. Nested spawning and worker-side joining or
+detaching are not supported. A failed worker also notifies channels that
+registered it with `channel_sender`, as other worker failures do.
+
 ## When a spawned thread fails (v0.1.586, v0.1.590)
 
 A thread's failure does not end the program. It is one line on stderr **when it

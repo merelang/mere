@@ -196,6 +196,10 @@ const readStrBytes = (ptr) => {
 };
 ${makeChannelEnv.toString()}
 const stub = () => 0;
+// A host exception ends this worker and is recorded for its joiner below.
+const unsupportedThreadOp = (op) => {
+  throw new Error(op + ": not supported inside a Wasm worker");
+};
 const env = Object.assign({
   memory,
   puts: (ptr) => { process.stdout.write(readStrBytes(ptr)); process.stdout.write('\\n'); },
@@ -209,7 +213,9 @@ const env = Object.assign({
   print_bytes: (ptr, len) =>
     process.stdout.write(Buffer.from(memory.buffer, ptr, len)),
   time: () => Date.now() / 1000,
-  mere_spawn: stub, mere_join: stub, mere_detach: stub,
+  mere_spawn: () => unsupportedThreadOp("spawn"), // worker-thread-guard
+  mere_join: () => unsupportedThreadOp("join"), // worker-thread-guard
+  mere_detach: () => unsupportedThreadOp("detach"), // worker-thread-guard
   // an uncaught failure in this thread: the message is the joiner's to raise
   mere_thread_fail: (ptr) => { recordFailure(readStrBytes(ptr)); return 0; },
   __lang_str_of_float: stub, __lang_float_of_str: stub,

@@ -6,6 +6,18 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.688 — 2026-11-03
 
+_Node Wasm host: report unsupported thread operations inside workers._
+
+Calling `spawn`, `join` or `detach` inside a worker now terminates that
+worker with an operation-specific diagnostic. The existing worker failure
+protocol reports it to the parent: joining the failed worker raises a Mere
+failure, which the parent can catch. A `try_or` inside the worker cannot
+catch this host exception. Main-instance thread operations remain supported.
+
+The CI gate exercises caught and uncaught parent joins, failure notification
+through channels, and ordinary main-instance thread operations. Negative
+controls restore each former zero-returning worker stub.
+
 _C: a container's private arena goes with its region, and on glibc the mmap threshold is fixed at 64 KiB._
 
 **Private arenas.** `map_compact`, `map_recycle`, `vec_compact` and
