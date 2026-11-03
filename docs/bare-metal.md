@@ -448,6 +448,13 @@ for compound write operations such as sorting and SIMD stores. This is an
 internal RISC-V primitive; use the public Vec operations in application code.
 `__rv_vec_track` attaches ownership to fresh Vecs returned by file-reading
 helpers; it preserves an already tracked Vec's owner and shared state.
+
+As of v0.1.691, Map ownership uses a fifth entry in its metadata Vec in
+threaded programs. Internal Maps are untracked; user Maps keep ownership
+across clearing and storage replacement. The prelude uses
+`__rv_map_read_meta` and `__rv_map_write_meta` on that integer metadata Vec;
+the write intrinsic requires an operation literal. These are internal
+RISC-V primitives; use the public Map operations in application code.
 Other container representations still lack runtime ownership checks. See the
 [memory contract](memory-model.md#runtime-guards-and-coverage-limits).
 

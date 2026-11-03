@@ -1135,10 +1135,14 @@ let rec _miter = fn keys -> fn vals -> fn (live: int Vec) -> fn f -> fn (j: int)
 // visited, and one it deletes before its turn is skipped
 let rvmap_iter = fn m -> fn f ->
   let (_, keys, vals, live, meta) = m in
+  let _ = __rv_map_read_meta meta in
   _miter keys vals live f 0 (vec_get meta 1);
-let rvmap_len = fn m -> let (_, _, _, _, meta) = m in vec_get meta 0;
+let rvmap_len = fn m ->
+  let (_, _, _, _, meta) = m in
+  let _ = __rv_map_read_meta meta in vec_get meta 0;
 let rvmap_clear = fn m ->
   let (idx, _, _, _, meta) = m in
+  let _ = __rv_map_write_meta meta "map_clear" in
   let _ = _mzero idx 0 (vec_get meta 3 + 1) in
   let _ = vec_set meta 0 0 in let _ = vec_set meta 1 0 in vec_set meta 2 0;
 // map_recycle is codegen_riscv's (__mrecycle, v0.1.614): the clear AND the
@@ -1199,15 +1203,21 @@ let rvmap_ins = fn m -> fn (s: int) -> fn k -> fn v ->
     // keep the index at most 3/4 full, tombstones counted
     if (vec_get meta 0 + vec_get meta 2) * 4 >= (vec_get meta 3 + 1) * 3 then _mgrow m else ();
 let rvmap_set = fn m -> fn k -> fn v ->
+  let (_, _, _, _, meta) = m in
+  let _ = __rv_map_write_meta meta "map_set" in
   let s = _mslot m k in
   if s >= 0 then rvmap_upd m s v else rvmap_ins m s k v;
 let rvmap_get = fn m -> fn k ->
-  let (idx, _, vals, _, _) = m in
+  let (idx, _, vals, _, meta) = m in
+  let _ = __rv_map_read_meta meta in
   let s = _mslot m k in
   if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found in Map (use map_has to check first)";
-let rvmap_has = fn m -> fn k -> _mslot m k >= 0;
+let rvmap_has = fn m -> fn k ->
+  let (_, _, _, _, meta) = m in
+  let _ = __rv_map_read_meta meta in _mslot m k >= 0;
 let rvmap_delete = fn m -> fn k ->
   let (idx, _, _, live, meta) = m in
+  let _ = __rv_map_write_meta meta "map_delete" in
   let s = _mslot m k in
   if s < 0 then ()
   else
@@ -1262,15 +1272,21 @@ let rvmap_ins_i = fn m -> fn (s: int) -> fn k -> fn v ->
     // keep the index at most 3/4 full, tombstones counted
     if (vec_get meta 0 + vec_get meta 2) * 4 >= (vec_get meta 3 + 1) * 3 then _mgrow_i m else ();
 let rvmap_set_i = fn m -> fn k -> fn v ->
+  let (_, _, _, _, meta) = m in
+  let _ = __rv_map_write_meta meta "map_set" in
   let s = _mslot_i m k in
   if s >= 0 then rvmap_upd m s v else rvmap_ins_i m s k v;
 let rvmap_get_i = fn m -> fn k ->
-  let (idx, _, vals, _, _) = m in
+  let (idx, _, vals, _, meta) = m in
+  let _ = __rv_map_read_meta meta in
   let s = _mslot_i m k in
   if s >= 0 then vec_get vals (vec_get idx s - 1) else fail "map_get: key not found in Map (use map_has to check first)";
-let rvmap_has_i = fn m -> fn k -> _mslot_i m k >= 0;
+let rvmap_has_i = fn m -> fn k ->
+  let (_, _, _, _, meta) = m in
+  let _ = __rv_map_read_meta meta in _mslot_i m k >= 0;
 let rvmap_delete_i = fn m -> fn k ->
   let (idx, _, _, live, meta) = m in
+  let _ = __rv_map_write_meta meta "map_delete" in
   let s = _mslot_i m k in
   if s < 0 then ()
   else
@@ -1304,6 +1320,7 @@ let rec _mrepoint = fn (idx: int Vec) -> fn (np: int Vec) -> fn (s: int) -> fn (
     _mrepoint idx np (s + 1) cap;
 let rvmap_compact = fn m ->
   let (idx, keys, vals, live, meta) = m in
+  let _ = __rv_map_write_meta meta "map_compact" in
   let used = vec_get meta 1 in
   if vec_get meta 0 == used then ()
   else

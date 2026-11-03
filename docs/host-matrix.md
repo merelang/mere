@@ -43,6 +43,8 @@ machine rather than a host.
 | `__rv_heap_lo` | refused | refused | refused | yes |
 | `__rv_hwm_raise` | refused | refused | refused | yes |
 | `__rv_main_lo` | refused | refused | refused | yes |
+| `__rv_map_read_meta` | refused | refused | refused | yes |
+| `__rv_map_write_meta` | refused | refused | refused | yes |
 | `__rv_open_rd` | refused | refused | refused | yes |
 | `__rv_open_wr` | refused | refused | refused | yes |
 | `__rv_peek` | refused | refused | refused | yes |

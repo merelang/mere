@@ -433,7 +433,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.690)
+## 4. Implemented memory behavior (v0.1.691)
 
 ### Concurrency and sharing
 
@@ -590,8 +590,18 @@ RISC-V and C mark reads through `show`, JSON and byte conversion, and through
 empty iteration, folding and Vec-to-OwnedVec conversion. C covers these paths
 as of v0.1.690; the ownership gate requires all its fixtures to match C.
 
+**RISC-V Map guards (v0.1.691).** User Maps follow the same logical-thread
+rule: foreign reads through lookups (including a missing key), membership,
+length or iteration make them read-only. Set, delete (including a missing
+key), clear, recycle and compact check ownership before modifying storage,
+even for an empty Map. The check preserves contents on rejection. Growth,
+clear, recycle, compact and default-arena promotion retain the owner. Only
+programs with green threads append ownership to the Map's metadata Vec;
+runtime-private Maps remain untracked. `map_bytes` measures arena capacity
+without sharing element storage.
+
 **RISC-V's other containers still lack runtime owner guards.** This includes
-`Map`, `StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` handoff. Frontend checks
+`StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` handoff. Frontend checks
 still apply, but accepted opaque callbacks gain no additional ownership
 protection for these containers. Keep mutable containers within one worker
 and exchange messages over channels.
