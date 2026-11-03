@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.695 — 2026-11-04
+
+_RISC-V: enforce exclusive OwnedVec access and spawn handoff._
+
+OwnedVec constructors record the current logical thread. Push, get, length
+(including generic `len`) and conversion require ownership before touching
+storage, including empty vectors and failed lookups. Foreign reads fail
+rather than sharing the buffer. Inline `spawn` closures release direct
+OwnedVec captures; their first user claims them without a scheduling point.
+Opaque callback values do not release hidden OwnedVecs. Retained aliases
+fail after another thread claims the value, including after joining it.
+Growth, default-arena promotion and independent Vec conversion preserve the
+ownership rules. Thread-free programs omit ownership helpers.
+
+_OwnedVec conversion and native scope cleanup._
+
+C, LLVM and the interpreter now check ownership at the start of
+`owned_vec_to_vec`. C previously missed empty conversion and used a get
+failure for nonempty foreign conversion; LLVM and the interpreter did not
+check the conversion at all. Conversion now also claims released empty
+storage. C and LLVM keep an OwnedVec's buffer in the program registry when
+it is passed to a thread whose handle can outlive its binding scope, instead
+of freeing the data while the worker still needs it.
+
+The gates compare 69 ownership fixtures on RV32/RV64 with C, and conversion
+and scope lifetime across the interpreter, C, LLVM and Wasm. Controls remove
+access guards, release, claiming and tracking, or duplicate logical IDs.
+
 ## v0.1.694 — 2026-11-03
 
 _RISC-V: a region block gives back the arenas of the containers it rolled back._

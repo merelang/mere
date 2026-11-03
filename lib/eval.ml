@@ -2619,7 +2619,7 @@ let builtin_vec_to_owned =
 let builtin_owned_vec_to_vec =
   V_builtin ("owned_vec_to_vec", fun v ->
     match v with
-    | V_vec arr -> V_vec (vecbuf_of_array (Array.copy (vecbuf_live arr)))
+    | V_vec arr -> ov_use "owned_vec_to_vec" arr; V_vec (vecbuf_of_array (Array.copy (vecbuf_live arr)))
     | _ -> failwith "owned_vec_to_vec: expected OwnedVec")
 
 let builtin_iter_n =

@@ -1970,6 +1970,41 @@ let emit_strbuf_owner_helpers () =
     emit (Label done_); ret ()
   end
 
+(* OwnedVec uses the Vec header, but access is exclusive: zero means
+   released, not untracked. Green threads cannot switch inside a use/claim. *)
+let emit_owned_use op =
+  if !vec_owner_mode then begin
+    push ra; emit (Jal (ra, "__ov_use_" ^ op)); pop ra
+  end
+
+let emit_owned_release () =
+  if !vec_owner_mode then begin
+    push ra; emit (Jal (ra, "__ov_release")); pop ra
+  end
+
+let emit_owned_owner_helpers () =
+  if !vec_owner_mode then begin
+    let off = 4 * wsz () in
+    let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+    emit (Label "__ov_release");
+    emit_word (enc_s off zero a0 (stf3 ()) 0x23); ret ();
+    emit (Label "__ov_claim");
+    (* t1 is the current logical identity plus one, supplied by use. *)
+    emit_word (enc_s off t1 a0 (stf3 ()) 0x23); ret ();
+    List.iter (fun op ->
+      emit (Label ("__ov_use_" ^ op));
+      emit_word (enc_i off a0 (ldf3 ()) t0 0x03);
+      li t1 (rtw_addr rtw_thread_id);
+      emit_word (enc_i 0 t1 (ldf3 ()) t1 0x03);
+      emit_word (enc_i 1 t1 0 t1 0x13);
+      let done_ = fresh_label ".ovu" in
+      emit (Branch (0, t0, t1, done_));
+      emit (Branch (0, t0, zero, "__ov_claim"));
+      emit_abort (op ^ ": an OwnedVec belongs to one thread -- the one that made it, or the one spawn moved it into -- and another used it; move it into the thread by capturing it in the closure spawn is given");
+      emit (Label done_); ret ())
+      ["owned_vec_push"; "owned_vec_get"; "owned_vec_len"; "owned_vec_to_vec"]
+  end
+
 let emit_vec_owner_helpers () =
   if !vec_owner_mode then begin
     let owner () =
@@ -3589,6 +3624,15 @@ and compile_app env e =
   | Ast.Var op when List.mem_assoc op rv_lane_fns
                     && List.length args = snd (List.assoc op rv_lane_fns) ->
     call_top env (fst (List.assoc op rv_lane_fns)) args
+  | Ast.Var "spawn" when List.length args = 1 ->
+    let clos = List.hd args in
+    (match clos.Ast.node with
+     | Ast.Fun _ ->
+       List.iter (fun (n, t) ->
+         compile_expr env { clos with Ast.node = Ast.Var n; Ast.ty = Some t };
+         emit_owned_release ()) (Ast.owned_vec_captures clos)
+     | _ -> ());
+    call_top env "rvth_spawn" args
   | Ast.Var op when List.mem_assoc op rv_thread_fns
                     && List.length args = snd (List.assoc op rv_thread_fns) ->
     call_top env (fst (List.assoc op rv_thread_fns)) args
@@ -3599,7 +3643,7 @@ and compile_app env e =
                                | _ -> "vec_new" in
     if target = "vec_new" then (compile_expr env (List.hd args); emit (Jal (ra, "__vec_new")))
     else call_top env target args;
-    if op <> "owned_vec_new" && not (in_rv_prelude e.Ast.loc) then emit_vec_track ();
+    if op = "owned_vec_new" || not (in_rv_prelude e.Ast.loc) then emit_vec_track ();
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
   | Ast.Var ("bytebuf_len" | "bytebuf_get" | "bytebuf_set" | "bytebuf_push"
              | "bytes_of_bytebuf" | "bytes_of_vec" | "lb_push" | "lb_to_list"
@@ -3608,7 +3652,9 @@ and compile_app env e =
                              | "bytebuf_len" | "bytes_of_bytebuf" | "bytes_of_vec"
                              | "lb_to_list" | "owned_vec_to_vec" -> 1
                              | "bytebuf_set" -> 3 | _ -> 2) ->
-    call_top env (match op with
+    let guard () =
+      if op = "owned_vec_get" || op = "owned_vec_to_vec" then emit_owned_use op in
+    call_top ~guard env (match op with
                   | "bytebuf_len" -> "rvbb_len" | "bytebuf_get" -> "rvbb_get"
                   | "bytebuf_set" -> "rvbb_set" | "bytebuf_push" -> "rvbb_push"
                   | "bytes_of_bytebuf" | "bytes_of_vec" -> "rvbb_to_bytes"
@@ -3617,10 +3663,11 @@ and compile_app env e =
     if op = "owned_vec_to_vec" then emit_vec_track ()
   | Ast.Var ("bytebuf_of_bytes" | "vec_of_bytes" | "vec_to_owned" as op) when List.length args = 1 ->
     call_top env (if op = "vec_to_owned" then "rvov_copy" else "rvbb_of_bytes") args;
-    if op = "vec_of_bytes" || (op = "bytebuf_of_bytes" && not (in_rv_prelude e.Ast.loc)) then emit_vec_track ();
+    if op = "vec_to_owned" || op = "vec_of_bytes" || (op = "bytebuf_of_bytes" && not (in_rv_prelude e.Ast.loc)) then emit_vec_track ();
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
   | Ast.Var "owned_vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
+    emit_owned_use "owned_vec_len";
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)
   | Ast.Var "vec_new" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"));
@@ -3636,6 +3683,7 @@ and compile_app env e =
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=x *)
+    (match head.Ast.node with Ast.Var "owned_vec_push" -> emit_owned_use "owned_vec_push" | _ -> ());
     (* v0.1.614: a value with something to copy goes through the typed helper;
        the prelude's own stores never do (its types may be erased to int) *)
     (match (List.nth args 1).Ast.ty with
@@ -4585,11 +4633,12 @@ and compile_app env e =
      | Ast.TyStr -> via "str_len"
      | Ast.TyBytes -> via "bytes_len"
      | Ast.TyCon ("Vec", _) -> via "vec_len"
+     | Ast.TyCon ("OwnedVec", _) -> via "owned_vec_len"
      | Ast.TyCon ("Map", _) -> via "map_len"
      | Ast.TyCon ("StrBuf", _) -> via "strbuf_len"
      | Ast.TyCon ("list", _) -> call_top env "rvlist_len" args
      | Ast.TyTuple ts -> compile_expr env a; li a0 (List.length ts)
-     | t -> err e.loc (Printf.sprintf "RV32I: `len` of a %s -- this backend measures a str, bytes, Vec, Map, StrBuf, list or tuple" (Formatter.fmt_ty t)))
+     | t -> err e.loc (Printf.sprintf "RV32I: `len` of a %s -- this backend measures a str, bytes, Vec, OwnedVec, Map, StrBuf, list or tuple" (Formatter.fmt_ty t)))
   | Ast.Var "ord" when List.length args = 1 ->
     compile_expr env (List.hd args);
     (* v0.1.638: one character, or the C runtime's refusal (prop_str asks) *)
@@ -4677,10 +4726,11 @@ and compile_app env e =
 
 (* call a known top-level function (an rv-prelude helper) directly: evaluate
    the args into a0.. and jal its label *)
-and call_top env name args =
+and call_top ?(guard = fun () -> ()) env name args =
   let n = List.length args in
   List.iter (fun arg -> compile_expr env arg; push a0) args;
   for i = n - 1 downto 0 do pop (a0 + i) done;
+  guard ();
   emit (Jal (ra, "u_" ^ name))
 
 (* general application: evaluate the head to a closure value and apply the
@@ -8493,6 +8543,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_vec_owner_helpers ();
   emit_map_owner_helpers ();
   emit_strbuf_owner_helpers ();
+  emit_owned_owner_helpers ();
   emit_arena ();
   emit_map_rt ();
   if !coro_mode then emit_coro_rt ();

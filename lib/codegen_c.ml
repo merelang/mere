@@ -1505,8 +1505,14 @@ let rec no_tainted_leak (tainted : string list) (e : Ast.expr) : bool =
        outer container (var_appears_in walks Fun bodies). *)
     List.mem param tainted || g fbody
   | Ast.Annot (a, _) | Ast.Neg a | Ast.Field_get (a, _) -> g a
-  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
-  | Ast.App (a, b) -> g a && g b
+  | Ast.App (a, b) ->
+    (* A ThreadHandle can outlive this scope and keep a captured OwnedVec.
+       Leave its buffer to the registry even when the closure returns unit. *)
+    let async = match e.Ast.ty with
+      | Some t -> (match Ast.walk t with Ast.TyCon ("ThreadHandle", _) -> true | _ -> false)
+      | None -> false in
+    (not async || not (appears e)) && g a && g b
+  | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) -> g a && g b
   | Ast.Let (_, value, body) -> g value && g body
   | Ast.Let_rec (bs, body) ->
     List.for_all (fun (_, _, v') -> g v') bs && g body
@@ -4800,7 +4806,8 @@ let rec emit_expr (e : Ast.expr) : string =
             Hashtbl.add vec_instances t_tag elem_ty
         with Not_found -> ());
        Printf.sprintf
-         "({ __auto_type __ov = %s; __auto_type __new = mere_vec_%s_new(%s); \
+         "({ __auto_type __ov = %s; __lang_ov_use(&__ov->owner, \"owned_vec_to_vec\"); /* ov-to-vec-owner */ \
+          __auto_type __new = mere_vec_%s_new(%s); \
           for (int __i = 0; __i < __ov->len; __i++) { \
             mere_vec_%s_push(__new, mere_owned_vec_%s_get(__ov, __i)); \
           } __new; })"
