@@ -18,6 +18,37 @@ The CI gate exercises caught and uncaught parent joins, failure notification
 through channels, and ordinary main-instance thread operations. Negative
 controls restore each former zero-returning worker stub.
 
+_C: a container's private arena goes with its region, and on glibc the mmap threshold is fixed at 64 KiB._
+
+**Private arenas.** `map_compact`, `map_recycle`, `vec_compact` and
+`vec_recycle` give a container an arena of its own. The container's struct
+stays in the region it was made in and was freed with that region's blocks,
+but the arena was freed with nothing: 8,000 maps compacted inside
+`region R { }` left 480 MB behind R (991 MB resident after R on macOS, 42 MB
+now). An arena is now tied to the region its container's struct lives in and
+retired when that region's life ends; when the region is kept (a value in it
+was stored somewhere older), its arenas are handed on with its blocks. This is
+as safe as freeing the block itself: the struct that names the arena is in
+that block, and a container cannot leave its block without the block being
+kept. `scripts/region_deps_check.sh` leaves a region of 1,000 compacted maps
+of 300 KB: 6 MB resident after it on macOS and 5 MB on Linux, against 314 and
+308 MB when the release leaves the arenas behind (`--poison`).
+
+**glibc's dynamic mmap threshold.** v0.1.686 kept malloc on Linux on the
+grounds that glibc maps large blocks and returns them. It does so only until
+the first mapped block is freed: the threshold then rises to that block's
+size, and from then on blocks that size come from the heap, where a freed one
+stays resident. Regions allocate and free in exactly those sizes. mere-ruby
+with a thousand suspended fibers under a collection every 50 safepoints
+passed 6 GB in 17 s on Linux; calling `malloc_trim` every 64 MB freed only got
+it to 105 s. A program now fixes the threshold at 64 KiB when it starts
+(`mallopt(M_MMAP_THRESHOLD)`, unless `MALLOC_MMAP_THRESHOLD_` is set; a
+library takes no such process-global action): the same run finishes in 207 s
+at 3.6 GB, and the plain one holds 27% less. glibc still falls back to the
+heap when a mapping fails or `M_MMAP_MAX` is reached. `block_return_check.sh`
+now answers on Linux too: 5 MB resident after the region above, 405 MB with
+the threshold left dynamic (`--poison`).
+
 ## v0.1.687 — 2026-11-03
 
 _Wasm: enforce exclusive OwnedVec access and inline spawn handoff._

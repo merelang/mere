@@ -227,6 +227,11 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   message. A Map or a Vec whose storage moved to an arena of its own
   (`map_recycle`, `map_compact`, `vec_compact`) still has its struct where it was
   made, so retention keeps both (v0.1.567, Q-195).
+  The other direction holds too (v0.1.688): when the block is released and
+  NOT kept, the private arenas of the containers whose structs live in it are
+  retired with it. Before, the struct went with the block and its arena with
+  nothing -- 8,000 maps compacted inside `region R { }` left 480 MB behind R.
+  Guarded by `scripts/region_deps_check.sh`.
   `scripts/region_uaf_check.sh` runs each of these after forcing the
   block's memory to be reused.
 - **The block's result is copied out** into the enclosing region
@@ -387,11 +392,16 @@ The C runtime maps it with `mmap` and unmaps it when the block is freed, so
 what a released region held goes back to the system at once. On macOS 26,
 by default, malloc keeps freed memory in both the resident size and the
 footprint, and a program that compacts or recycles arenas over and over grew
-without bound under it. Linux keeps
-malloc: glibc maps large allocations and trims its heap itself, and a mapping
-per block would count toward `vm.max_map_count`. Guarded by
-`scripts/block_return_check.sh` (a 400 MB region left, then the resident size
-read from outside: 1 MB, against 841 MB under malloc).
+without bound under it. Linux keeps malloc for the blocks (a mapping per block
+would count toward `vm.max_map_count`), but glibc's mmap threshold is dynamic:
+the first mapped block that is freed raises it, and from then on blocks that
+size come from the heap, where a freed one stays resident -- the same growth
+(v0.1.688). A program fixes the threshold at 64 KiB when it starts
+(`mallopt(M_MMAP_THRESHOLD)`, unless `MALLOC_MMAP_THRESHOLD_` is set; a library
+does not). Guarded by `scripts/block_return_check.sh`: on macOS a 400 MB region
+left, then the resident size read from outside (1 MB, against 841 MB under
+malloc); on Linux a region of 1,000 compacted maps (5 MB, against 405 MB with
+the threshold left dynamic).
 
 **Containers grow in place when they can (v0.1.414).** `vec_push`,
 `strbuf_push` and `bytebuf_push` double their buffer when it fills. In a bump
