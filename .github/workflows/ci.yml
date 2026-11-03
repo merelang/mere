@@ -531,6 +531,12 @@ jobs:
 
       # v0.1.686: macOS only (Linux keeps malloc), so here it is optional and
       # not run -- exit 3, which gate.sh passes and says so
+      - name: region_deps (a container's private arena goes with its region)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: |
+          sh scripts/region_deps_check.sh
+          sh scripts/region_deps_check.sh --poison
+
       - name: block_return (a freed region's blocks go back to the system)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: |

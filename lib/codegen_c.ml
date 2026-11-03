@@ -10541,6 +10541,13 @@ let region_runtime_helpers =
          v0.1.557 did -- sent a write to an escaped container into whichever block
          took the struct next, and freed it with that block. *)
       "  struct __lang_region_s* fwd;";
+      (* v0.1.688: the private arenas of the containers whose struct lives here
+         (map_compact / map_recycle / vec_compact / vec_recycle give a container
+         one), freed when this region's life ends -- see __lang_region_dep_link *)
+      "  struct __lang_region_s* deps;";
+      "  struct __lang_region_s* dep_next;";
+      "  struct __lang_region_s* dep_prev;";
+      "  struct __lang_region_s* dep_home;";
       (* v0.1.619: made on one thread and freed on another -- a channel message.
          Its blocks go on the shared, locked list rather than the maker's
          thread-local one (see __lang_blk_link). *)
@@ -10624,10 +10631,32 @@ let region_runtime_helpers =
       "  __lang_blk_raw_free(p, old_total);";
       "  return q;";
       "}";
+      "__attribute__((unused)) static void __lang_malloc_tune(void) {}";
       "#else";
       "static void* __lang_blk_raw_alloc(size_t total) { return malloc(total); }";
       "static void __lang_blk_raw_free(void* p, size_t total) { (void)total; free(p); }";
       "static void* __lang_blk_raw_realloc(void* p, size_t old_total, size_t new_total) { (void)old_total; return realloc(p, new_total); }";
+      (* v0.1.688: Linux keeps malloc, but glibc's mmap threshold is dynamic:
+         the first mapped block that is freed raises it to that block's size,
+         and from then on blocks that size come from the heap, where a freed
+         one stays resident. Regions allocate and free in exactly those sizes,
+         over and over. mere-ruby with a thousand suspended fibers under a
+         collection every 50 safepoints passed 6 GB in 17 s; malloc_trim every
+         64 MB freed only got it to 105 s. With the threshold fixed at 64 KiB
+         it finishes in 207 s at 3.6 GB, and the plain run holds 27% less.
+         A fixed threshold also fixes the trim threshold at its default, and
+         glibc still falls back to the heap when a mapping fails or
+         M_MMAP_MAX is reached. A program sets it once at start; a library
+         does not (it takes no process-global action), and neither does a
+         program run with MALLOC_MMAP_THRESHOLD_ already chosen. *)
+      "#if defined(__GLIBC__)";
+      "#include <malloc.h>";
+      "__attribute__((unused)) static void __lang_malloc_tune(void) {";
+      "  if (!getenv(\"MALLOC_MMAP_THRESHOLD_\")) mallopt(M_MMAP_THRESHOLD, 64 * 1024);";
+      "}";
+      "#else";
+      "__attribute__((unused)) static void __lang_malloc_tune(void) {}";
+      "#endif";
       "#endif";
       "static void __lang_blk_free(__lang_region_block* b) {";
       "  __lang_blk_unlink(b);";
@@ -10728,6 +10757,7 @@ let region_runtime_helpers =
       "  r->seq = 0;";
       "  r->keep = NULL;";
       "  r->fwd = NULL;";
+      "  r->deps = NULL; r->dep_next = NULL; r->dep_prev = NULL; r->dep_home = NULL;";
       "  r->xthread = xthread;";
       "  __lang_region_add_block(r, cap);";
       "}";
@@ -10736,6 +10766,29 @@ let region_runtime_helpers =
       "static inline __lang_region* __lang_region_live(__lang_region* r) {";
       "  while (r && r->fwd) r = r->fwd;";
       "  return r;";
+      "}";
+      (* v0.1.688: a container's private arena (made by map_compact,
+         map_recycle, vec_compact, vec_recycle) belongs to the region its struct
+         lives in, and goes when that region's life ends. Before, it outlived
+         it: the struct was freed with the block and the arena with nothing --
+         8,000 maps compacted inside `region R { }` left 480 MB behind R. Only a
+         block's region (seq != 0) takes them; the default region is never
+         freed, and neither is anything it holds. A region that is kept hands
+         its arenas on with its blocks. This is as safe as freeing the block
+         itself: the struct that names the arena is in that block, and a
+         container cannot leave its block without the block being kept. *)
+      "static void __lang_region_dep_link(__lang_region* home, __lang_region* a) {";
+      "  home = __lang_region_live(home);";
+      "  if (!home || home->seq == 0) return;";
+      "  a->dep_home = home; a->dep_prev = NULL; a->dep_next = home->deps;";
+      "  if (home->deps) home->deps->dep_prev = a;";
+      "  home->deps = a;";
+      "}";
+      "static void __lang_region_dep_unlink(__lang_region* a) {";
+      "  if (!a->dep_home) return;";
+      "  if (a->dep_prev) a->dep_prev->dep_next = a->dep_next; else a->dep_home->deps = a->dep_next;";
+      "  if (a->dep_next) a->dep_next->dep_prev = a->dep_prev;";
+      "  a->dep_home = NULL; a->dep_prev = NULL; a->dep_next = NULL;";
       "}";
       (* v0.1.570: --region-sites (see `heap_container_region`). A stub is told
          apart from a Q-190 forwarder by its `site`: a forwarder's is cleared at
@@ -11132,7 +11185,9 @@ let region_runtime_helpers =
       "          __lang_region_cache_n, cached_bytes);";
       "}";
       "";
+      "static void __lang_region_deps_drop(__lang_region* home);";
       "static void __lang_region_free(__lang_region* r) {";
+      "  if (r->deps) __lang_region_deps_drop(r);";
       "  __lang_region_charge(r);";
       "  __lang_region_block* b = r->blocks;";
       "  while (b) {";
@@ -11179,6 +11234,7 @@ let region_runtime_helpers =
       "static _Thread_local __lang_retiree* __lang_retired = NULL;";
       "static _Thread_local int __lang_retired_n = 0, __lang_retired_cap = 0;";
       "static void __lang_region_retire(__lang_region* r) {";
+      "  __lang_region_dep_unlink(r);";
       "  if (__lang_region_pinners) {";
       "    unsigned long long curh = __lang_coro_cur_h();";
       "    int w = 0;";
@@ -11212,6 +11268,11 @@ let region_runtime_helpers =
       "  }";
       "  __lang_region_free(r);";
       "  free(r);";
+      "}";
+      "/* every private arena whose container's struct lives in home goes with it:";
+      "   retired, so one a suspended stack still points into waits (see above) */";
+      "static void __lang_region_deps_drop(__lang_region* home) {";
+      "  while (home->deps) { __lang_region* a = home->deps; __lang_region_dep_unlink(a); __lang_region_retire(a); }";
       "}";
       "";
       "/* Block regions are heap structs, cached on a small per-thread STACK so a";
@@ -11361,8 +11422,16 @@ let region_runtime_helpers =
       "    r->site = 0; r->keep = NULL; r->seq = 0;";
       "    r->base = r->top = NULL; r->cap = 0;";
       "    r->fwd = t;";
+      "    /* v0.1.688: and its containers' private arenas go where its blocks went";
+      "       -- to t's, or, kept for good, to nobody's */";
+      "    while (r->deps) {";
+      "      __lang_region* a = r->deps;";
+      "      __lang_region_dep_unlink(a);";
+      "      if (t != &__lang_kept_region) __lang_region_dep_link(t, a);";
+      "    }";
       "    return;";
       "  }";
+      "  if (r->deps) __lang_region_deps_drop(r);";
       (* charged: the __lang_region_free below is the same arena and must not
          count it twice, and the recycled struct starts clean at acquire *)
       "  r->site = 0;";
@@ -11652,6 +11721,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "    if (!fresh) __lang_fail_impl(\"out of memory\");";
       "    __lang_region_init(fresh, 4096);";
+      "    __lang_region_dep_link(m->home, fresh);";
       "    m->region = fresh;";
       "    __lang_region_retire(old);";
       "  } else if (m->owns_region) {";
@@ -11671,6 +11741,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "    if (!fresh) __lang_fail_impl(\"out of memory\");";
       "    __lang_region_init(fresh, 4096);";
+      "    __lang_region_dep_link(m->home, fresh);";
       "    m->region = fresh;";
       "    m->owns_region = 1;";
       "  }";
@@ -11756,6 +11827,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
+      "  __lang_region_dep_link(m->home, fresh);";
       "  __lang_region* old = m->region;";
       "  int owned = m->owns_region;";
       "  m->region = fresh;";
@@ -13829,6 +13901,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
       "  __lang_region_init(fresh, 4096);";
+      "  __lang_region_dep_link(v->home, fresh);";
       "  __lang_region* old = v->region;";
       "  int owned = v->owns_region;";
       "  v->region = fresh;";
@@ -13864,6 +13937,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "    if (!fresh) __lang_fail_impl(\"out of memory\");";
       "    __lang_region_init(fresh, 256);";
+      "    __lang_region_dep_link(v->home, fresh);";
       "    v->region = fresh;";
       "    __lang_region_retire(old);";
       "  } else if (v->owns_region) {";
@@ -13878,6 +13952,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "    if (!fresh) __lang_fail_impl(\"out of memory\");";
       "    __lang_region_init(fresh, 256);";
+      "    __lang_region_dep_link(v->home, fresh);";
       "    v->region = fresh;";
       "    v->owns_region = 1;";
       "  }";
@@ -17714,6 +17789,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
              this has to be installed on that thread, which is why it is here
              and not beside `setvbuf`. *)
           "  __lang_install_segv();";
+          "  __lang_malloc_tune();";
           "  __lang_region_init(&__lang_default_region, 1 << 22);";
           "  atexit(__lang_region_stats_report);";
           (if top_global_inits = [] then ""
