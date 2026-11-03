@@ -462,7 +462,7 @@ let file_pread = fn (f: File) -> fn (off: int) -> fn (len: int) ->
   let at = __rv_addr buf + __rv_w () in
   let n = __rv_pread (__rv_fd_of_file f) off len at in
   let rec fill = fn (i: int) -> if i >= n then v else (let _ = vec_push v (__rv_peekb (at + i)) in fill (i + 1)) in
-  fill 0;
+  __rv_vec_track (fill 0);
 let file_pread_bytes = fn (f: File) -> fn (off: int) -> fn (len: int) ->
   let buf = str_repeat " " (if len > 0 then len else 1) in
   let at = __rv_addr buf + __rv_w () in
@@ -509,7 +509,7 @@ let read_file_bytes = fn (p: str) ->
      let v = vec_new () in
      let b = bytes_of_str s in
      let rec fill = fn (i: int) -> if i >= str_len s then v else (let _ = vec_push v (__bytes_get_unchecked b i) in fill (i + 1)) in
-     fill 0);
+     __rv_vec_track (fill 0));
 let write_file_bytes = fn (p: str) -> fn v ->
   let fd = __rv_syscall 56 (0 - 100) (__rv_cstr p) (1 + 64 + 512) 438 in
   if fd < 0 then __rv_die ("write_file_bytes: cannot open " ++ p)
@@ -767,6 +767,7 @@ let vec_fold = fn v -> fn init -> fn f ->
 // cmp(right, left) < 0 in the same order -- a comparator may count its calls
 // (test/parity/vec_sort_stable.mere does)
 let vec_sort = fn v -> fn cmp ->
+  let _ = __rv_vec_write v "vec_sort" in
   let n = vec_len v in
   if n <= 1 then ()
   else
@@ -2316,6 +2317,7 @@ let rvf2_load = fn (v: float Vec) -> fn (i: int) ->
   then fail ("f64x2_load: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
   else rvf2 { f2a = vec_get v i, f2b = vec_get v (i + 1) };
 let rvf2_store = fn (v: float Vec) -> fn (i: int) -> fn (x: rvf2) ->
+  let _ = __rv_vec_write v "f64x2_store" in
   if i < 0 || i + 2 > vec_len v
   then fail ("f64x2_store: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
   else let _ = vec_set v i x.f2a in vec_set v (i + 1) x.f2b;
@@ -2428,8 +2430,12 @@ let __th_block = fn (u: unit) ->
   let _ = vec_push __th_wt me in
   let next = __th_pick () in
   if next == me then ()
-  else let _ = vec_set __th_cur 0 next in coro_switch (vec_get __th_co next);
-let __th_new_id = fn (u: unit) -> let n = vec_get __th_seq 0 + 1 in let _ = vec_set __th_seq 0 n in n;
+  else let _ = vec_set __th_cur 0 next in
+       let _ = __rv_rtw_set 81 next in coro_switch (vec_get __th_co next);
+let __th_new_id = fn (u: unit) ->
+  let n = vec_get __th_seq 0 + 1 in
+  if n >= 1073741823 then fail "spawn: logical thread identity space exhausted"
+  else let _ = vec_set __th_seq 0 n in n;
 // a thread's body, its failure caught at the edge of its stack
 let __th_body = fn (tid: int) -> fn (f: unit -> unit) ->
   let r = try_or_msg (fn (u: unit) -> let _ = f () in "") (fn (m: str) -> "!" ++ m) in
@@ -2442,6 +2448,7 @@ let __th_body = fn (tid: int) -> fn (f: unit -> unit) ->
   let _ = __th_wake () in
   let next = __th_pick () in
   let _ = vec_set __th_cur 0 next in
+  let _ = __rv_rtw_set 81 next in
   vec_get __th_co next;
 let rvth_spawn = fn (f: unit -> unit) ->
   let _ = __th_init () in
@@ -2459,14 +2466,19 @@ let rec rvth_join = fn (h: int) ->
   else if s == 2 then fail (vec_get __th_why h)
   else ();
 let rvth_detach = fn (h: int) -> ();
-// par_map runs the calls one after another; they take thread ids as C's do
-let rec __th_map = fn (xs: int list) -> fn (f: int -> int) -> fn (n: int) ->
+// Run one green worker per element, with an actual scheduler identity. The
+// private result box is runtime storage, as a channel's queue is.
+let rec __th_map = fn (xs: int list) -> fn (f: int -> int) ->
   match xs with
-  | Nil -> let _ = vec_set __th_seq 0 (vec_get __th_seq 0 + n) in Nil
-  | Cons (h, t) -> Cons (f h, __th_map t f (n + 1));
+  | Nil -> Nil
+  | Cons (h, t) ->
+    let result = vec_new () in
+    let worker = rvth_spawn (fn () -> vec_push result (f h)) in
+    let _ = rvth_join worker in
+    Cons (vec_get result 0, __th_map t f);
 let rvth_par_map = fn (f: int -> int) -> fn (xs: int list) ->
   let _ = __th_init () in
-  __th_map xs f 0;
+  __th_map xs f;
 
 type rvchan = { chq: int Vec, chh: int Vec, chc: int Vec, chs: int Vec };
 let rvch_new = fn (u: unit) ->

@@ -1468,6 +1468,12 @@ for the answer to come back on.
 
 ---
 
+RISC-V also guards Vecs in programs using green threads as of v0.1.689,
+including `par_map` callbacks. A foreign read permanently makes the Vec
+read-only; rejected writes preserve its contents. Other RISC-V containers
+and OwnedVec handoff remain unguarded at runtime. See the
+[backend coverage limits](memory-model.md#runtime-guards-and-coverage-limits).
+
 ### Thread operations inside Node Wasm workers (v0.1.688)
 
 The Node host supports `spawn`, `join` and `detach` from the main instance.

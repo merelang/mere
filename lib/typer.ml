@@ -3503,6 +3503,17 @@ let initial_env : env =
       { constraints = []; quantified = [id a; id r];
         body = Ast.TyArrow (Ast.TyCon ("Vec", [r; a]), Ast.TyBool) }));
     ("__vec_set_unchecked",   vec_set_scheme);
+    ("__rv_vec_write",
+     (let r = fresh_var () and a = fresh_var () in
+      let id v = match v with Ast.TyVar t -> t.id | _ -> assert false in
+      { constraints = []; quantified = [id a; id r];
+        body = Ast.TyArrow (Ast.TyCon ("Vec", [r; a]),
+                 Ast.TyArrow (Ast.TyStr, Ast.TyUnit)) }));
+    ("__rv_vec_track",
+     (let r = fresh_var () and a = fresh_var () in
+      let id v = match v with Ast.TyVar t -> t.id | _ -> assert false in
+      let v = Ast.TyCon ("Vec", [r; a]) in
+      { constraints = []; quantified = [id a; id r]; body = Ast.TyArrow (v, v) }));
     ("__bytes_get_unchecked", mono (Ast.TyArrow (Ast.TyBytes, Ast.TyArrow (Ast.TyInt, Ast.TyInt))));
     (* Q-109: the 128-bit SIMD types' seed operations -- enough to build a value
        and read it back on every backend. The lane operations come with the

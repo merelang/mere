@@ -112,6 +112,8 @@ file_pread_bytes|let f = file_openrw "/tmp/mere_probe.bin"; let b = file_pread_b
 map_new|let m = map_new (); let _ = map_set m "k" 1; 0
 vec_new|let v = vec_new (); let _ = vec_push v 1; vec_len v
 owned_vec_new|let v = owned_vec_new (); let _ = owned_vec_push v 1; 0
+__rv_vec_write|let v = vec_new (); let _ = vec_push v 1; let _ = __rv_vec_write v "vec_sort"; 0
+__rv_vec_track|let v = vec_new (); let _ = vec_push v 1; let _ = __rv_vec_track v; 0
 CASES
 
 "$MERE" --dump-builtins > "$TMP/builtins.tsv"

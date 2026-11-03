@@ -433,7 +433,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.687)
+## 4. Implemented memory behavior (v0.1.689)
 
 ### Concurrency and sharing
 
@@ -576,10 +576,27 @@ remains a boolean for failure propagation. Modules that use neither thread
 nor channel builtins omit container owner checks and atomic metadata
 accesses.
 
-**RISC-V lacks the native container-owner guards.** Frontend checks still
-apply there, but an opaque callback accepted by them gains no additional
-protection for these containers. Keep
-mutable containers within one worker and exchange messages over channels.
+**RISC-V guards `Vec` in programs with green threads (v0.1.689).** Owners
+are logical scheduler threads, including `par_map` callbacks. Foreign reads
+permanently freeze a Vec; a foreign write or a later write by its owner fails
+before mutation. Checks cover ordinary and range-versioned get/set, push,
+length (including `len`), sorting, recycling, compaction, conversions,
+`show`/`to_json` and SIMD loads/stores. `vec_bytes` only measures the arena
+and does not mark element storage shared. Vec-producing conversions and file
+read results belong to their caller; arena promotion and compaction preserve
+ownership metadata.
+Programs without green threads omit the checks and keep the four-word header.
+RISC-V marks reads through `show`, JSON and byte conversion, and through
+empty iteration, folding and Vec-to-OwnedVec conversion. These paths are
+more conservative than C's current unmarked read paths: they can prevent a
+later owner write even when C permits it. The ownership gate pins these
+differences separately and requires the remaining fixtures to match C.
+
+**RISC-V's other containers still lack runtime owner guards.** This includes
+`Map`, `StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` handoff. Frontend checks
+still apply, but accepted opaque callbacks gain no additional ownership
+protection for these containers. Keep mutable containers within one worker
+and exchange messages over channels.
 The container checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
 
