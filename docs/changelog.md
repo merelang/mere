@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.688 — 2026-11-03
+
+_Node Wasm host: report unsupported thread operations inside workers._
+
+Calling `spawn`, `join` or `detach` inside a worker now terminates that
+worker with an operation-specific diagnostic. The existing worker failure
+protocol reports it to the parent: joining the failed worker raises a Mere
+failure, which the parent can catch. A `try_or` inside the worker cannot
+catch this host exception. Main-instance thread operations remain supported.
+
+The CI gate exercises caught and uncaught parent joins, failure notification
+through channels, and ordinary main-instance thread operations. Negative
+controls restore each former zero-returning worker stub.
+
 ## v0.1.687 — 2026-11-03
 
 _Wasm: enforce exclusive OwnedVec access and inline spawn handoff._
