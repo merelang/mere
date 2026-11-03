@@ -1549,6 +1549,10 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_builder_owner_check.py --poison
 
+      - name: rv_strbuf_owner (logical threads own StrBufs, RV32 and RV64 against C)
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_strbuf_owner_check.py --poison
+
       # v0.1.637 (Q-200): a failing program fails the same way on RISC-V --
       # stdout, stderr and the exit status each against C -- with a poison
       # that folds the streams back together, the shape before.

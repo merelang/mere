@@ -270,6 +270,7 @@ let pop rd =
 let coro_mode = ref false
 let vec_owner_mode = ref false
 let vec_header_words () = if !vec_owner_mode then 5 else 4
+let strbuf_header_words () = if !vec_owner_mode then 4 else 3
 let tp = 4
 let emit_oom_check () =
   (* v0.1.627: with coroutines the room was made before the bump (see
@@ -1909,6 +1910,57 @@ let emit_map_owner_helpers () =
     List.iter (helper true) ["map_set"; "map_delete"; "map_clear"; "map_recycle"; "map_compact"]
   end
 
+(* User StrBufs are tracked at their constructor call site. The same raw
+   allocator serves prelude and formatting buffers, whose owner stays zero.
+   Guard helpers preserve argument registers and clobber t0..t2. *)
+let emit_strbuf_track () =
+  if !vec_owner_mode then begin
+    push ra; emit (Jal (ra, "__sb_track")); pop ra
+  end
+
+let emit_strbuf_guard ?(write = false) () =
+  if !vec_owner_mode then begin
+    push ra; emit (Jal (ra, if write then "__sb_write" else "__sb_read")); pop ra
+  end
+
+let emit_strbuf_owner_helpers () =
+  if !vec_owner_mode then begin
+    let off = 3 * wsz () in
+    let owner () =
+      emit_word (enc_i off a0 (ldf3 ()) t0 0x03);
+      li t1 (rtw_addr rtw_thread_id);
+      emit_word (enc_i 0 t1 (ldf3 ()) t1 0x03);
+      emit_word (enc_i 1 t1 0 t1 0x13) in
+    let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+    emit (Label "__sb_track");
+    owner ();
+    let tracked = fresh_label ".sot" in
+    emit (Branch (1, t0, zero, tracked));
+    emit_word (enc_s off t1 a0 (stf3 ()) 0x23);
+    emit (Label tracked); ret ();
+    emit (Label "__sb_read");
+    owner ();
+    let done_ = fresh_label ".sor" in
+    emit (Branch (0, t0, zero, done_));
+    emit (Branch (0, t0, t1, done_));
+    li t2 0x40000000;
+    emit_word (enc_r 0 t2 t0 6 t0 0x33);
+    emit_word (enc_s off t0 a0 (stf3 ()) 0x23);
+    emit (Label done_); ret ();
+    emit (Label "__sb_write");
+    owner ();
+    let done_ = fresh_label ".sow" and shared = fresh_label ".sos" in
+    emit (Branch (0, t0, zero, done_));
+    emit (Branch (0, t0, t1, done_));
+    li t2 0x40000000;
+    emit_word (enc_r 0 t2 t1 6 t1 0x33);
+    emit (Branch (0, t0, t1, shared));
+    emit_abort "strbuf_push: a StrBuf made by one thread was written by another -- a StrBuf is not safe to share between threads; give it one owner thread and send it messages over a Channel";
+    emit (Label shared);
+    emit_abort "strbuf_push: a StrBuf another thread has read was written -- once a second thread reads a StrBuf it is shared, and a shared StrBuf is read-only; give it one owner thread and send it messages over a Channel";
+    emit (Label done_); ret ()
+  end
+
 let emit_vec_owner_helpers () =
   if !vec_owner_mode then begin
     let owner () =
@@ -3475,7 +3527,8 @@ and compile_app env e =
   | Ast.Var "str_of_int" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__str_of_int"))
   | Ast.Var "strbuf_new" when List.length args = 1 ->
-    compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_new"))
+    compile_expr env (List.hd args); emit (Jal (ra, "__strbuf_new"));
+    if not (in_rv_prelude e.Ast.loc) then emit_strbuf_track ()
   | Ast.Var "strbuf_push" when List.length args = 2 ->
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
@@ -5827,7 +5880,8 @@ let emit_substring () =
   emit_word (enc_i 0 t0 0 a0 0x13);                     (* mv a0, t0 *)
   emit_word (enc_i 0 ra 0 zero 0x67)                    (* ret *)
 
-(* StrBuf: a REAL byte buffer -- [len_bytes][cap_bytes][dataptr], amortized
+(* StrBuf: a REAL byte buffer -- [len_bytes][cap_bytes][dataptr], plus an
+   owner word in programs with green threads; amortized
    O(1) push, like Vec but byte-grained. It was a 1-word cell whose push
    REPLACED the held string with its concatenation: simple, correct, and
    O(n^2) in total allocation -- test/parity/str_edges's 200KB str_repeat
@@ -5840,19 +5894,21 @@ let emit_substring () =
    [len][bytes] block (the buffer stays usable); __strbuf_len reads the cell. *)
 let emit_strbuf () =
   emit (Label "__strbuf_new");                     (* a0 ignored *)
-  emit_heap_reserve ~tmp:t0 (Isz (16 + 3 * wsz ()));
+  emit_heap_reserve ~tmp:t0 (Isz (16 + strbuf_header_words () * wsz ()));
   emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
   emit_word (enc_i 16 gp 0 gp 0x13);               (* bump 16 BYTES (initial cap) *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
-  emit_word (enc_i (3 * wsz ()) gp 0 gp 0x13);     (* bump 3 words *)
+  emit_word (enc_i (strbuf_header_words () * wsz ()) gp 0 gp 0x13);
   emit_oom_check ();
   emit_word (enc_s (0 * wsz ()) zero t1 (stf3 ()) 0x23);              (* len = 0 *)
   emit_word (enc_i 16 zero 0 t2 0x13);
   emit_word (enc_s (wsz ()) t2 t1 (stf3 ()) 0x23);                    (* cap = 16 *)
   emit_word (enc_s (2 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* dataptr *)
+  if !vec_owner_mode then emit_word (enc_s (3 * wsz ()) zero t1 (stf3 ()) 0x23);
   emit_word (enc_i 0 t1 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
-  emit (Label "__strbuf_push");                    (* a0=buf, a1=s ; leaf now *)
+  emit (Label "__strbuf_push");                    (* a0=buf, a1=s *)
+  emit_strbuf_guard ~write:true ();
   emit_word (enc_i (0 * wsz ()) a1 (ldf3 ()) t6 0x03);                (* t6 = slen *)
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* t0 = len *)
   emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                    (* t1 = cap *)
@@ -5905,6 +5961,7 @@ let emit_strbuf () =
   emit_protect ();                                 (* a0 = the buffer *)
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_to_str");                  (* a0=buf -> a0 = fresh str *)
+  emit_strbuf_guard ();
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* t0 = len *)
   emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* t2 = dataptr *)
   emit_word (enc_i (wsz () - 1) t0 0 t4 0x13);     (* round len up to words *)
@@ -5928,6 +5985,7 @@ let emit_strbuf () =
   emit (Label ".st_done");
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__strbuf_len");                     (* a0=buf -> a0 = len *)
+  emit_strbuf_guard ();
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);
   emit_word (enc_i 0 ra 0 zero 0x67)
 
@@ -8339,6 +8397,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_vec ();
   emit_vec_owner_helpers ();
   emit_map_owner_helpers ();
+  emit_strbuf_owner_helpers ();
   emit_arena ();
   emit_map_rt ();
   if !coro_mode then emit_coro_rt ();

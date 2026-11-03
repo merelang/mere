@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.693 — 2026-11-03
+
+_RISC-V: enforce StrBuf ownership across logical threads._
+
+User StrBufs carry their creator and shared state when green threads are
+reachable. Foreign length queries and string conversion freeze storage,
+including empty buffers. Push rejects foreign and shared writes before
+mutation, even when appending an empty string. Growth preserves ownership;
+immutable snapshots remain independent of later source writes.
+
+Prelude and formatting buffers remain untracked. Thread-free programs keep
+the three-word header and omit ownership helpers. The differential RV32/RV64
+gate covers aliases, worker identities, growth, snapshots, region retention
+and same-thread coroutines, with controls removing tracking and access guards.
+
 ## v0.1.692 — 2026-11-03
 
 _RISC-V: enforce ByteBuf and ListBuf ownership across logical threads._
