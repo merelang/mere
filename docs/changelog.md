@@ -32,6 +32,20 @@ reads the resident size from outside: 1 MB, against 841 MB under malloc
 
 ## v0.1.685 — 2026-11-03
 
+_Wasm: require ListBuf's owner for both append and conversion._
+
+Threaded modules initialize atomic owner metadata in each ListBuf's existing
+32-byte header. Both `lb_push` and `lb_to_list` reject a foreign worker before
+modifying the builder; conversion writes the frozen flag and is not a read.
+Caught failures leave the builder usable by its owner. Completed immutable
+lists remain shareable under the existing element Send/Sync rules. Modules
+without thread/channel builtins omit the ownership checks and alignment change.
+
+The new CI matrix exercises empty and nonempty builders, rejected appends and
+conversions, frozen builders, immutable list messages, region reuse and worker
+identities. Negative controls remove each guard, remove header alignment and
+give workers duplicate identities. OwnedVec handoff remains a separate limit.
+
 _C: an arena retired under a stopped coroutine is not asked about again until one of the stacks that pinned it has run._
 
 When a region is released while a suspended coroutine's stack may point
