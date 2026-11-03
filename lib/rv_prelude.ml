@@ -826,10 +826,12 @@ let rvbb_get = fn (v: int Vec) -> fn (i: int) ->
   then fail ("bytebuf_get: index " ++ str_of_int i ++ " out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
   else vec_get v i;
 let rvbb_set = fn (v: int Vec) -> fn (i: int) -> fn (x: int) ->
+  let _ = __rv_vec_write v "bytebuf_set" in
   if i < 0 || i >= vec_len v
   then fail ("bytebuf_set: index " ++ str_of_int i ++ " out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
   else vec_set v i (bit_and x 255);
-let rvbb_push = fn (v: int Vec) -> fn (x: int) -> vec_push v (bit_and x 255);
+let rvbb_push = fn (v: int Vec) -> fn (x: int) ->
+  let _ = __rv_vec_write v "bytebuf_push" in vec_push v (bit_and x 255);
 // a Vec's bytes as a `bytes` (the str layout), each element masked to a byte
 let rvbb_to_bytes = fn (v: int Vec) ->
   let sb = strbuf_new () in
@@ -845,9 +847,11 @@ let rvbb_of_bytes = fn (b: bytes) ->
 // when it is asked for, in the order pushed
 let rvlb_new = fn (u: unit) -> let v = (vec_new () : int Vec) in let _ = vec_push v 0 in v;
 let rvlb_push = fn (v: int Vec) -> fn (x: int) ->
+  let _ = __rv_vec_write v "lb_push" in
   if vec_get v 0 == 1 then fail "lb_push: the builder was already turned into a list by lb_to_list"
   else vec_push v x;
 let rvlb_to_list = fn (v: int Vec) ->
+  let _ = __rv_vec_write v "lb_to_list" in
   let _ = vec_set v 0 1 in
   let rec go = fn (i: int) -> fn (acc: int list) -> if i < 1 then acc else go (i - 1) (Cons (vec_get v i, acc)) in
   go (vec_len v - 1) Nil;
