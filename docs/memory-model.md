@@ -231,7 +231,16 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   NOT kept, the private arenas of the containers whose structs live in it are
   retired with it. Before, the struct went with the block and its arena with
   nothing -- 8,000 maps compacted inside `region R { }` left 480 MB behind R.
-  Guarded by `scripts/region_deps_check.sh`.
+  Guarded by `scripts/region_deps_check.sh`. RISC-V had the same hole until
+  v0.1.694: a block's exit rolls the containers' cells back, and now frees the
+  arenas made since the block was entered whose container lies in the range
+  it rolled back. Each arena names its container and carries a serial, so the
+  walk stops at the first arena older than the block. On a coroutine's chain
+  of heap blocks this is done only when that range is inside one block; a
+  rollback that crossed blocks keeps the arenas, as it keeps everything else.
+  Without coroutines an arena block is cut from `gp` and raises the block's
+  high-water mark, which keeps the containers' cells as well, so there the
+  arenas stay. Guarded by `scripts/rv_arena_sweep_check.sh`.
   `scripts/region_uaf_check.sh` runs each of these after forcing the
   block's memory to be reused.
 - **The block's result is copied out** into the enclosing region

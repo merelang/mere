@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.694 — 2026-11-03
+
+_RISC-V: a region block gives back the arenas of the containers it rolled back._
+
+The RV64 backend gives a container an arena of its own the first time it is
+compacted or recycled. A region block's exit rolled the container's cell back
+and left its arena on no list: twenty rounds of 100 compacted maps, each round
+inside a block, ran out of a 16 MB machine that holds any one round. This is
+the hole v0.1.688 closed on C.
+
+An arena's descriptor now names its container and carries a serial, and every
+arena is on one list, newest first. A block pushes the serial it was entered at
+above its mark; its exit frees the arenas made since whose container lies in
+the range the rollback took. With coroutines, an arena block is cut from the
+top of the heap, and the exit sweeps only when that range is inside one heap
+block (a rollback that crossed blocks keeps everything, the arenas with it).
+Without coroutines an arena block is cut from `gp` and raises the block's
+high-water mark, which keeps the containers' cells too; nothing changes there.
+
+`scripts/rv_arena_sweep_check.sh` runs the twenty rounds in 16 MB (13 s on the
+RV64 emulator); `--poison` compiles with `MERE_RV_NO_ARENA_SWEEP=1` and the run
+must run out of memory.
+
 ## v0.1.693 — 2026-11-03
 
 _RISC-V: enforce StrBuf ownership across logical threads._

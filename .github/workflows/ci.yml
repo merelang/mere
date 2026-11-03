@@ -1568,6 +1568,15 @@ jobs:
       - name: region_uaf --rv-only (RISC-V reads an escaped value after its block is reused)
         if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/region_uaf_check.sh --rv-only
+      # v0.1.694: the arenas of the containers a RISC-V region block rolled
+      # back go with them, as v0.1.688 made them on C -- twenty rounds of 100
+      # compacted maps in a 16 MB machine, with a coroutine alive
+      - name: rv_arena_sweep (a RISC-V region block gives back its containers' arenas)
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_arena_sweep_check.sh
+      - name: rv_arena_sweep --poison (with the arenas left behind, the rounds run out of memory)
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_arena_sweep_check.sh --poison
       # v0.1.642: sys_os / sys_arch answer for each backend's ABI (the host's on
       # interp, C and LLVM; wasi on Wasm; linux on RISC-V)
       - name: sys_info (sys_os / sys_arch on every backend)

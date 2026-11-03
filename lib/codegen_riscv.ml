@@ -1050,7 +1050,7 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 82
+let runtime_words = 84
 let fail_frame_addr () = globals_base ()
 (* v0.1.613: three more runtime words for region reclamation (see the
    Region_block arm): how many region blocks are open, the innermost one's
@@ -1093,6 +1093,15 @@ and rtw_chain = 76 and rtw_first = 77 and rtw_realtp = 78 and rtw_defer = 79
 and rtw_fd_errno = 80
 (* The scheduler's logical thread, independent of a coroutine's stack. *)
 let rtw_thread_id = 81
+(* v0.1.694: the newest private arena, the head of the list of all of them
+   (linked through their descriptors, see emit_arena) *)
+let rtw_arenas = 82
+(* v0.1.694: how many private arenas have been made -- each descriptor carries
+   its number, and a region block remembers the count it was entered at *)
+let rtw_arena_serial = 83
+(* scripts/rv_arena_sweep_check.sh --poison: a region block's exit leaves the
+   arenas behind, as before v0.1.694 *)
+let no_arena_sweep = Sys.getenv_opt "MERE_RV_NO_ARENA_SWEEP" <> None
 (* the record words the switch keeps a stack's heap in: gp, tp, the high-water
    mark, BLO, CHAIN, FIRST (13 was "gp when it last stopped" since v0.1.624) *)
 let crec_gp = 13 and crec_tp = 14 and crec_hwm = 15 and crec_blo = 16
@@ -3038,6 +3047,11 @@ and compile_region env (e : Ast.expr) (body : Ast.expr) (loop : string option) =
         compile_expr body_env body;
         flow_step l_top
     end else begin
+      (* v0.1.694: the arena count at entry, above the mark: the exit gives
+         back the arenas made since whose containers it rolls back *)
+      li t0 (rtw_addr rtw_arena_serial);
+      emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
+      push t0;                                                    (* serial *)
       li t0 (rt_depth_addr ());
       push gp;                                                    (* mark *)
       emit_word (enc_i (rt_bmark_off ()) t0 (ldf3 ()) t1 0x03);
@@ -3114,18 +3128,45 @@ and compile_region env (e : Ast.expr) (body : Ast.expr) (loop : string option) =
         emit_word (enc_i rt_depth_off t0 (ldf3 ()) t3 0x03);
         emit_word (enc_i (-1) t3 0 t3 0x13);
         emit_word (enc_s rt_depth_off t3 t0 (stf3 ()) 0x23) in
+      (* v0.1.694: the arenas of the containers the rollback took: made since
+         the entry (its serial at serial_at), their container in [gp, hi_at's
+         address). On a coroutine's chain of blocks only when the range is in
+         one block: the rollback that went back along the chain keeps the
+         arenas, as it keeps everything else. *)
+      let sweep hi_at serial_at =
+        if not no_arena_sweep then begin
+        let l = fresh_label ".rgnNoSweep" in
+        emit_word (enc_i hi_at sp (ldf3 ()) a1 0x03);
+        emit (Branch (7, gp, a1, l));                             (* bgeu gp, hi: none *)
+        if !coro_mode then begin
+          li t0 (rtw_addr rtw_blo);
+          emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
+          emit (Branch (6, gp, t0, l));                           (* gp below this block *)
+          emit (Branch (6, tp, a1, l))                            (* hi past its end *)
+        end;
+        emit_word (enc_i 0 gp 0 a0 0x13);
+        emit_word (enc_i serial_at sp (ldf3 ()) a2 0x03);
+        push ra;
+        emit (Jal (ra, "__arena_sweep"));
+        pop ra;
+        emit (Label l)
+        end in
       if kind = RWord then begin
-        push a0;                                                  (* [mark 2w][outer w][r 0] *)
-        release (2 * w) w;
+        push a0;
+        push gp;                                    (* [serial 4w][mark 3w][outer 2w][r w][hi 0] *)
+        release (3 * w) (2 * w);
+        sweep 0 (4 * w);
+        emit_word (enc_i w sp 0 sp 0x13);
         pop a0;
-        if loop = None then emit_word (enc_i (2 * w) sp 0 sp 0x13)
+        if loop = None then emit_word (enc_i (3 * w) sp 0 sp 0x13)
       end else begin
         let copier = request_rcopy res_ty in                   (* a loop's is region_flow[C, D] *)
         push gp;                                                  (* c1s *)
         emit (Jal (ra, copier));                                  (* a0 = copy 1 *)
         push gp;                                                  (* c1e *)
-        push a0;                                                  (* [mark 4w][outer 3w][c1s 2w][c1e w][c1 0] *)
+        push a0;                        (* [serial 5w][mark 4w][outer 3w][c1s 2w][c1e w][c1 0] *)
         release (4 * w) (3 * w);
+        sweep (2 * w) (5 * w);
         (* copy 2 unless it would run into copy 1: it fits below it, or gp is past it *)
         let l_copy = fresh_label ".rgnCp2" in
         let l_keep = fresh_label ".rgnKeep" in
@@ -3165,7 +3206,7 @@ and compile_region env (e : Ast.expr) (body : Ast.expr) (loop : string option) =
         emit_word (enc_i 0 sp (ldf3 ()) a0 0x03);
         emit (Jal (ra, copier));                                  (* a0 = copy 2 *)
         emit (Label l_done);
-        emit_word (enc_i ((if loop = None then 5 else 3) * w) sp 0 sp 0x13)
+        emit_word (enc_i ((if loop = None then 6 else 3) * w) sp 0 sp 0x13)
       end;
       if !coro_mode then begin
         (* v0.1.627: the blocks the rollback went back past, now that the
@@ -3189,10 +3230,10 @@ and compile_region env (e : Ast.expr) (body : Ast.expr) (loop : string option) =
          Continue goes round again with the same mark, Done leaves the block *)
       if loop <> None then begin
         flow_step l_top;
-        push a0;                                                  (* [M0 2w][outer w][d 0] *)
+        push a0;                                                  (* [serial 3w][M0 2w][outer w][d 0] *)
         leave w;
         pop a0;
-        emit_word (enc_i (2 * w) sp 0 sp 0x13)
+        emit_word (enc_i (3 * w) sp 0 sp 0x13)
       end
     end
 and compile_simd_root env op args =
@@ -6980,7 +7021,11 @@ let emit_eq_helper (tag, ty) =
    empty carves a new block from gp -- which an open region block must then
    keep, so the high-water mark is raised past it. Blocks are never merged.
    The arena's descriptor lives in its first block: [bump][limit][head][cap]
-   [first][shared], data after it. The one SHARED arena is the default arena,
+   [first][shared][owner][next][prev][serial], data after it. OWNER is the
+   container the arena was made for (0 for the shared one); NEXT and PREV link
+   every arena into the list rtw_arenas heads, newest first, and SERIAL counts
+   them, so a region block's exit can walk the arenas made since it was
+   entered and give back those whose container it rolled back (v0.1.694). The one SHARED arena is the default arena,
    C's default region: every container whose type says __heap is attached to it
    when it is made, so what is stored into it is copied out of every region
    block; it is never reset or freed -- a compaction moves a container out of
@@ -7126,10 +7171,18 @@ let emit_arena () =
   pop ra;
   sd zero 0 a0;                                          (* block.next *)
   addi t1 a0 (2 * w);                                    (* desc *)
-  addi t2 a0 (8 * w); sd t2 0 t1;                        (* bump *)
+  addi t2 a0 (12 * w); sd t2 0 t1;                       (* bump *)
   ld t3 w a0; add t4 a0 t3; sd t4 w t1;                  (* limit *)
   sd a0 (2 * w) t1; sd t3 (3 * w) t1; sd a0 (4 * w) t1;  (* head, cap, first *)
   sd zero (5 * w) t1;                                    (* not shared *)
+  sd zero (6 * w) t1;                                    (* no owner yet *)
+  li t2 (rtw_addr rtw_arenas); ld t3 0 t2;               (* onto the list's head *)
+  sd t3 (7 * w) t1; sd zero (8 * w) t1;
+  (let l = fresh_label ".anFirst" in
+   emit (Branch (0, t3, zero, l)); sd t1 (8 * w) t3; emit (Label l));
+  sd t1 0 t2;
+  li t2 (rtw_addr rtw_arena_serial); ld t3 0 t2; addi t3 t3 1; sd t3 0 t2;
+  sd t3 (9 * w) t1;
   li t0 (rt_depth_addr ()); li t2 1; sd t2 (rt_aflag_off ()) t0;
   addi a0 t1 0; ret ();
   (* __arena_alloc(a0 = desc, a1 = bytes) -> a0 = that many bytes in the arena *)
@@ -7169,12 +7222,23 @@ let emit_arena () =
   emit (Jal (zero, ".arLoop"));
   emit (Label ".arDone");
   sd zero 0 a4; sd a4 (2 * w) a2;
-  addi t1 a4 (8 * w); sd t1 0 a2;
+  addi t1 a4 (12 * w); sd t1 0 a2;
   ld t2 w a4; add t3 a4 t2; sd t3 w a2; sd t2 (3 * w) a2;
   pop ra; ret ();
   (* __arena_free(a0 = desc): every block back, the descriptor's included *)
   emit (Label "__arena_free");
   push ra;
+  (* off the list first: the descriptor is in the first block *)
+  ld t1 (7 * w) a0; ld t2 (8 * w) a0;
+  (let l = fresh_label ".afPrev" and l2 = fresh_label ".afLinked" in
+   emit (Branch (1, t2, zero, l));
+   li t3 (rtw_addr rtw_arenas); sd t1 0 t3;
+   emit (Jal (zero, l2));
+   emit (Label l);
+   sd t1 (7 * w) t2;
+   emit (Label l2));
+  (let l = fresh_label ".afNext" in
+   emit (Branch (0, t1, zero, l)); sd t2 (8 * w) t1; emit (Label l));
   ld a3 (2 * w) a0;
   emit (Label ".afLoop");
   emit (Branch (0, a3, zero, ".afDone"));
@@ -7276,6 +7340,32 @@ let emit_arena () =
   emit (Jal (zero, "__arena_free"));
   emit (Label ".adrRet");
   ret ();
+  (* __arena_sweep(a0 = lo, a1 = hi, a2 = a serial): every private arena made
+     after that serial whose container lies in [lo, hi) is freed -- a region
+     block's exit, for the containers its rollback took (v0.1.694). Newest
+     first, so the walk stops at the first arena older than the block. *)
+  emit (Label "__arena_sweep");
+  addi sp sp (0 - 5 * w);
+  sd ra (4 * w) sp; sd a0 (3 * w) sp; sd a1 (2 * w) sp; sd a2 w sp;
+  li t0 (rtw_addr rtw_arenas); ld t0 0 t0;
+  emit (Label ".asLoop");
+  emit (Branch (0, t0, zero, ".asDone"));
+  ld t1 (9 * w) t0; ld t2 w sp;
+  emit (Branch (7, t2, t1, ".asDone"));                  (* bgeu since, serial: older *)
+  ld t1 (7 * w) t0; sd t1 0 sp;                          (* next, before a free *)
+  ld t2 (6 * w) t0;
+  emit (Branch (0, t2, zero, ".asNext"));
+  ld t3 (3 * w) sp; emit (Branch (6, t2, t3, ".asNext"));   (* owner < lo *)
+  ld t3 (2 * w) sp; emit (Branch (7, t2, t3, ".asNext"));   (* owner >= hi *)
+  ld t3 (5 * w) t0; emit (Branch (1, t3, zero, ".asNext"));
+  addi a0 t0 0;
+  emit (Jal (ra, "__arena_free"));
+  emit (Label ".asNext");
+  ld t0 0 sp;
+  emit (Jal (zero, ".asLoop"));
+  emit (Label ".asDone");
+  ld ra (4 * w) sp; addi sp sp (5 * w);
+  ret ();
   (* __mrecycle(a0 = map) is C's map_recycle: emptied, and its memory wound back
      -- the arena reset to its first block (or, for a Map still on gp, a new
      arena: the promotion), and the five Vecs given fresh buffers there, as
@@ -7303,6 +7393,7 @@ let emit_arena () =
   emit (Jal (zero, ".mrInit"));
   emit (Label ".mrNew");
   emit (Jal (ra, "__arena_new"));
+  ld t1 w sp; sd t1 (6 * w) a0;                          (* the Map owns it *)
   sd a0 0 sp;
   emit (Label ".mrInit");
   List.iteri (fun i (words, len, init) ->
@@ -7659,6 +7750,8 @@ let emit_vcompact_helper (tag : string) (ty : Ast.ty) =
   emit_word (enc_i (3 * w) a0 (ldf3 ()) t0 0x03);
   emit_word (enc_s w t0 sp (stf3 ()) 0x23);          (* the old arena *)
   emit (Jal (ra, "__arena_new"));
+  emit_word (enc_i (2 * w) sp (ldf3 ()) t1 0x03);
+  emit_word (enc_s (6 * w) t1 a0 (stf3 ()) 0x23);    (* the Vec owns it *)
   emit_word (enc_i 0 a0 0 a1 0x13);
   emit_word (enc_i (2 * w) sp (ldf3 ()) a0 0x03);
   emit (Jal (ra, request_store "__vmove_" ty));
@@ -7686,6 +7779,8 @@ let emit_mcompact_helper (_tag : string) (ty : Ast.ty) =
   emit_word (enc_i (3 * w) t0 (ldf3 ()) t0 0x03);
   emit_word (enc_s w t0 sp (stf3 ()) 0x23);          (* the old arena *)
   emit (Jal (ra, "__arena_new"));
+  emit_word (enc_i (2 * w) sp (ldf3 ()) t1 0x03);
+  emit_word (enc_s (6 * w) t1 a0 (stf3 ()) 0x23);    (* the Map owns it *)
   emit_word (enc_s 0 a0 sp (stf3 ()) 0x23);
   List.iteri (fun i et ->
     emit_word (enc_i (2 * w) sp (ldf3 ()) t0 0x03);
