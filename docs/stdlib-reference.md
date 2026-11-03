@@ -1474,6 +1474,11 @@ read-only; rejected writes preserve its contents. Other RISC-V containers
 and OwnedVec handoff remain unguarded at runtime. See the
 [backend coverage limits](memory-model.md#runtime-guards-and-coverage-limits).
 
+As of v0.1.690, C marks foreign Vec reads through `show`, `to_json`,
+`bytes_of_vec`, `vec_iter`, `vec_fold` and `vec_to_owned`, including empty
+containers. Reading an independent immutable snapshot in another thread
+does not mark the source Vec shared.
+
 ### Thread operations inside Node Wasm workers (v0.1.688)
 
 The Node host supports `spawn`, `join` and `detach` from the main instance.

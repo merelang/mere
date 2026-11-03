@@ -13,13 +13,6 @@ ROOT = Path(__file__).resolve().parent.parent
 MERE = Path(os.environ.get("MERE", ROOT / "_build/default/bin/mere.exe")).resolve()
 CC = os.environ.get("CC", "cc")
 PREFIX = "let launch = fn (f: unit -> unit) -> spawn f;\n"
-# These C paths omit a read mark. RV checks the storage they read, including
-# an empty loop's length. Pin both results so a C fix makes this list stale.
-STRONGER_READS = {
-    "read_empty_iter", "read_empty_fold", "read_empty_show", "read_full_show",
-    "read_empty_json", "read_full_json", "read_empty_bytes", "read_full_bytes",
-    "read_empty_to_owned",
-}
 
 
 def execute(args, cwd, timeout=60, env=None):
@@ -222,12 +215,6 @@ def main():
             result = execute([tmp / "ref"], tmp)
             references[name] = (result.returncode, result.stdout, result.stderr)
             expected = references[name]
-            if name in STRONGER_READS:
-                seed = name.split("_")[1]
-                native_contents = b"Vec[9]\n" if seed == "empty" else b"Vec[1, 9]\n"
-                if expected != (0, b"allowed\n" + native_contents, b""):
-                    raise RuntimeError(f"{name}: C's unmarked-read entry is stale")
-                expected = references[f"read_{seed}_len"]
             for width in (32, 64):
                 build(name, width)
                 actual = run(width)
@@ -236,8 +223,7 @@ def main():
                     print("  FAIL  " + failures[-1], flush=True)
                 checks += 1
             if name not in [message.split(":")[0] for message in failures]:
-                behavior = "pin the stricter read mark" if name in STRONGER_READS else "match C"
-                print(f"  ok    {name}: RV32 and RV64 {behavior}", flush=True)
+                print(f"  ok    {name}: RV32 and RV64 match C", flush=True)
 
         if failures:
             raise RuntimeError(f"{len(failures)} comparisons differed from C")
@@ -299,7 +285,7 @@ def main():
                 raise RuntimeError("ownership helpers remain in a program without green threads")
             checks += 1
         assert checks == (168 if args.poison else 142), "some checks did not run"
-        print(f"rv_vec_owner: ok ({len(cases)} fixtures at both widths, including {len(STRONGER_READS)} stricter read paths; {checks} checks)")
+        print(f"rv_vec_owner: ok ({len(cases)} fixtures at both widths against C; {checks} checks)")
 
 
 if __name__ == "__main__":

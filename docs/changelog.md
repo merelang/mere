@@ -4,6 +4,20 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.690 — 2026-11-03
+
+_C: record Vec reads through formatting, conversion and empty traversals._
+
+`show`, `to_json`, `bytes_of_vec`, `vec_iter`, `vec_fold` and `vec_to_owned`
+now mark a Vec shared when a foreign thread reads it, including empty
+containers. Its owner can continue reading but can no longer mutate it.
+Vec JSON output is an array, as documented, instead of `null`; nested Vecs
+are serialized recursively.
+
+The RISC-V ownership matrix now requires exact C parity for all 70 fixtures;
+its nine read-path exceptions have been removed. Negative controls remove
+each new C read mark and demonstrate a later owner write being accepted.
+
 ## v0.1.689 — 2026-11-03
 
 _RISC-V: guard Vec access across logical threads._
