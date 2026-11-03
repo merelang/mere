@@ -39,8 +39,8 @@
 # emitted text).
 #
 # Wasm covers Vec and Map here, with StrBuf/ByteBuf in wasm_buffer_owner_check.sh.
-# ListBuf has its own wasm_listbuf_owner_check.sh matrix; OwnedVec handoff
-# remains outside this runtime guarantee.
+# ListBuf and OwnedVec have wasm_listbuf_owner_check.sh and
+# wasm_ownedvec_owner_check.sh matrices for their access and handoff rules.
 # Deterministic join/channel barriers cover shared
 # containers, including two workers whose identities must differ. Generated cases
 # exercise each read/write API, including range-versioned and SIMD paths.
@@ -213,7 +213,7 @@ upkeep_expect map_upkeep_growth 84
 
 fi
 
-wasm_cases='param_vec param_map shared_phase param_reverse param_versioned shared_versioned legit legit_readonly ov_moved shared_vec_phase shared_worker_ids vec_caught vec_alignment vec_recycle_caught shared_vec_recycle'
+wasm_cases='param_vec param_map shared_phase param_reverse param_versioned shared_versioned legit legit_readonly ov_param ov_after_move ov_moved shared_vec_phase shared_worker_ids vec_caught vec_alignment vec_recycle_caught shared_vec_recycle'
 # Each reader is the only foreign access before join and the owner's write.
 # If its mark disappears, that write succeeds and this case goes red.
 while IFS='|' read -r name expr; do

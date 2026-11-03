@@ -412,6 +412,7 @@ let vec_higher_order_used = ref false
 
 (* Phase 15.9: StrBuf[R] usage flag — runtime is single non-polymorphic. *)
 let strbuf_used = ref false
+let owned_vec_used = ref false
 let bytes_used = ref false  (* gate the Wasm bytes runtime *)
 (* v0.1.585 (Q-016): gate the ByteBuf runtime, and read_bytes / write_bytes'
    two wrappers. Separate from bytes_used, which most programs with a `bytes`
@@ -2219,7 +2220,7 @@ and emit_expr (e : Ast.expr) : unit =
              let slug =
                match name, Ast.walk ret_ty with
                | "vec_new", _ -> vec_used := true; "vec_new"
-               | "owned_vec_new", _ -> vec_used := true; "owned_vec_new"
+               | "owned_vec_new", _ -> vec_used := true; owned_vec_used := true; "owned_vec_new"
                | "strbuf_new", _ -> strbuf_used := true; "strbuf_new"
                | "map_new", Ast.TyCon ("Map", [_; k_ty; _]) ->
                  let k_tag =
@@ -2964,6 +2965,18 @@ and emit_expr (e : Ast.expr) : unit =
               || Hashtbl.mem toplevel_fn_names "spawn"
               || Hashtbl.mem inner_lifts_wasm "spawn") ->
     uses_threads := true;
+    (* Match the native handoff protocol: direct OwnedVec bindings captured
+       by an inline spawn closure are released, then atomically claimed by
+       their next user. Opaque callback values do not transfer ownership. *)
+    (match clos.Ast.node with
+     | Ast.Fun _ ->
+       List.iter (fun (n, t) ->
+         vec_used := true;
+         owned_vec_used := true;
+         emit_expr { clos with Ast.node = Ast.Var n; ty = Some t };
+         emit_instr "call $mere_owned_vec_release";
+         emit_instr "drop") (Ast.owned_vec_captures clos)
+     | _ -> ());
     emit_expr clos;
     emit_instr "call $mere_spawn"
   | Ast.App ({ node = Ast.Var "join"; _ }, h)
@@ -4217,34 +4230,38 @@ and emit_expr (e : Ast.expr) : unit =
     emit_expr fn_e;
     emit_instr "call $mere_vec_filter"
   | Ast.App ({ node = Ast.Var "owned_vec_new"; _ }, _arg) ->
-    (* Phase 15.7: In Wasm, OwnedVec and Vec use the same bump runtime, so
-       OwnedVec uses an untracked constructor until its own handoff protocol exists. *)
     vec_used := true;
+    owned_vec_used := true;
     emit_instr "call $mere_owned_vec_new"
   | Ast.App ({ node = Ast.Var "owned_vec_len"; _ }, arg) ->
     vec_used := true;
+    owned_vec_used := true;
     emit_expr arg;
-    emit_instr "call $mere_vec_len"
+    emit_instr "call $mere_owned_vec_len"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_push"; _ }, vec_e); _ }, val_e) ->
     vec_used := true;
+    owned_vec_used := true;
     emit_expr vec_e;
     emit_expr val_e;
-    emit_instr "call $mere_vec_push"
+    emit_instr "call $mere_owned_vec_push"
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "owned_vec_get"; _ }, vec_e); _ }, idx_e) ->
     vec_used := true;
+    owned_vec_used := true;
     emit_expr vec_e;
     emit_expr idx_e;
-    emit_instr "call $mere_vec_get"
+    emit_instr "call $mere_owned_vec_get"
   | Ast.App ({ node = Ast.Var "vec_to_owned"; _ }, vec_e) ->
     (* Phase 15.7: In Wasm the runtime representations of Vec and OwnedVec
        are the same, so just deep-copy with $mere_vec_clone. *)
     vec_used := true;
+    owned_vec_used := true;
     emit_expr vec_e;
     emit_instr "call $mere_vec_to_owned"
   | Ast.App ({ node = Ast.Var "owned_vec_to_vec"; _ }, owned_e) ->
     vec_used := true;
+    owned_vec_used := true;
     emit_expr owned_e;
-    emit_instr "call $mere_vec_clone"
+    emit_instr "call $mere_owned_vec_to_vec"
   | Ast.App ({ node = Ast.Var "len"; _ }, arg) ->
     (* Phase 15.11: len ad-hoc dispatch — route to the corresponding _len
        helper based on arg.ty. In Wasm all values are i32. *)
@@ -4254,7 +4271,12 @@ and emit_expr (e : Ast.expr) : unit =
       | None -> raise (Codegen_error (arg.Ast.loc, "len: missing arg type info"))
     in
     (match arg_ty with
-     | Ast.TyCon ("Vec", _) | Ast.TyCon ("OwnedVec", _) ->
+     | Ast.TyCon ("OwnedVec", _) ->
+       vec_used := true;
+       owned_vec_used := true;
+       emit_expr arg;
+       emit_instr "call $mere_owned_vec_len"
+     | Ast.TyCon ("Vec", _) ->
        vec_used := true;
        emit_expr arg;
        emit_instr "call $mere_vec_len"
@@ -8276,8 +8298,9 @@ let list_str_runtime_wasm = {|
    implementation with 8-byte i64 element slots (scalars directly,
    structured values as widened memory offsets).
    Layout: 16 bytes per vec — { data_ptr:i32, len:i32, cap:i32, owner:i32 }.
-   Threaded modules use an aligned atomic owner word; zero is untracked
-   OwnedVec storage and bit 30 marks a foreign read permanently.
+   Threaded modules use an aligned atomic owner word. Bit 30 marks a foreign
+   Vec read permanently; OwnedVec's separate access guard claims a released
+   (zero-owner) vector before delegating to these storage helpers.
    Push reallocates by appending a fresh buffer at the bump pointer
    (arena semantics — old buffers leak until process exit). *)
 let vec_runtime = {|
@@ -8419,8 +8442,8 @@ let vec_runtime = {|
     (i64.extend_i32_s (i32.const 0)))
   ;; Phase 15.7: OwnedVec helpers — in Wasm all values are i32 and the
   ;; bump allocator is also shared, so the runtime representations of Vec
-  ;; and OwnedVec are the same. owned_vec_* aliases as a thin wrapper to
-  ;; $mere_vec_*. Deep copy (vec_to_owned / owned_vec_to_vec) uses $mere_vec_clone.
+  ;; and OwnedVec are the same. OwnedVec access guards run before delegating
+  ;; to Vec storage. Conversions copy the slots through $mere_vec_clone.
   (func $mere_vec_clone (param $src8 i64) (result i64)
     (local $new i32) (local $i i32) (local $len i32) (local $buf i32)
     (local $src i32)
@@ -8439,15 +8462,9 @@ let vec_runtime = {|
         (br $lp)))
     (i64.extend_i32_s (local.get $new)))
   (func $mere_owned_vec_new (result i64)
-    (local $v i64)
-    (local.set $v (call $mere_vec_new))
-    (i32.atomic.store offset=12 (i32.wrap_i64 (local.get $v)) (i32.const 0)) ;; vec-owner
-    (local.get $v))
+    (call $mere_vec_new))
   (func $mere_vec_to_owned (param $src i64) (result i64)
-    (local $v i64)
-    (local.set $v (call $mere_vec_clone (local.get $src)))
-    (i32.atomic.store offset=12 (i32.wrap_i64 (local.get $v)) (i32.const 0)) ;; vec-owner
-    (local.get $v))
+    (call $mere_vec_clone (local.get $src)))
   ;; Phase 19.3: vec_reverse — in-place swap, returns 0 (unit).
   (func $mere_vec_reverse (param $v8 i64) (result i64)
     (local $lo i32) (local $hi i32) (local $buf i32) (local $tmp i64)
@@ -11489,6 +11506,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   mapget_msg_offset :=
     fresh_str_offset "map_get: key not found in Map (use map_has to check first)";
   vec_used := false;
+  owned_vec_used := false;
   vec_higher_order_used := false;
   strbuf_used := false;
   bytebuf_used := false;
@@ -12355,6 +12373,48 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     (unreachable))
 |} failures
   in
+  let owned_vec_owner_section =
+    if not !uses_threads || not !owned_vec_used then ""
+    else
+      let failures = List.mapi (fun i op ->
+        let msg = fresh_str_offset (Printf.sprintf "%s: an OwnedVec belongs to one thread -- the one that made it, or the one spawn moved it into -- and another used it; move it into the thread by capturing it in the closure spawn is given" op) in
+        Printf.sprintf
+          "    (if (i32.eq (local.get $op) (i32.const %d)) (then (drop (call $__lang_fail (i64.const %d))) (return (i32.const 0))))\n"
+          i msg) ["owned_vec_push"; "owned_vec_get"; "owned_vec_len"; "owned_vec_to_vec"; "spawn"] |> String.concat "" in
+      Printf.sprintf {|
+  (func $mere_owned_vec_use (param $v8 i64) (param $op i32) (result i32)
+    (local $v i32) (local $owner i32) (local $me i32)
+    (local.set $v (i32.wrap_i64 (local.get $v8)))
+    (local.set $me (call $mere_container_tid))
+    (local.set $owner (i32.atomic.load offset=12 (local.get $v)))
+    (if (i32.eq (local.get $owner) (local.get $me))
+      (then (return (i32.const 1))))
+    (if (i32.eqz (local.get $owner))
+      (then
+        (local.set $owner (i32.atomic.rmw.cmpxchg offset=12 (local.get $v) (i32.const 0) (local.get $me))) ;; ov-claim
+        (if (i32.or (i32.eqz (local.get $owner)) (i32.eq (local.get $owner) (local.get $me)))
+          (then (return (i32.const 1))))))
+%s
+    (unreachable))
+  (func $mere_owned_vec_release (param $v8 i64) (result i64)
+    (if (i32.eqz (call $mere_owned_vec_use (local.get $v8) (i32.const 4)))
+      (then (return (i64.const 0))))
+    (i32.atomic.store offset=12 (i32.wrap_i64 (local.get $v8)) (i32.const 0)) ;; ov-release
+    (i64.const 0))
+  (func $mere_owned_vec_push (param $v i64) (param $x i64) (result i64)
+    (if (i32.eqz (call $mere_owned_vec_use (local.get $v) (i32.const 0))) (then (return (i64.const 0)))) ;; ov-owner
+    (call $mere_vec_push (local.get $v) (local.get $x)))
+  (func $mere_owned_vec_get (param $v i64) (param $i i64) (result i64)
+    (if (i32.eqz (call $mere_owned_vec_use (local.get $v) (i32.const 1))) (then (return (i64.const 0)))) ;; ov-owner
+    (call $mere_vec_get (local.get $v) (local.get $i)))
+  (func $mere_owned_vec_len (param $v i64) (result i64)
+    (if (i32.eqz (call $mere_owned_vec_use (local.get $v) (i32.const 2))) (then (return (i64.const 0)))) ;; ov-owner
+    (call $mere_vec_len (local.get $v)))
+  (func $mere_owned_vec_to_vec (param $v i64) (result i64)
+    (if (i32.eqz (call $mere_owned_vec_use (local.get $v) (i32.const 3))) (then (return (i64.const 0)))) ;; ov-owner
+    (call $mere_vec_clone (local.get $v)))
+|} failures
+  in
   let data_section =
     if !str_data_decls = [] then ""
     else String.concat "\n" (List.rev !str_data_decls) ^ "\n"
@@ -12727,7 +12787,7 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     else "  (memory (export \"memory\") 1024)\n")
     ^ boundary_shims
   in
-  let vec_runtime_section = container_tid_section ^ vec_owner_section ^ map_owner_section ^ buffer_owner_section ^ lb_owner_section ^ (if !vec_used then vec_runtime else "") in
+  let vec_runtime_section = container_tid_section ^ vec_owner_section ^ map_owner_section ^ buffer_owner_section ^ lb_owner_section ^ owned_vec_owner_section ^ (if !vec_used then vec_runtime else "") in
   let vec_higher_order_section =
     if !vec_higher_order_used then vec_higher_order_runtime else ""
   in
@@ -13980,7 +14040,17 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
                || String.ends_with ~suffix:";; buffer-owner" line
                || String.ends_with ~suffix:";; lb-owner" line then None
             else if String.ends_with ~suffix:";; vec-owner-predicate" line then Some "    drop\n    i64.const 1"
-            else Some line)
+            else
+              (* Unthreaded OwnedVecs use the storage helpers directly. Match
+                 whole instruction lines so user string data is untouched. *)
+              match List.assoc_opt (String.trim line) [
+                "call $mere_owned_vec_push", "call $mere_vec_push";
+                "call $mere_owned_vec_get", "call $mere_vec_get";
+                "call $mere_owned_vec_len", "call $mere_vec_len";
+                "call $mere_owned_vec_to_vec", "call $mere_vec_clone"
+              ] with
+              | Some call -> Some ("    " ^ call)
+              | None -> Some line)
         |> String.concat "\n")
   |> prune_dead_fail_checks
 
