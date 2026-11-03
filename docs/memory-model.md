@@ -433,7 +433,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.692)
+## 4. Implemented memory behavior (v0.1.693)
 
 ### Concurrency and sharing
 
@@ -610,10 +610,18 @@ when empty, and repeated owner conversions are valid. Already-frozen push
 reports the frozen state before ownership, as C does. Growth and default-arena
 promotion preserve ownership. Immutable byte/list snapshots can be shared.
 
-**RISC-V's other containers still lack runtime owner guards.** This includes
-`StrBuf` and `OwnedVec` handoff. Frontend checks
-still apply, but accepted opaque callbacks gain no additional ownership
-protection for these containers. Keep mutable containers within one worker
+**RISC-V StrBuf guards (v0.1.693).** User StrBufs use a fourth ownership
+word in programs with green threads. Foreign length queries (including
+`len`) and string conversion freeze the buffer, including empty storage.
+Push rejects foreign and shared writes before mutation, even for an empty
+append. Growth retains ownership. An independent immutable string snapshot
+can be read by another thread without freezing its source. Prelude and
+formatting buffers stay untracked; thread-free programs keep the original
+three-word header and omit ownership helpers.
+
+**RISC-V OwnedVec access and handoff still lack runtime guards.** Frontend
+checks still apply, but accepted opaque callbacks gain no additional ownership
+protection for OwnedVec. Keep mutable containers within one worker
 and exchange messages over channels.
 The container checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
