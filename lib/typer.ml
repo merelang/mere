@@ -3509,6 +3509,17 @@ let initial_env : env =
       { constraints = []; quantified = [id a; id r];
         body = Ast.TyArrow (Ast.TyCon ("Vec", [r; a]),
                  Ast.TyArrow (Ast.TyStr, Ast.TyUnit)) }));
+    ("__rv_map_read_meta",
+     (let r = fresh_var () in
+      let id = match r with Ast.TyVar t -> t.id | _ -> assert false in
+      { constraints = []; quantified = [id];
+        body = Ast.TyArrow (Ast.TyCon ("Vec", [r; Ast.TyInt]), Ast.TyUnit) }));
+    ("__rv_map_write_meta",
+     (let r = fresh_var () in
+      let id = match r with Ast.TyVar t -> t.id | _ -> assert false in
+      { constraints = []; quantified = [id];
+        body = Ast.TyArrow (Ast.TyCon ("Vec", [r; Ast.TyInt]),
+                 Ast.TyArrow (Ast.TyStr, Ast.TyUnit)) }));
     ("__rv_vec_track",
      (let r = fresh_var () and a = fresh_var () in
       let id v = match v with Ast.TyVar t -> t.id | _ -> assert false in

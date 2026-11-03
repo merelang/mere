@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.691 — 2026-11-03
+
+_RISC-V: enforce Map ownership across logical threads._
+
+User Maps record their creator when green threads are reachable. Foreign
+writes fail before probing, copying or changing storage; foreign reads make
+Maps permanently read-only, including failed lookups and empty traversals.
+Checks cover `map_get`, `map_has`, `map_len`, generic `len`, `map_iter`,
+`map_set`, `map_delete`, `map_clear`, `map_recycle` and `map_compact`.
+`map_bytes` measures arena capacity without marking element storage shared.
+
+Ownership survives growth, clearing, recycling, compaction and default-arena
+promotion. Internal Maps remain untracked. Thread-free programs retain the
+existing Map representation and omit ownership helpers. The differential
+RV32/RV64 gate covers word, string and compound keys and removes guards in
+negative controls to demonstrate otherwise accepted writes.
+
 ## v0.1.690 — 2026-11-03
 
 _C: record Vec reads through formatting, conversion and empty traversals._

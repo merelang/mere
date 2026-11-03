@@ -1833,6 +1833,82 @@ let emit_vec_guard ?(write = false) op =
     pop ra
   end
 
+(* Maps retain their five-Vec representation. Tracked Maps append an owner
+   word to the metadata Vec; internal Maps and thread-free programs keep its
+   original four entries. Guard helpers preserve a0/a1/a2 and clobber t0..t3. *)
+let emit_map_guard ?(meta = false) ?(write = false) op =
+  if !vec_owner_mode then begin
+    push ra;
+    emit (Jal (ra, "__map_" ^ (if write then "write_" ^ op else "read") ^
+                    (if meta then "_meta" else "")));
+    pop ra
+  end
+
+let emit_map_track () =
+  if !vec_owner_mode then begin
+    push ra;
+    emit (Jal (ra, "__map_track"));
+    pop ra
+  end
+
+let emit_map_owner_helpers () =
+  if !vec_owner_mode then begin
+    let w = wsz () in
+    let ld r off base = emit_word (enc_i off base (ldf3 ()) r 0x03) in
+    let sd r off base = emit_word (enc_s off r base (stf3 ()) 0x23) in
+    let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+    emit (Label "__map_track");
+    push ra; push a0;
+    ld a0 (4 * w) a0;
+    ld t0 0 a0;
+    li t1 5;
+    let append = fresh_label ".mot" and done_ = fresh_label ".mod" in
+    emit (Branch (6, t0, t1, append));
+    ld t0 (2 * w) a0; ld t0 (4 * w) t0;
+    emit (Branch (1, t0, zero, done_));
+    (* A previously untracked recycled Map has a zero fifth entry. *)
+    li t0 (rtw_addr rtw_thread_id); ld t1 0 t0;
+    emit_word (enc_i 1 t1 0 t1 0x13);
+    ld t0 (2 * w) a0; sd t1 (4 * w) t0;
+    emit (Jal (zero, done_));
+    emit (Label append);
+    li t0 (rtw_addr rtw_thread_id); ld a1 0 t0;
+    emit_word (enc_i 1 a1 0 a1 0x13);
+    emit (Jal (ra, "__vec_push"));
+    emit (Label done_); pop a0; pop ra; ret ();
+    let helper write op =
+      let name = "__map_" ^ (if write then "write_" ^ op else "read") in
+      let entry = fresh_label ".moe" and done_ = fresh_label ".mor" in
+      emit (Label name);
+      ld t3 (4 * w) a0;
+      emit (Jal (zero, entry));
+      emit (Label (name ^ "_meta"));
+      emit_word (enc_i 0 a0 0 t3 0x13);
+      emit (Label entry);
+      ld t0 0 t3; li t1 5;
+      emit (Branch (6, t0, t1, done_));
+      ld t3 (2 * w) t3; ld t0 (4 * w) t3;
+      emit (Branch (0, t0, zero, done_));
+      li t1 (rtw_addr rtw_thread_id); ld t1 0 t1;
+      emit_word (enc_i 1 t1 0 t1 0x13);
+      emit (Branch (0, t0, t1, done_));
+      li t2 0x40000000;
+      if write then begin
+        let shared = fresh_label ".mos" in
+        emit_word (enc_r 0 t2 t1 6 t1 0x33);
+        emit (Branch (0, t0, t1, shared));
+        emit_abort (op ^ ": a Map made by one thread was written by another -- a Map is not safe to share between threads; give it one owner thread and send it messages over a Channel");
+        emit (Label shared);
+        emit_abort (op ^ ": a Map another thread has read was written -- once a second thread reads a Map it is shared, and a shared Map is read-only; give it one owner thread and send it messages over a Channel")
+      end else begin
+        emit_word (enc_r 0 t2 t0 6 t0 0x33);
+        sd t0 (4 * w) t3
+      end;
+      emit (Label done_); ret () in
+    helper false "read";
+    List.iter (helper true) ["map_set"; "map_delete"; "map_clear"; "map_recycle"; "map_compact"]
+  end
+
 let emit_vec_owner_helpers () =
   if !vec_owner_mode then begin
     let owner () =
@@ -3477,6 +3553,17 @@ and compile_app env e =
     compile_expr env (List.hd args);
     emit_vec_guard ~write:true op;
     li a0 0
+  | Ast.Var "__rv_map_read_meta" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_map_guard ~meta:true "read";
+    li a0 0
+  | Ast.Var "__rv_map_write_meta" when List.length args = 2 ->
+    let op = match (List.nth args 1).Ast.node with
+      | Ast.Str_lit ("map_set" | "map_delete" | "map_clear" | "map_recycle" | "map_compact" as op) -> op
+      | _ -> err e.loc "RISC-V: internal Map write check requires an operation literal" in
+    compile_expr env (List.hd args);
+    emit_map_guard ~meta:true ~write:true op;
+    li a0 0
   | Ast.Var "__rv_vec_track" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_vec_track ()
@@ -4200,6 +4287,7 @@ and compile_app env e =
      are erased at codegen, so the Vec-based repr flows through fine. *)
   | Ast.Var "map_new" when List.length args = 1 ->
     call_top env "rvmap_new" args;
+    if not (in_rv_prelude e.Ast.loc) then emit_map_track ();
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__mheap"))
   | Ast.Var "map_set" when List.length args = 3 ->
     check_map_key e.Ast.loc (List.nth args 1);
@@ -4222,6 +4310,7 @@ and compile_app env e =
         | _ -> () in
       List.iter (fun x -> compile_expr env x; push a0) args;    (* [v][k][m] *)
       emit_word (enc_i (2 * w) sp (ldf3 ()) a0 0x03);
+      emit_map_guard ~write:true "map_set";
       emit_word (enc_i w sp (ldf3 ()) a1 0x03);
       emit (Jal (ra, if word then "__rv_mslot_w" else "__rv_mslot_s"));
       push a0;                                                  (* [s][v][k][m] *)
@@ -5410,6 +5499,7 @@ let emit_map_rt () =
      __rv_mhas_{w,s} -> 1 / 0. Both keep ra in a7 across the leaf probe. *)
   List.iter (fun (sfx, slot) ->
     emit (Label ("__rv_mget_" ^ sfx));
+    emit_map_guard "read";
     mv a7 ra; mv a6 a0;
     (* the str probe uses a6: keep the map on the stack there *)
     addi sp sp (0 - w); sd a0 0 sp;
@@ -5427,6 +5517,7 @@ let emit_map_rt () =
     add t1 t1 t0; ld a0 0 t1;
     ret ();
     emit (Label ("__rv_mhas_" ^ sfx));
+    emit_map_guard "read";
     mv a7 ra;
     emit (Jal (ra, slot));
     mv ra a7;
@@ -5437,6 +5528,7 @@ let emit_map_rt () =
        index, live flags and meta are int Vecs: an int store allocates nothing
        and makes nothing reachable, so these stores need no protect. *)
     emit (Label ("__rv_mdel_" ^ sfx));
+    emit_map_guard ~write:true "map_delete";
     mv a7 ra;
     addi sp sp (0 - w); sd a0 0 sp;
     emit (Jal (ra, slot));
@@ -7116,8 +7208,18 @@ let emit_arena () =
      rvmap_new makes them: an index of 8 empty slots, three empty Vecs, and the
      meta [live 0, used 0, tombstones 0, mask 7]. *)
   emit (Label "__mrecycle");
+  emit_map_guard ~write:true "map_recycle";
   addi sp sp (0 - 4 * w);
   sd ra (3 * w) sp; sd a0 w sp;
+  if !vec_owner_mode then begin
+    (* Save before reset invalidates the old metadata buffer. *)
+    sd zero (2 * w) sp;
+    ld t0 (4 * w) a0; ld t1 0 t0; li t2 5;
+    let untracked = fresh_label ".mru" in
+    emit (Branch (6, t1, t2, untracked));
+    ld t0 (2 * w) t0; ld t1 (4 * w) t0; sd t1 (2 * w) sp;
+    emit (Label untracked)
+  end;
   ld t0 w a0; ld a0 (3 * w) t0;
   emit (Branch (0, a0, zero, ".mrNew"));
   ld t0 (5 * w) a0;                                      (* the shared arena is not *)
@@ -7140,7 +7242,11 @@ let emit_arena () =
     List.iteri (fun j v -> (if v = 0 then sd zero (j * w) a0 else (li t2 v; sd t2 (j * w) a0))) init)
     [ (8, 8, [0; 0; 0; 0; 0; 0; 0; 0]);
       (4, 0, []); (4, 0, []); (4, 0, []);
-      (4, 4, [0; 0; 0; 7]) ];
+      (if !vec_owner_mode then (5, 5, [0; 0; 0; 7; 0]) else (4, 4, [0; 0; 0; 7])) ];
+  if !vec_owner_mode then begin
+    ld t0 w sp; ld t0 (4 * w) t0; ld t0 (2 * w) t0;
+    ld t1 (2 * w) sp; sd t1 (4 * w) t0
+  end;
   ld ra (3 * w) sp; addi sp sp (4 * w);
   li a0 0; ret ();
   (* __hprot(a0 = a container handle or a closure being stored into an arena):
@@ -8216,6 +8322,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_strbuf ();
   emit_vec ();
   emit_vec_owner_helpers ();
+  emit_map_owner_helpers ();
   emit_arena ();
   emit_map_rt ();
   if !coro_mode then emit_coro_rt ();
