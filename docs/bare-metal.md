@@ -441,6 +441,16 @@ every thread is blocked for good, and the program says so and exits 1 (C would
 hang). A value crosses a channel as its word, and whatever the sender allocated
 stays where it is.
 
+As of v0.1.689, Vec ownership follows these logical threads, including actual
+green workers for `par_map` calls. Foreign reads make a Vec read-only and
+writes check ownership before mutation. The prelude uses `__rv_vec_write`
+for compound write operations such as sorting and SIMD stores. This is an
+internal RISC-V primitive; use the public Vec operations in application code.
+`__rv_vec_track` attaches ownership to fresh Vecs returned by file-reading
+helpers; it preserves an already tracked Vec's owner and shared state.
+Other container representations still lack runtime ownership checks. See the
+[memory contract](memory-model.md#runtime-guards-and-coverage-limits).
+
 ## Vector extension (Q-110, v0.1.426)
 
 `mere -rv` / `-rv64` lower the language's `u8x16` type to RVV 1.0 with VLEN 128,

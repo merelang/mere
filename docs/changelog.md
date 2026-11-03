@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.689 — 2026-11-03
+
+_RISC-V: guard Vec access across logical threads._
+
+Programs using green threads track each user Vec's creator and shared state.
+A foreign read makes it permanently read-only; foreign writes and subsequent
+owner writes fail before mutation. Checks cover checked and range-versioned
+accesses, sorting, recycling, compaction, conversions, printing/JSON and SIMD
+loads/stores. Rejected ownership checks preserve contents. Vec-producing conversions and
+default-arena promotion retain ownership. Programs without green threads
+keep the four-word Vec header and omit the checks.
+
+The scheduler publishes the running logical thread identity. `par_map` now
+runs each call in a green worker, so its callbacks have actual identities and
+later spawns cannot reuse gaps in the scheduler's tables. RISC-V's other
+container representations remain outside this ownership guarantee.
+
 ## v0.1.688 — 2026-11-03
 
 _Node Wasm host: report unsupported thread operations inside workers._

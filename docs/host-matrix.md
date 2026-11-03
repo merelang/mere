@@ -60,6 +60,8 @@ machine rather than a host.
 | `__rv_syscall` | refused | refused | refused | yes |
 | `__rv_unlink` | refused | refused | refused | yes |
 | `__rv_urandom32` | refused | refused | refused | yes |
+| `__rv_vec_track` | refused | refused | refused | yes |
+| `__rv_vec_write` | refused | refused | refused | yes |
 | `__rv_write_all` | refused | refused | refused | yes |
 | `__rv_xlen` | refused | refused | refused | yes |
 | `abs` | yes | yes | yes | yes |

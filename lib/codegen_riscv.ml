@@ -268,6 +268,8 @@ let pop rd =
    of whichever stack is running. It is kept in tp, which this backend did not
    use, and the check is the same one instruction. *)
 let coro_mode = ref false
+let vec_owner_mode = ref false
+let vec_header_words () = if !vec_owner_mode then 5 else 4
 let tp = 4
 let emit_oom_check () =
   (* v0.1.627: with coroutines the room was made before the bump (see
@@ -1047,7 +1049,7 @@ let globals_base () = !load_base + !code_span
    "the buffer the print helpers build digits in", and putting unrelated state
    there would make the description untrue. Top-level value bindings start one
    word further up; the heap starts after those, as before. *)
-let runtime_words = 81
+let runtime_words = 82
 let fail_frame_addr () = globals_base ()
 (* v0.1.613: three more runtime words for region reclamation (see the
    Region_block arm): how many region blocks are open, the innermost one's
@@ -1088,6 +1090,8 @@ let rtw_carve = 72 and rtw_blo = 73 and rtw_fromrec = 74 and rtw_torec = 75
 and rtw_chain = 76 and rtw_first = 77 and rtw_realtp = 78 and rtw_defer = 79
 (* v0.1.634: the errno fd_last_errno answers, kept by the prelude's fd_* *)
 and rtw_fd_errno = 80
+(* The scheduler's logical thread, independent of a coroutine's stack. *)
+let rtw_thread_id = 81
 (* the record words the switch keeps a stack's heap in: gp, tp, the high-water
    mark, BLO, CHAIN, FIRST (13 was "gp when it last stopped" since v0.1.624) *)
 let crec_gp = 13 and crec_tp = 14 and crec_hwm = 15 and crec_blo = 16
@@ -1811,6 +1815,66 @@ let emit_abort msg =
   string_data := (label, mk_str_block (target_msg msg)) :: !string_data;
   emit (LoadAddr (a0, label));
   emit_fail_from_a0 ()
+
+(* Only programs using green threads carry Vec ownership metadata. Prelude
+   storage (scheduler, channels, Maps and other container representations) is
+   untracked; Vecs returned by public Vec constructors are tracked. *)
+let emit_vec_track () =
+  if !vec_owner_mode then begin
+    push ra;
+    emit (Jal (ra, "__vec_track"));
+    pop ra
+  end
+
+let emit_vec_guard ?(write = false) op =
+  if !vec_owner_mode then begin
+    push ra;
+    emit (Jal (ra, if write then "__vec_write_" ^ op else "__vec_read"));
+    pop ra
+  end
+
+let emit_vec_owner_helpers () =
+  if !vec_owner_mode then begin
+    let owner () =
+      emit_word (enc_i (4 * wsz ()) a0 (ldf3 ()) t0 0x03);
+      li t1 (rtw_addr rtw_thread_id);
+      emit_word (enc_i 0 t1 (ldf3 ()) t1 0x03);
+      emit_word (enc_i 1 t1 0 t1 0x13) in
+    let ret () = emit_word (enc_i 0 ra 0 zero 0x67) in
+    emit (Label "__vec_track");
+    let tracked = fresh_label ".vot" in
+    emit_word (enc_i (4 * wsz ()) a0 (ldf3 ()) t0 0x03);
+    emit (Branch (1, t0, zero, tracked));
+    li t0 (rtw_addr rtw_thread_id);
+    emit_word (enc_i 0 t0 (ldf3 ()) t1 0x03);
+    emit_word (enc_i 1 t1 0 t1 0x13);
+    emit_word (enc_s (4 * wsz ()) t1 a0 (stf3 ()) 0x23);
+    emit (Label tracked);
+    ret ();
+    emit (Label "__vec_read");
+    owner ();
+    let done_ = fresh_label ".vor" in
+    emit (Branch (0, t0, zero, done_));
+    emit (Branch (0, t0, t1, done_));
+    li t2 0x40000000;
+    emit_word (enc_r 0 t2 t0 6 t0 0x33);
+    emit_word (enc_s (4 * wsz ()) t0 a0 (stf3 ()) 0x23);
+    emit (Label done_); ret ();
+    List.iter (fun op ->
+      emit (Label ("__vec_write_" ^ op));
+      owner ();
+      let done_ = fresh_label ".vow" and shared = fresh_label ".vos" in
+      emit (Branch (0, t0, zero, done_));
+      emit (Branch (0, t0, t1, done_));
+      li t2 0x40000000;
+      emit_word (enc_r 0 t2 t1 6 t1 0x33);
+      emit (Branch (0, t0, t1, shared));
+      emit_abort (op ^ ": a Vec made by one thread was written by another -- a Vec is not safe to share between threads; give it one owner thread and send it messages over a Channel");
+      emit (Label shared);
+      emit_abort (op ^ ": a Vec another thread has read was written -- once a second thread reads a Vec it is shared, and a shared Vec is read-only; give it one owner thread and send it messages over a Channel");
+      emit (Label done_); ret ())
+      ["vec_push"; "vec_set"; "vec_recycle"; "vec_compact"; "vec_sort"; "f64x2_store"]
+  end
 
 (* v0.1.637: a refusal that says WHICH index and how long, as the other
    backends' do ("vec_get: index 5 out of bounds (len = 1)"). The message is
@@ -3363,15 +3427,18 @@ and compile_app env e =
                   | "bytebuf_set" -> "rvbb_set" | "bytebuf_push" -> "rvbb_push"
                   | "bytes_of_bytebuf" | "bytes_of_vec" -> "rvbb_to_bytes"
                   | "lb_push" -> "rvlb_push" | "lb_to_list" -> "rvlb_to_list"
-                  | "owned_vec_get" -> "rvov_get" | _ -> "rvov_copy") args
+                  | "owned_vec_get" -> "rvov_get" | _ -> "rvov_copy") args;
+    if op = "owned_vec_to_vec" then emit_vec_track ()
   | Ast.Var ("bytebuf_of_bytes" | "vec_of_bytes" | "vec_to_owned" as op) when List.length args = 1 ->
     call_top env (if op = "vec_to_owned" then "rvov_copy" else "rvbb_of_bytes") args;
+    if op = "vec_of_bytes" then emit_vec_track ();
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
   | Ast.Var "owned_vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)
   | Ast.Var "vec_new" when List.length args = 1 ->
     compile_expr env (List.hd args); emit (Jal (ra, "__vec_new"));
+    if not (in_rv_prelude e.Ast.loc) then emit_vec_track ();
     (* v0.1.614: a __heap Vec stores into the default arena (emit_arena) *)
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
   (* v0.1.659: owned_vec_push too. Since 653 it called __vec_push with the
@@ -3390,11 +3457,32 @@ and compile_app env e =
        emit (Jal (ra, request_store "__vpush_" t))
      | _ -> emit (Jal (ra, "__vec_push")))
   | Ast.Var "__vec_owned" when List.length args = 1 ->
-    (* No container-owner tracking. Coroutine-based green threads share the
-       hart; this constant does not check which logical thread owns a Vec. *)
-    li a0 1
+    compile_expr env (List.hd args);
+    if not !vec_owner_mode then li a0 1
+    else begin
+      emit_word (enc_i (4 * wsz ()) a0 (ldf3 ()) t0 0x03);
+      li t1 (rtw_addr rtw_thread_id);
+      emit_word (enc_i 0 t1 (ldf3 ()) t1 0x03);
+      emit_word (enc_i 1 t1 0 t1 0x13);
+      let yes = fresh_label ".vop" and done_ = fresh_label ".voe" in
+      emit (Branch (0, t0, zero, yes));
+      emit (Branch (0, t0, t1, yes));
+      li a0 0; emit (Jal (zero, done_));
+      emit (Label yes); li a0 1; emit (Label done_)
+    end
+  | Ast.Var "__rv_vec_write" when List.length args = 2 ->
+    let op = match (List.nth args 1).Ast.node with
+      | Ast.Str_lit ("vec_sort" | "f64x2_store" as op) -> op
+      | _ -> err e.loc "RISC-V: internal Vec write check requires an operation literal" in
+    compile_expr env (List.hd args);
+    emit_vec_guard ~write:true op;
+    li a0 0
+  | Ast.Var "__rv_vec_track" when List.length args = 1 ->
+    compile_expr env (List.hd args);
+    emit_vec_track ()
   | Ast.Var "vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
+    emit_vec_guard "read";
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03)                         (* lw a0, 0(vec) — len *)
   (* ---- Q-110: bytes on this target -- the str block layout ([len word][bytes],
      word-padded), so bytes_of_str / str_of_bytes are the identity and
@@ -3446,6 +3534,7 @@ and compile_app env e =
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=i *)
+    emit_vec_guard "read";
     emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);     (* dataptr *)
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* t0 = dataptr + i*w *)
@@ -3456,6 +3545,7 @@ and compile_app env e =
     compile_expr env (List.nth args 2);
     emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = x *)
     pop a1; pop a0;                                          (* a1=i, a0=vec *)
+    emit_vec_guard ~write:true "vec_set";
     emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);     (* dataptr *)
     emit_word (enc_i (wshift ()) a1 1 t1 0x13);              (* slli t1, i, w *)
     emit_word (enc_r 0 t1 t0 0 t0 0x33);                     (* addr *)
@@ -3469,6 +3559,7 @@ and compile_app env e =
     compile_expr env (List.nth args 0); push a0;
     compile_expr env (List.nth args 1);
     emit_word (enc_i 0 a0 0 a1 0x13); pop a0;                (* a0=vec, a1=i *)
+    emit_vec_guard "read";
     (* Bounds, UNSIGNED, so a negative index is one huge index and the same
        refusal. This backend never had the check: the test that exists to see
        it (index_edges) uses literals too wide to compile at 32, so the first
@@ -3500,6 +3591,7 @@ and compile_app env e =
     compile_expr env (List.nth args 2);
     emit_word (enc_i 0 a0 0 a2 0x13);                        (* a2 = x *)
     pop a1; pop a0;                                          (* a1=i, a0=vec *)
+    emit_vec_guard ~write:true "vec_set";
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                     (* len *)
     (let l = fresh_label ".vsok" in
      emit (Branch (6, a1, t2, l));                           (* bltu i, len -> ok *)
@@ -4204,11 +4296,13 @@ and compile_app env e =
   | Ast.Var "vec_recycle" when List.length args = 1 ->
     (* v0.1.644: emptied; the arena stays as it is (C winds it back) *)
     compile_expr env (List.hd args);
+    emit_vec_guard ~write:true "vec_recycle";
     emit_word (enc_s 0 zero a0 (stf3 ()) 0x23);                                 (* sw zero, 0(vec) — len *)
     li a0 0
   | Ast.Var "vec_compact" when List.length args = 1 ->
     (* v0.1.614: into an arena of its own (see emit_vcompact_helper) *)
     compile_expr env (List.hd args);
+    emit_vec_guard ~write:true "vec_compact";
     let et = match vec_elem_ty (List.hd args).Ast.ty with Some t -> t | None -> Ast.TyInt in
     emit (Jal (ra, request_store "__vcompact_"
                      (if in_rv_prelude e.Ast.loc then Ast.TyInt else et)));
@@ -5729,7 +5823,8 @@ let emit_strbuf () =
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) a0 0x03);
   emit_word (enc_i 0 ra 0 zero 0x67)
 
-(* Vec: a mutable growable word array. Cell = [len][cap][dataptr]; dataptr ->
+(* Vec: a mutable growable word array. Cell = [len][cap][dataptr][arena],
+   followed by an owner/shared word in programs with green threads; dataptr ->
    a cap-word buffer. __vec_new(_) -> cell; __vec_push(vec, x) appends (growing,
    doubling cap). vec_get / vec_set / vec_len are inlined at the call site. *)
 let emit_vec () =
@@ -5741,19 +5836,22 @@ let emit_vec () =
      through the stale capacity into the cell's own length field. A value and a
      size can wear the same literal, and only one of them scales. *)
   emit_word (enc_i 4 zero 0 t2 0x13);                     (* cap = 4 CELLS *)
-  emit_heap_reserve ~tmp:t0 (Isz (8 * wsz ()));
+  emit_heap_reserve ~tmp:t0 (Isz ((4 + vec_header_words ()) * wsz ()));
   emit_word (enc_i 0 gp 0 t0 0x13);                (* databuf = gp *)
   emit_word (enc_i (4 * wsz ()) gp 0 gp 0x13);     (* bump 4 cells *)
   emit_word (enc_i 0 gp 0 t1 0x13);                (* cell = gp *)
-  emit_word (enc_i (4 * wsz ()) gp 0 gp 0x13);     (* bump 4 words: v0.1.614 adds the arena *)
+  emit_word (enc_i (vec_header_words () * wsz ()) gp 0 gp 0x13);
   emit_oom_check ();
   emit_word (enc_s (3 * wsz ()) zero t1 (stf3 ()) 0x23);              (* arena = 0: on gp *)
+  if !vec_owner_mode then
+    emit_word (enc_s (4 * wsz ()) zero t1 (stf3 ()) 0x23);
   emit_word (enc_s (0 * wsz ()) zero t1 (stf3 ()) 0x23);              (* len = 0 *)
   emit_word (enc_s (wsz ()) t2 t1 (stf3 ()) 0x23);                (* cap = 4 *)
   emit_word (enc_s (2 * wsz ()) t0 t1 (stf3 ()) 0x23);                (* dataptr *)
   emit_word (enc_i 0 t1 0 a0 0x13);
   emit_word (enc_i 0 ra 0 zero 0x67);
   emit (Label "__vec_push");                       (* a0=vec, a1=x *)
+  emit_vec_guard ~write:true "vec_push";
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);                (* len *)
   emit_word (enc_i (wsz ()) a0 (ldf3 ()) t1 0x03);                (* cap *)
   emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* dataptr *)
@@ -5803,6 +5901,7 @@ let emit_vec () =
   (* __vec_set_rt(a0 = vec, a1 = i, a2 = x): what an inline vec_set does, for
      the typed store helpers to tail into *)
   emit (Label "__vec_set_rt");
+  emit_vec_guard ~write:true "vec_set";
   emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t2 0x03);                (* len *)
   emit (Branch (6, a1, t2, ".vsr_ok"));
   emit_abort_n 1 "vec_set: index out of bounds" [a1; t2];
@@ -6321,6 +6420,7 @@ let emit_show_helper (tag, ty) =
     start "?"; leave ()
   | Ast.TyCon ("Vec", [_; et]) ->
     (* [len][cap][data]...: the elements are words at data *)
+    emit_vec_guard "read";
     let l_loop = fresh_label ".svl" and l_end = fresh_label ".sve" and l_first = fresh_label ".svs" in
     enter (); start "Vec[";
     sd zero (3 * w) sp;
@@ -6431,6 +6531,7 @@ let emit_json_helper (tag, ty) =
       emit (Label l_next)) variants;
     start "null"; leave ()
   | Ast.TyCon ("Vec", [_; et]) ->
+    emit_vec_guard "read";
     let l_loop = fresh_label ".tjvl" and l_end = fresh_label ".tjve" and l_first = fresh_label ".tjvs" in
     enter (); start "[";
     sd zero (3 * w) sp;
@@ -6966,7 +7067,7 @@ let emit_arena () =
   emit (Label "__vremake");
   addi sp sp (0 - 6 * w);
   sd ra (5 * w) sp; sd a0 (4 * w) sp; sd a1 (3 * w) sp;
-  li a1 (4 * w);
+  li a1 (vec_header_words () * w);
   emit (Jal (ra, "__arena_alloc"));
   sd a0 (2 * w) sp;                                      (* the cell *)
   ld t1 (3 * w) sp; ld a1 w t1;                          (* cap *)
@@ -6978,6 +7079,7 @@ let emit_arena () =
   ld t3 w t1; sd t3 w t2;                                (* cap *)
   sd a0 (2 * w) t2;                                      (* dataptr *)
   ld t3 (4 * w) sp; sd t3 (3 * w) t2;                    (* arena *)
+  if !vec_owner_mode then (ld t3 (4 * w) t1; sd t3 (4 * w) t2);
   ld t4 0 t1; ld t5 (2 * w) t1;                          (* copy len words *)
   emit (Label ".vrL");
   emit (Branch (0, t4, zero, ".vrD"));
@@ -7293,11 +7395,13 @@ let emit_acopy_helper (tag : string) (ty : Ast.ty) =
    a2, so it is moved to a1 for emit_store_value and back. *)
 let emit_vpush_helper (tag : string) (ty : Ast.ty) =
   emit (Label ("__vpush_" ^ tag));
+  emit_vec_guard ~write:true "vec_push";
   emit_store_value ty;
   emit (Jal (zero, "__vec_push"))
 
 let emit_vset_helper (tag : string) (ty : Ast.ty) =
   emit (Label ("__vset_" ^ tag));
+  emit_vec_guard ~write:true "vec_set";
   push a1;                                         (* i, across the copy *)
   emit_word (enc_i 0 a2 0 a1 0x13);
   emit_store_value ty;
@@ -8076,6 +8180,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   List.iter (fun (_, init) -> List.iter visit (vars_in init [])) !globals;
   (match bare_entry with Some n -> visit n | None -> ());
   try_msg_used := Hashtbl.mem reachable "try_or_msg";
+  vec_owner_mode := Hashtbl.mem reachable "rvth_spawn" || Hashtbl.mem reachable "rvth_par_map";
   (* any program that can switch stacks: one that makes a coroutine, or one
      that switches or transfers (to the main stack, if nothing else) *)
   coro_mode := Hashtbl.mem reachable "rvcoro_new_sized" || Hashtbl.mem reachable "__cswitch";
@@ -8110,6 +8215,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   emit_substring ();
   emit_strbuf ();
   emit_vec ();
+  emit_vec_owner_helpers ();
   emit_arena ();
   emit_map_rt ();
   if !coro_mode then emit_coro_rt ();
