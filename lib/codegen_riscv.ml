@@ -1938,18 +1938,33 @@ let emit_vec_owner_helpers () =
     emit (Label done_); ret ();
     List.iter (fun op ->
       emit (Label ("__vec_write_" ^ op));
+      (* ListBuf reports its frozen state before checking the owner, as C
+         does, without turning this failed foreign attempt into a read. *)
+      if op = "lb_push" then begin
+        emit_word (enc_i (2 * wsz ()) a0 (ldf3 ()) t0 0x03);
+        emit_word (enc_i 0 t0 (ldf3 ()) t0 0x03);
+        let unfrozen = fresh_label ".lbu" in
+        emit (Branch (0, t0, zero, unfrozen));
+        emit_abort "lb_push: the builder was already turned into a list by lb_to_list";
+        emit (Label unfrozen)
+      end;
       owner ();
+      let kind = match op with
+        | "bytebuf_set" | "bytebuf_push" -> "ByteBuf"
+        | "lb_push" | "lb_to_list" -> "ListBuf"
+        | _ -> "Vec" in
       let done_ = fresh_label ".vow" and shared = fresh_label ".vos" in
       emit (Branch (0, t0, zero, done_));
       emit (Branch (0, t0, t1, done_));
       li t2 0x40000000;
       emit_word (enc_r 0 t2 t1 6 t1 0x33);
       emit (Branch (0, t0, t1, shared));
-      emit_abort (op ^ ": a Vec made by one thread was written by another -- a Vec is not safe to share between threads; give it one owner thread and send it messages over a Channel");
+      emit_abort (op ^ ": a " ^ kind ^ " made by one thread was written by another -- a " ^ kind ^ " is not safe to share between threads; give it one owner thread and send it messages over a Channel");
       emit (Label shared);
-      emit_abort (op ^ ": a Vec another thread has read was written -- once a second thread reads a Vec it is shared, and a shared Vec is read-only; give it one owner thread and send it messages over a Channel");
+      emit_abort (op ^ ": a " ^ kind ^ " another thread has read was written -- once a second thread reads a " ^ kind ^ " it is shared, and a shared " ^ kind ^ " is read-only; give it one owner thread and send it messages over a Channel");
       emit (Label done_); ret ())
-      ["vec_push"; "vec_set"; "vec_recycle"; "vec_compact"; "vec_sort"; "f64x2_store"]
+      ["vec_push"; "vec_set"; "vec_recycle"; "vec_compact"; "vec_sort"; "f64x2_store";
+       "bytebuf_set"; "bytebuf_push"; "lb_push"; "lb_to_list"]
   end
 
 (* v0.1.637: a refusal that says WHICH index and how long, as the other
@@ -3490,6 +3505,7 @@ and compile_app env e =
                                | _ -> "vec_new" in
     if target = "vec_new" then (compile_expr env (List.hd args); emit (Jal (ra, "__vec_new")))
     else call_top env target args;
+    if op <> "owned_vec_new" && not (in_rv_prelude e.Ast.loc) then emit_vec_track ();
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
   | Ast.Var ("bytebuf_len" | "bytebuf_get" | "bytebuf_set" | "bytebuf_push"
              | "bytes_of_bytebuf" | "bytes_of_vec" | "lb_push" | "lb_to_list"
@@ -3507,7 +3523,7 @@ and compile_app env e =
     if op = "owned_vec_to_vec" then emit_vec_track ()
   | Ast.Var ("bytebuf_of_bytes" | "vec_of_bytes" | "vec_to_owned" as op) when List.length args = 1 ->
     call_top env (if op = "vec_to_owned" then "rvov_copy" else "rvbb_of_bytes") args;
-    if op = "vec_of_bytes" then emit_vec_track ();
+    if op = "vec_of_bytes" || (op = "bytebuf_of_bytes" && not (in_rv_prelude e.Ast.loc)) then emit_vec_track ();
     if heap_container e.Ast.ty && not (in_rv_prelude e.Ast.loc) then emit (Jal (ra, "__vheap"))
   | Ast.Var "owned_vec_len" when List.length args = 1 ->
     compile_expr env (List.hd args);
@@ -3548,7 +3564,7 @@ and compile_app env e =
     end
   | Ast.Var "__rv_vec_write" when List.length args = 2 ->
     let op = match (List.nth args 1).Ast.node with
-      | Ast.Str_lit ("vec_sort" | "f64x2_store" as op) -> op
+      | Ast.Str_lit ("vec_sort" | "f64x2_store" | "bytebuf_set" | "bytebuf_push" | "lb_push" | "lb_to_list" as op) -> op
       | _ -> err e.loc "RISC-V: internal Vec write check requires an operation literal" in
     compile_expr env (List.hd args);
     emit_vec_guard ~write:true op;

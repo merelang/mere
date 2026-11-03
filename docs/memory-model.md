@@ -433,7 +433,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.691)
+## 4. Implemented memory behavior (v0.1.692)
 
 ### Concurrency and sharing
 
@@ -600,8 +600,18 @@ programs with green threads append ownership to the Map's metadata Vec;
 runtime-private Maps remain untracked. `map_bytes` measures arena capacity
 without sharing element storage.
 
+**RISC-V ByteBuf and ListBuf guards (v0.1.692).** User builders use the
+Vec header's ownership word in programs with green threads. ByteBuf reads
+freeze foreign storage, including empty byte conversion and failed lookups;
+set and push reject foreign or shared writes before mutation. ListBuf push
+and conversion require the owner. Rejected foreign operations leave an
+unfrozen builder writable by its owner. Conversion freezes the builder even
+when empty, and repeated owner conversions are valid. Already-frozen push
+reports the frozen state before ownership, as C does. Growth and default-arena
+promotion preserve ownership. Immutable byte/list snapshots can be shared.
+
 **RISC-V's other containers still lack runtime owner guards.** This includes
-`StrBuf`, `ByteBuf`, `ListBuf` and `OwnedVec` handoff. Frontend checks
+`StrBuf` and `OwnedVec` handoff. Frontend checks
 still apply, but accepted opaque callbacks gain no additional ownership
 protection for these containers. Keep mutable containers within one worker
 and exchange messages over channels.

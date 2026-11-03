@@ -455,7 +455,12 @@ across clearing and storage replacement. The prelude uses
 `__rv_map_read_meta` and `__rv_map_write_meta` on that integer metadata Vec;
 the write intrinsic requires an operation literal. These are internal
 RISC-V primitives; use the public Map operations in application code.
-Other container representations still lack runtime ownership checks. See the
+
+As of v0.1.692, user ByteBufs and ListBufs also use the Vec ownership word.
+The prelude uses `__rv_vec_write` with builder operation literals so rejected
+writes name the public operation and container, before lower-level Vec access.
+Runtime-private Vecs remain untracked. StrBuf and OwnedVec handoff still lack
+runtime ownership checks. See the
 [memory contract](memory-model.md#runtime-guards-and-coverage-limits).
 
 ## Vector extension (Q-110, v0.1.426)

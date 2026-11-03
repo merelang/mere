@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.692 — 2026-11-03
+
+_RISC-V: enforce ByteBuf and ListBuf ownership across logical threads._
+
+User ByteBufs and ListBufs carry ownership in their Vec representation when
+green threads are reachable. ByteBuf reads, including empty conversion and
+failed lookups, make foreign buffers read-only. Set and push reject writes
+before reading bounds or modifying storage, with ByteBuf-specific diagnostics.
+Constructors retain ownership through default-arena promotion and growth.
+
+ListBuf push and conversion require their owner. Conversion freezes even an
+empty builder; repeated owner conversions remain valid. A rejected foreign
+operation neither freezes nor shares an unfrozen builder. Push on an already
+frozen builder reports that state before ownership, matching C. Immutable byte
+and list snapshots remain readable by other threads. Thread-free programs keep
+the existing storage layout and omit ownership helpers.
+
 ## v0.1.691 — 2026-11-03
 
 _RISC-V: enforce Map ownership across logical threads._

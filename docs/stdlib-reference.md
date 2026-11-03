@@ -1470,7 +1470,7 @@ for the answer to come back on.
 
 RISC-V also guards Vecs in programs using green threads as of v0.1.689,
 including `par_map` callbacks. A foreign read permanently makes the Vec
-read-only; rejected writes preserve its contents. Other RISC-V buffers
+read-only; rejected writes preserve its contents. RISC-V StrBuf
 and OwnedVec handoff remain unguarded at runtime. See the
 [backend coverage limits](memory-model.md#runtime-guards-and-coverage-limits).
 
@@ -1479,6 +1479,12 @@ threads. Foreign reads freeze the Map; rejected writes preserve its contents.
 This includes empty Maps, failed lookups, absent-key deletion, clearing,
 recycling and compaction. `map_bytes` only measures arena capacity. Map
 ownership metadata is preserved when storage is replaced.
+
+As of v0.1.692, RISC-V guards ByteBuf reads and writes and both ListBuf
+operations. Foreign ByteBuf reads make it read-only. ListBuf conversion is an
+owner operation that freezes the builder; rejected foreign operations leave
+an unfrozen builder usable by its owner. Completed immutable snapshots may
+be read by other threads. StrBuf and OwnedVec handoff remain unguarded.
 
 As of v0.1.690, C marks foreign Vec reads through `show`, `to_json`,
 `bytes_of_vec`, `vec_iter`, `vec_fold` and `vec_to_owned`, including empty
