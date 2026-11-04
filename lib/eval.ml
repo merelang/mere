@@ -183,7 +183,7 @@ and strbuf = { sb : Buffer.t; mutable sb_owner : int }
    was already amortised. That asymptotic sat in the parity oracle, which is
    what bounds the input size a differential gate can afford: 200k pushes took
    74s interpreted and 0.01s compiled. *)
-and vecbuf = { mutable vc_data : value array; mutable vc_len : int; mutable vc_owner : int;
+and vecbuf = { mutable vc_data : value array; mutable vc_len : int; vc_owner : int Atomic.t;
                vc_owned : bool }
 and lbuf = { mutable lb_items : value list; mutable lb_frozen : bool; lb_region : int; lb_owner : int }
 
@@ -237,23 +237,28 @@ let read_mark (o : int) : int =
    away the ones its closure captures (owner -1 here; the C runtime's 0) and the
    next domain to use one takes it. Any other domain's use fails by name. *)
 let ov_released = -1
+let ov_release (a : vecbuf) = Atomic.set a.vc_owner ov_released
 let ov_use (op : string) (a : vecbuf) =
   let me = owner_now () in
-  let o = a.vc_owner in
+  let o = Atomic.get a.vc_owner in
   if o = me then ()
-  else if o = ov_released then a.vc_owner <- me
+  (* A separate load and store let two domains both acquire released storage. *)
+  else if o = ov_released && Atomic.compare_and_set a.vc_owner ov_released me then ()
   else raise (Eval_error (Loc.dummy, Printf.sprintf
     "%s: an OwnedVec belongs to one thread -- the one that made it, or the one spawn moved it into -- and another used it; move it into the thread by capturing it in the closure spawn is given" op))
-let read_vec (a : vecbuf) = let o = a.vc_owner in let o' = read_mark o in if o' <> o then a.vc_owner <- o'
+let rec read_vec (a : vecbuf) =
+  let o = Atomic.get a.vc_owner in
+  let shared = read_mark o in
+  if shared <> o && not (Atomic.compare_and_set a.vc_owner o shared) then read_vec a
 let read_map (m : map_state) = let o = m.m_owner in let o' = read_mark o in if o' <> o then m.m_owner <- o'
 let read_sb (b : strbuf) = let o = b.sb_owner in let o' = read_mark o in if o' <> o then b.sb_owner <- o'
 let read_bb (b : bytebuf) = let o = b.bb_owner in let o' = read_mark o in if o' <> o then b.bb_owner <- o'
 
 let vecbuf_of_array ?(owned = false) (a : value array) : vecbuf =
-  { vc_data = a; vc_len = Array.length a; vc_owner = owner_now (); vc_owned = owned }
+  { vc_data = a; vc_len = Array.length a; vc_owner = Atomic.make (owner_now ()); vc_owned = owned }
 
 let vecbuf_empty ?(owned = false) () : vecbuf =
-  { vc_data = [||]; vc_len = 0; vc_owner = owner_now (); vc_owned = owned }
+  { vc_data = [||]; vc_len = 0; vc_owner = Atomic.make (owner_now ()); vc_owned = owned }
 
 (* Q-106: which region is current, as an integer the interpreter can compare.
    0 is the program-lifetime region; every `region R { }` entry and every
@@ -1797,7 +1802,7 @@ let builtin_vec_push =
     match v with
     | V_vec arr ->
       V_builtin ("vec_push_p1", fun x ->
-        own "Vec" "vec_push" arr.vc_owner;
+        own "Vec" "vec_push" (Atomic.get arr.vc_owner);
         vecbuf_push arr x;
         V_unit)
     | _ -> failwith "vec_push: expected Vec")
@@ -1943,7 +1948,7 @@ let builtin_f64x2_store =
     | V_vec arr ->
       V_builtin ("f64x2_store_p1", fun idx ->
         V_builtin ("f64x2_store_p2", fun x ->
-          own "Vec" "f64x2_store" arr.vc_owner;
+          own "Vec" "f64x2_store" (Atomic.get arr.vc_owner);
           match idx with
           | V_int i ->
             f64x2_range "f64x2_store" arr i;
@@ -2316,7 +2321,7 @@ let builtin_vec_compact =
 let builtin_vec_recycle =
   V_builtin ("vec_recycle", fun v ->
     match v with
-    | V_vec arr -> own "Vec" "vec_recycle" arr.vc_owner; arr.vc_data <- [||]; arr.vc_len <- 0; V_unit
+    | V_vec arr -> own "Vec" "vec_recycle" (Atomic.get arr.vc_owner); arr.vc_data <- [||]; arr.vc_len <- 0; V_unit
     | _ -> failwith "vec_recycle: expected Vec")
 
 let builtin_map_delete =
@@ -2450,7 +2455,7 @@ let builtin_vec_set =
     | V_vec arr ->
       V_builtin ("vec_set_p1", fun idx ->
         V_builtin ("vec_set_p2", fun new_val ->
-          own "Vec" "vec_set" arr.vc_owner;
+          own "Vec" "vec_set" (Atomic.get arr.vc_owner);
           match idx with
           | V_int i ->
             if i < 0 || i >= arr.vc_len then
@@ -2469,7 +2474,7 @@ let builtin_vec_reverse =
   V_builtin ("vec_reverse", fun v ->
     match v with
     | V_vec arr ->
-      own "Vec" "vec_reverse" arr.vc_owner;
+      own "Vec" "vec_reverse" (Atomic.get arr.vc_owner);
       let n = arr.vc_len in
       for i = 0 to (n / 2) - 1 do
         let j = n - 1 - i in
@@ -2498,7 +2503,7 @@ let builtin_vec_sort =
     match v with
     | V_vec arr ->
       V_builtin ("vec_sort_p1", fun cmp ->
-        own "Vec" "vec_sort" arr.vc_owner;
+        own "Vec" "vec_sort" (Atomic.get arr.vc_owner);
         let compare_v a b =
           let inner = !apply_value_ref cmp a in
           match !apply_value_ref inner b with
@@ -4359,7 +4364,7 @@ let initial_env : env =
     (* Q-108: the interpreter is the oracle, so the "unchecked" names keep the check. *)
     ("__vec_get_unchecked", ref builtin_vec_get);
     ("__vec_owned", ref (V_builtin ("__vec_owned", fun v ->
-       match v with V_vec arr -> V_bool (arr.vc_owner = owner_now ()) | _ -> failwith "__vec_owned: expected Vec")));
+       match v with V_vec arr -> V_bool (Atomic.get arr.vc_owner = owner_now ()) | _ -> failwith "__vec_owned: expected Vec")));
     ("__vec_set_unchecked", ref builtin_vec_set);
     ("__bytes_get_unchecked", ref builtin_bytes_get);
     ("f64x2_splat", ref builtin_f64x2_splat);
@@ -5108,7 +5113,7 @@ let rec eval_in (env : env) (e : Ast.expr) =
           when List.assoc "spawn" env == List.assoc "spawn" initial_env ->
           List.iter (fun (n, _) ->
             match List.assoc_opt n env with
-            | Some { contents = V_vec a } -> a.vc_owner <- ov_released
+            | Some { contents = V_vec a } -> ov_release a
             | _ -> ()) (Ast.owned_vec_captures arg)
         | _ -> ());
        (* A builtin is handed no position -- it raises `Eval_error (Loc.dummy,

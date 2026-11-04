@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.700 — 2026-11-04
+
+_Interpreter: only one domain can claim a released OwnedVec._
+
+OwnedVec ownership is now an atomic cell. Claiming released storage uses a
+compare-and-set; the previous separate read and write let two domains both
+succeed. Inline spawn handoff publishes release atomically. Vec shares this
+runtime representation, so its owner reads and shared-bit updates also use
+atomics. Shared-bit marking retries a failed comparison instead of storing
+an old observation. The compiled backends' representations are unchanged.
+
+`scripts/ownedvec_claim_check.sh` links the actual interpreter runtime and
+races two domains through direct claiming, length, generic length, get,
+push, conversion, show and JSON formatting, with empty and full storage.
+It checks exactly one winner, the recorded owner, results and preserved
+contents over 68,000 rounds. Sixteen worker-first publication checks and
+ordinary Vec sharing are checked too. `--poison` forces two contenders
+through a deliberately split read/store reference operation in the test
+executable; the observer must reject the resulting double acquisition.
+
 ## v0.1.699 — 2026-11-04
 
 _C: a guarded match arm writes the rest of the match once. Wasm: a guard is never a tail call._

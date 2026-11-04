@@ -872,6 +872,10 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: python3 scripts/container_format_owner_check.py --poison
 
+      - name: ownedvec_claim (the interpreter gives released storage to one domain)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: opam exec -- sh scripts/ownedvec_claim_check.sh --poison
+
       # A saturated call of a curried inner function allocates no closures on
       # C, LLVM and Wasm (Q-142, v0.1.583): mandelbrot's inner loop was 104
       # B/iter on Wasm and 235 MB on LLVM before.

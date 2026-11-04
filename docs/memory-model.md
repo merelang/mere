@@ -447,7 +447,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.698)
+## 4. Implemented memory behavior (v0.1.700)
 
 ### Concurrency and sharing
 
@@ -665,6 +665,17 @@ The interpreter also distinguishes OwnedVec storage for generic `len`:
 it requires exclusive ownership and claims released storage, just as
 `owned_vec_len` does. An ordinary Vec, including the result of
 `owned_vec_to_vec`, keeps the freeze-on-foreign-read behavior.
+
+As of v0.1.700, the interpreter publishes OwnedVec release atomically and
+claims released storage with compare-and-set. Exactly one of two competing
+domains can become its owner. Vec and OwnedVec share an atomic owner cell;
+ordinary Vec reads mark the shared bit with a compare-and-set retry loop.
+The interpreter previously checked release and assigned the new owner as
+separate operations, allowing both contenders to succeed.
+[`ownedvec_claim_check.sh`](https://github.com/merelang/mere/blob/main/scripts/ownedvec_claim_check.sh)
+exercises the actual runtime helpers from two domains, including empty
+access, bounds failure after claiming, mutation, conversion and formatting.
+An unsafe reference control verifies detection of double acquisition.
 
 As of v0.1.698, the interpreter treats `show` and `to_json` as storage reads.
 Vec, Map, StrBuf and ByteBuf mark a foreign read before inspecting their
