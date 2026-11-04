@@ -14588,16 +14588,24 @@ let str_concat_helper =
       "sized:";
       "  %tot = extractvalue { i64, i1 } %mo, 0";
       "  %buf = call ptr @__lang_str_alloc(i64 %tot)";
+      (* v0.1.696: one copy, then the filled part doubles (a copy per count
+         was a call per byte for a one-byte s) *)
+      "  %slz = icmp eq i64 %sl, 0";
+      "  br i1 %slz, label %finish, label %first";
+      "first:";
+      "  call ptr @memcpy(ptr %buf, ptr %s, i64 %sl)";
       "  br label %loop";
       "loop:";
-      "  %i = phi i64 [ 0, %sized ], [ %inext, %body ]";
-      "  %done = icmp sge i64 %i, %n";
+      "  %f = phi i64 [ %sl, %first ], [ %fnext, %body ]";
+      "  %done = icmp uge i64 %f, %tot";
       "  br i1 %done, label %finish, label %body";
       "body:";
-      "  %off = mul i64 %i, %sl";
-      "  %bp  = getelementptr i8, ptr %buf, i64 %off";
-      "  call ptr @memcpy(ptr %bp, ptr %s, i64 %sl)";
-      "  %inext = add i64 %i, 1";
+      "  %left = sub i64 %tot, %f";
+      "  %short = icmp ult i64 %left, %f";
+      "  %cnt = select i1 %short, i64 %left, i64 %f";
+      "  %bp  = getelementptr i8, ptr %buf, i64 %f";
+      "  call ptr @memcpy(ptr %bp, ptr %buf, i64 %cnt)";
+      "  %fnext = add i64 %f, %cnt";
       "  br label %loop";
       "finish:";
       "  %tp = getelementptr i8, ptr %buf, i64 %tot";

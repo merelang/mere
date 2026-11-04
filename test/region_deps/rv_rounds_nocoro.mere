@@ -1,0 +1,25 @@
+// RISC-V: rv_rounds without the coroutine. A program that compacts a
+// container gets the layout a coroutine program has (v0.1.696): its arenas
+// are cut from the top of the heap, not from gp inside the region, so the
+// region's rollback takes the maps' cells and the exit frees their arenas.
+// Cut from gp, the cut raised the region's high-water mark and kept the
+// cells, their arenas with them, and the fourth round ran out of 16 MB.
+let rec rounds = fn (k: int) ->
+  if k == 0 then 0
+  else (
+    let n = region R {
+      let v = vec_new () in
+      let rec fill = fn (i: int) ->
+        if i == 0 then 0
+        else (let t = map_new () in
+              let _ = map_compact t in
+              let _ = map_set t "x" (str_repeat "w" (8000 + (i * 7919) % 1000)) in
+              let _ = map_compact t in
+              let _ = vec_push v t in
+              fill (i - 1)) in
+      let _ = fill 100 in
+      vec_len v
+    } in
+    rounds (k - 1) + n);
+let _ = print_int (rounds 20);
+print "done"

@@ -1283,11 +1283,22 @@ let stack_top () = !load_base + !ram_bytes - reserved_top
    switched away from, so a coroutine costs what its stack holds, not a fixed
    reservation. The heap stops at coro_co_lo. *)
 let coro_stack_bytes = ref 0                      (* --coro-stack; 0: a sixteenth of RAM *)
-let coro_part () = max 0x40000 (!ram_bytes / 16)
+(* v0.1.696: a program that compacts or recycles a container and makes no
+   coroutine runs with this layout too, for its arenas: they are cut from the
+   top of the heap down. Cut from gp, as before, one inside a region raised
+   the region's high-water mark, which kept everything the region had made so
+   far -- the cells that own the arenas among it, so the arenas stayed too,
+   and the next round of the loop cut again (four rounds of a hundred
+   compacted maps ran out of 16 MB that holds any one of them). No coroutine
+   runs, so there is no region for them, and the main stack -- bounded now,
+   where it used to meet the heap wherever that was -- is an eighth. *)
+let arena_layout = ref false
+let coro_part () = max 0x40000 (!ram_bytes / (if !arena_layout then 8 else 16))
 let coro_main_lo () = stack_top () - coro_part ()
 let coro_co_hi () = coro_main_lo ()
 let coro_co_lo () =
-  coro_co_hi () - (if !coro_stack_bytes > 0 then !coro_stack_bytes else coro_part ())
+  if !arena_layout then coro_co_hi ()
+  else coro_co_hi () - (if !coro_stack_bytes > 0 then !coro_stack_bytes else coro_part ())
 (* the trap trampoline's register save area (x1..x31) and the one word holding
    the registered handler closure. Both sit in the reserved region above the
    stack, so no program allocation can land on them. *)
@@ -8422,6 +8433,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   string_data := [];
   chr_tab_used := false;
   coro_mode := false;
+  arena_layout := false;
   divzero_used := false;
   lambdas := []; directs := []; Hashtbl.reset eta_builtin_of_label; cur_eta_builtin := None; direct_scope := []; Hashtbl.reset direct_caps;
   Hashtbl.reset adapters;
@@ -8508,7 +8520,11 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
   vec_owner_mode := Hashtbl.mem reachable "rvth_spawn" || Hashtbl.mem reachable "rvth_par_map";
   (* any program that can switch stacks: one that makes a coroutine, or one
      that switches or transfers (to the main stack, if nothing else) *)
-  coro_mode := Hashtbl.mem reachable "rvcoro_new_sized" || Hashtbl.mem reachable "__cswitch";
+  let coros = Hashtbl.mem reachable "rvcoro_new_sized" || Hashtbl.mem reachable "__cswitch" in
+  (* (MERE_RV_NO_ARENA_LAYOUT: the layout as it was, for the gate's poison) *)
+  arena_layout := not coros && Sys.getenv_opt "MERE_RV_NO_ARENA_LAYOUT" = None
+                  && List.exists (Hashtbl.mem reachable) ["map_compact"; "vec_compact"; "map_recycle"];
+  coro_mode := coros || !arena_layout;
   (* __rv_coro_boot calls it, and nothing in the source names it *)
   if !coro_mode then (visit "rvcoro_boot"; visit "rvcoro_release");
   (* v0.1.637: the bounds checks -- some in runtime routines every program has

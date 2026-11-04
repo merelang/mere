@@ -4,6 +4,37 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.696 — 2026-11-04
+
+_RISC-V: a program that compacts a container cuts its arenas from the top of the heap._
+
+Without coroutines, an arena block was cut from `gp`. Cut inside a region
+block, it raised the block's high-water mark, which kept every cell the block
+had made so far -- the containers that own the arenas among them -- so the
+v0.1.694 sweep found nothing to free and the next round cut again: four
+rounds of 100 compacted maps ran out of a 16 MB machine that holds any one.
+A program that reaches `map_compact`, `vec_compact` or `map_recycle` now gets
+the layout a coroutine program has, whether or not it makes a coroutine:
+arena blocks come from the top of the heap down, and the rollback takes the
+cells and the exit frees their arenas. With no coroutine possible there is
+no coroutine region, and the main stack is an eighth of RAM (at least 256 KB)
+instead of meeting the heap wherever that is; a recursion past it stops with
+"stack overflow (recursion too deep)", as on a coroutine program.
+
+`scripts/rv_arena_sweep_check.sh` runs `test/region_deps/rv_rounds_nocoro`
+too (the twenty rounds, no coroutine); `--poison` also compiles it with
+`MERE_RV_NO_ARENA_LAYOUT=1` (the old layout) and the run must run out of
+memory.
+
+_C, LLVM: `str_repeat` copies once and doubles._
+
+It copied the string once per count: `str_repeat "x" 100000` was 100,000
+calls to `memcpy` of one byte. mere-ruby's `"x" * 100_000` took 218 µs to
+ruby's 5, and CRuby's `test_initialize_memory_leak` (100,000 of them) ran past
+its 10 s timeout; it passes in 4.6 s. One copy now, then the filled part is
+copied onto the rest, doubling. Wasm (a byte loop with no call) and RISC-V
+(a StrBuf push per count) are as they were.
+
 ## v0.1.695 — 2026-11-04
 
 _RISC-V: enforce exclusive OwnedVec access and spawn handoff._

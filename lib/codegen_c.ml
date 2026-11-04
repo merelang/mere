@@ -10046,7 +10046,11 @@ let str_concat_helper =
       "  if (sl && (size_t)n > ((size_t)-1 - 1) / sl) __lang_fail_impl(\"str_repeat: result too large\");";
       "  size_t total = sl * (size_t)n;";
       "  char* buf = __lang_str_alloc(__lang_current_region, total);";
-      "  for (int64_t i = 0; i < n; i++) memcpy(buf + (size_t)i * sl, s, sl);";
+      (* v0.1.696: one copy, then the filled part doubles. A copy per count
+         was a call per byte for `"x" * 100_000` -- mere-ruby's String#* ran
+         40 times slower than ruby's *)
+      "  if (sl) { memcpy(buf, s, sl);";
+      "    for (size_t f = sl; f < total; f *= 2) memcpy(buf + f, buf, f < total - f ? f : total - f); }";
       "  buf[total] = '\\0';";
       "  return buf;";
       "}";

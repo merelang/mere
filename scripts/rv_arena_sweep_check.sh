@@ -10,17 +10,22 @@
 # frees the arenas made since the block was entered whose container lies in the
 # range it rolled back. On a coroutine's chain of blocks this is done only when
 # that range is inside one block (a rollback that went back along the chain
-# keeps everything, the arenas with it). Without coroutines an arena block is
-# cut from gp and raises the block's high-water mark, which keeps the
-# containers too; nothing changes there.
+# keeps everything, the arenas with it).
+#
+# v0.1.696. Without coroutines an arena block was cut from gp and raised the
+# block's high-water mark, which kept the containers -- and so their arenas --
+# too. A program that compacts or recycles a container now gets the layout a
+# coroutine program has, and its arenas are cut from the top of the heap.
 #
 # WHAT IS CHECKED: test/region_deps/rv_rounds makes a hundred compacted maps of
 # 8 KB inside a region and leaves it, twenty times, with a coroutine alive, in
-# a 16 MB machine. It must print 2000 and "done". Leaving the arenas behind, it
-# runs out of memory on the fourth round or so.
+# a 16 MB machine; rv_rounds_nocoro does the same with no coroutine. Each must
+# print 2000 and "done". Leaving the arenas behind, they run out of memory on
+# the fourth round or so.
 #
-# --poison: compiled with MERE_RV_NO_ARENA_SWEEP=1 (the exit does not sweep),
-# the run must run out of memory.
+# --poison: rv_rounds compiled with MERE_RV_NO_ARENA_SWEEP=1 (the exit does not
+# sweep) and rv_rounds_nocoro with MERE_RV_NO_ARENA_LAYOUT=1 (arenas cut from
+# gp) must each run out of memory.
 #
 # Needs a memu checkout: MEMU=<memu>. Without one there is nothing to run the
 # program on: exit 2.
@@ -39,23 +44,30 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
   && "$CC" -O2 -w "$T/rvrun64.c" -o "$T/rvrun64" -lm -lpthread 2> "$T/err" \
   || { echo "rv_arena_sweep: FAIL the RV64 emulator did not build: $(head -1 "$T/err")"; exit 1; }
 
-# $1 = "" or "poison" -> the run's output, one line
+# $1 = the program (under test/region_deps), $2 = an environment setting or ""
+# -> the run's output, one line
 run() {
-  if [ "$1" = poison ]; then
-    MERE_RV_NO_ARENA_SWEEP=1 "$MERE" -rv64 --ram 16 "$ROOT/test/region_deps/rv_rounds.mere" > "$T/prog.bin" 2> "$T/err"
-  else
-    "$MERE" -rv64 --ram 16 "$ROOT/test/region_deps/rv_rounds.mere" > "$T/prog.bin" 2> "$T/err"
-  fi || { echo "compile: $(head -1 "$T/err")"; return 0; }
+  env $2 "$MERE" -rv64 --ram 16 "$ROOT/test/region_deps/$1.mere" > "$T/prog.bin" 2> "$T/err" \
+    || { echo "compile: $(head -1 "$T/err")"; return 0; }
   ( cd "$T" && perl -e 'alarm 300; exec @ARGV' ./rvrun64 16 2>&1 ) | grep -a -v '^rvrun' | tr '\n' ' '
 }
 
 if [ "${1:-}" = --poison ]; then
-  out=$(run poison)
-  case "$out" in
-    *"out of memory"*) echo "rv_arena_sweep: poison ok -- with the arenas left behind: $out"; exit 0 ;;
-  esac
-  echo "rv_arena_sweep: POISON did not run out of memory with the arenas left behind: $out"; exit 1
+  bad=0
+  for case in "rv_rounds MERE_RV_NO_ARENA_SWEEP=1" "rv_rounds_nocoro MERE_RV_NO_ARENA_LAYOUT=1"; do
+    set -- $case
+    out=$(run "$1" "$2")
+    case "$out" in
+      *"out of memory"*) echo "rv_arena_sweep: poison ok -- $1 with $2: $out" ;;
+      *) echo "rv_arena_sweep: POISON $1 with $2 did not run out of memory: $out"; bad=1 ;;
+    esac
+  done
+  exit $bad
 fi
-out=$(run "")
-if [ "$out" = "2000 done " ]; then echo "rv_arena_sweep: ok -- twenty rounds of 100 compacted maps fit in 16 MB"; exit 0; fi
-echo "rv_arena_sweep: FAIL -- expected \"2000 done\": $out"; exit 1
+bad=0
+for p in rv_rounds rv_rounds_nocoro; do
+  out=$(run "$p" "")
+  if [ "$out" = "2000 done " ]; then echo "rv_arena_sweep: ok -- $p: twenty rounds of 100 compacted maps fit in 16 MB"
+  else echo "rv_arena_sweep: FAIL -- $p: expected \"2000 done\": $out"; bad=1; fi
+done
+exit $bad

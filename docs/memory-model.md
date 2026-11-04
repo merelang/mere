@@ -238,9 +238,14 @@ as of v0.1.31 it is the implemented semantics on the C backend:
   walk stops at the first arena older than the block. On a coroutine's chain
   of heap blocks this is done only when that range is inside one block; a
   rollback that crossed blocks keeps the arenas, as it keeps everything else.
-  Without coroutines an arena block is cut from `gp` and raises the block's
-  high-water mark, which keeps the containers' cells as well, so there the
-  arenas stay. Guarded by `scripts/rv_arena_sweep_check.sh`.
+  Without coroutines an arena block was cut from `gp` and raised the block's
+  high-water mark, which kept the containers' cells as well, so there the
+  arenas stayed. Since v0.1.696 a program that compacts or recycles a
+  container gets the coroutine layout whether or not it makes a coroutine:
+  arena blocks come from the top of the heap down, and the main stack is
+  bounded (an eighth of RAM when no coroutine can run, with no coroutine
+  region; past it, "stack overflow (recursion too deep)"). Guarded by
+  `scripts/rv_arena_sweep_check.sh`.
   `scripts/region_uaf_check.sh` runs each of these after forcing the
   block's memory to be reused.
 - **The block's result is copied out** into the enclosing region
