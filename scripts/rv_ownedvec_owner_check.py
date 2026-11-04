@@ -7,8 +7,50 @@ from pathlib import Path
 from rv_builder_owner_check import PREFIX, run_suite
 
 
-def fixtures():
+def handoff_fixtures():
     cases = {}
+    body = 'channel_send results (try_or_msg (fn () -> let _ = owned_vec_len g in "allowed") (fn msg -> msg))'
+    forms = {
+        "inline": f"let h = spawn (fn () -> {body});",
+        "generic_inline": f"let h = spawn (fn () -> {body.replace('owned_vec_len g', 'len g')});",
+        "parameter": f"let launch = fn (f: unit -> unit) -> spawn f; let h = launch (fn () -> {body});",
+        "named": f"let jobs = channel_new (); let _ = channel_send jobs (fn () -> {body}); let task = channel_recv jobs; let h = spawn task;",
+        "returned": f"let keep = fn (f: unit -> unit) -> f; let h = spawn (keep (fn () -> {body}));",
+        "channel": f"let jobs = channel_new (); let _ = channel_send jobs (fn () -> {body}); let h = spawn (channel_recv jobs);",
+        "annotated": f"let h = spawn ((fn () -> {body}): unit -> unit);",
+        "builtin_alias": f"let start = spawn; let h = start (fn () -> {body});",
+        "rebound_builtin": f"let spawn = spawn; let h = spawn (fn () -> {body});",
+        "hidden_capture": 'let jobs = channel_new (); let _ = channel_send jobs (fn () -> owned_vec_len g); let read = channel_recv jobs; let h = spawn (fn () -> channel_send results (try_or_msg (fn () -> let _ = read () in "allowed") (fn msg -> msg)));',
+    }
+    for ctor, make in {"new": "owned_vec_new ()", "copy": "let v = vec_new () in vec_to_owned v"}.items():
+        for form, launch in forms.items():
+            cases[f"handoff_{ctor}_{form}"] = f"""let mk = fn () -> let g = {make} in let _ = owned_vec_push g 1 in g;
+let g = mk ();
+let parent = fn () -> let _ = owned_vec_push g 2 in owned_vec_len g;
+let results = channel_new ();
+{launch}
+let _ = join h;
+let _ = print (channel_recv results);
+print (try_or (fn () -> str_of_int (parent ())) "owner-blocked")
+"""
+    # Conversion produces an ordinary Vec: a foreign generic len must read
+    # and freeze it, rather than apply OwnedVec's exclusive access rule.
+    for ctor, make in {"new": "vec_new ()", "converted": "let g = owned_vec_new () in let _ = owned_vec_push g 9 in owned_vec_to_vec g"}.items():
+        for seed in ("empty", "full"):
+            initial = "()" if seed == "empty" else "vec_push v 1"
+            cases[f"generic_vec_{ctor}_{seed}"] = PREFIX + f"""let mk = fn () -> let v = {make} in let _ = vec_recycle v in let _ = (if false then vec_push v 0 else ()) in let _ = {initial} in v;
+let v = mk ();
+let results = channel_new ();
+let h = launch (fn () -> channel_send results (len v));
+let _ = join h;
+let _ = print_int (channel_recv results);
+print (try_or (fn () -> let _ = vec_push v 2 in "allowed") "shared")
+"""
+    return cases
+
+
+def fixtures():
+    cases = handoff_fixtures()
     ops = {"push": "owned_vec_push g 9", "get": "owned_vec_get g 0",
            "get_negative": "owned_vec_get g (-1)", "get_past": "owned_vec_get g 999",
            "len": "owned_vec_len g", "generic_len": "len g", "to_vec": "owned_vec_to_vec g"}
@@ -202,7 +244,7 @@ def main():
     parser.add_argument("--poison", action="store_true")
     args = parser.parse_args()
     cases = fixtures()
-    assert len(cases) == 69, "fixture catalogue changed"
+    assert len(cases) == 93, "fixture catalogue changed"
     def poison_check(case, actual, expected):
         if case == "native_move":
             return actual[0] != 0 and b"an OwnedVec belongs to one thread" in actual[1] + actual[2]

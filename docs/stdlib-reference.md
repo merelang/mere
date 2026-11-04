@@ -1444,12 +1444,15 @@ one thread and ask it over a `Channel`.
 On the native backends, a program that never spawns pays one load of a global
 per read and per write; one that does pays a thread-id comparison.
 
-**`OwnedVec`** on the interpreter, C and LLVM is moved, not shared: the closure
-given to `spawn` takes the
-`OwnedVec`s it captures with it, and they belong to the new thread. Any other
-thread's use fails (`owned_vec_push: an OwnedVec belongs to one thread ...`) --
-one reached through a closure handed to a library that spawns it, say, where
-nothing moved it.
+**`OwnedVec`** has exclusive ownership. A closure literal passed directly to
+the unshadowed builtin `spawn` releases its direct OwnedVec bindings, and
+their first user claims them. Opaque callback values and aliased or rebound
+spawn builtins do not release hidden captures. Another thread's use fails
+(`owned_vec_push: an OwnedVec belongs to one thread ...`), including through
+a callback handed to a library that spawns it without moving its storage.
+As of v0.1.697, the interpreter follows this same handoff rule as C, LLVM,
+Wasm and RISC-V. Its generic `len` also enforces OwnedVec ownership, including
+empty storage; converting to Vec restores ordinary Vec sharing behavior.
 
 **`sync type`** vouches that a type is safe to share, and is refused when the
 type holds a builtin container (`Map`, `Vec`, `StrBuf`, `ByteBuf`, `ListBuf`,

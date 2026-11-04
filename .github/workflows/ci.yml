@@ -1557,7 +1557,7 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_ownedvec_owner_check.py --poison
 
-      - name: ownedvec_conversion (exclusive conversion on interpreter, C, LLVM and Wasm)
+      - name: ownedvec_conversion (access, conversion and spawn handoff on interpreter, C, LLVM and Wasm)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: python3 scripts/ownedvec_conversion_check.py --poison
 

@@ -183,7 +183,8 @@ and strbuf = { sb : Buffer.t; mutable sb_owner : int }
    was already amortised. That asymptotic sat in the parity oracle, which is
    what bounds the input size a differential gate can afford: 200k pushes took
    74s interpreted and 0.01s compiled. *)
-and vecbuf = { mutable vc_data : value array; mutable vc_len : int; mutable vc_owner : int }
+and vecbuf = { mutable vc_data : value array; mutable vc_len : int; mutable vc_owner : int;
+               vc_owned : bool }
 and lbuf = { mutable lb_items : value list; mutable lb_frozen : bool; lb_region : int; lb_owner : int }
 
 and env = (string * value ref) list
@@ -248,10 +249,11 @@ let read_map (m : map_state) = let o = m.m_owner in let o' = read_mark o in if o
 let read_sb (b : strbuf) = let o = b.sb_owner in let o' = read_mark o in if o' <> o then b.sb_owner <- o'
 let read_bb (b : bytebuf) = let o = b.bb_owner in let o' = read_mark o in if o' <> o then b.bb_owner <- o'
 
-let vecbuf_of_array (a : value array) : vecbuf =
-  { vc_data = a; vc_len = Array.length a; vc_owner = owner_now () }
+let vecbuf_of_array ?(owned = false) (a : value array) : vecbuf =
+  { vc_data = a; vc_len = Array.length a; vc_owner = owner_now (); vc_owned = owned }
 
-let vecbuf_empty () : vecbuf = { vc_data = [||]; vc_len = 0; vc_owner = owner_now () }
+let vecbuf_empty ?(owned = false) () : vecbuf =
+  { vc_data = [||]; vc_len = 0; vc_owner = owner_now (); vc_owned = owned }
 
 (* Q-106: which region is current, as an integer the interpreter can compare.
    0 is the program-lifetime region; every `region R { }` entry and every
@@ -1751,7 +1753,9 @@ let rec vec_len_via_constr v =
 let builtin_len =
   V_builtin ("len", fun v ->
     match v with
-    | V_vec arr -> read_vec arr; V_int arr.vc_len
+    | V_vec arr ->
+      if arr.vc_owned then ov_use "owned_vec_len" arr else read_vec arr;
+      V_int arr.vc_len
     | V_lb b -> V_int (List.length b.lb_items)
     | V_strbuf ({ sb = buf; _ } as b) -> read_sb b; V_int (Buffer.length buf)
     | V_map m -> read_map m; V_int (Hashtbl.length m.m_tbl)
@@ -2046,14 +2050,13 @@ let builtin_vec_len =
    apply_value_ref, but is placed together as part of the Phase 12.9
    group. *)
 
-(* OwnedVec[T] (Phase 12.5) — the runtime shares V_vec. Only the type
-   system treats it as a separate type. The contrast with `Vec[R, T]`
-   is expressed by the fact that OwnedVec is registered as a Drop type
-   and so cannot live in a region. *)
+(* OwnedVec[T] shares V_vec's storage. Its runtime tag lets generic len
+   enforce exclusive ownership instead of Vec's freeze-on-foreign-read
+   rule, including when len is called through a first-class function. *)
 let builtin_owned_vec_new =
   V_builtin ("owned_vec_new", fun v ->
     match v with
-    | V_unit -> V_vec (vecbuf_empty ())
+    | V_unit -> V_vec (vecbuf_empty ~owned:true ())
     | _ -> failwith "owned_vec_new: expected unit")
 
 let builtin_owned_vec_push =
@@ -2609,7 +2612,7 @@ let builtin_vec_to_owned =
     | V_vec arr ->
       (* Deep copy: the underlying mutable array is duplicated so the
          OwnedVec result is independent of the source Vec's lifetime. *)
-      V_vec (vecbuf_of_array (Array.copy (vecbuf_live arr)))
+      V_vec (vecbuf_of_array ~owned:true (Array.copy (vecbuf_live arr)))
     | _ -> failwith "vec_to_owned: expected Vec")
 
 (* Phase 12.12: the reverse direction OwnedVec[T] -> Vec[R, T]. The
@@ -3243,15 +3246,6 @@ let thr_wake (id : int) =
 
 let builtin_spawn =
   V_builtin ("spawn", fun clos ->
-    (* v0.1.582: the OwnedVecs the closure captures are given away *)
-    (match clos with
-     | V_closure (param, body, cenv) ->
-       List.iter (fun (n, _) ->
-         if n <> param then
-           match List.assoc_opt n cenv with
-           | Some { contents = V_vec a } -> a.vc_owner <- ov_released
-           | _ -> ()) (Ast.owned_vec_captures body)
-     | _ -> ());
     let n = thr_guard (fun () -> incr thr_seq; !thr_seq) in
     let label = Printf.sprintf "thread %d" n in
     thr_install_hook ();
@@ -5095,6 +5089,18 @@ let rec eval_in (env : env) (e : Ast.expr) =
        r
      | V_builtin (_, fn) ->
        let v = eval_in env arg in
+       (* Match compiled spawn: only a literal closure at an unshadowed
+          builtin call releases its direct OwnedVec captures. Inspecting a
+          runtime closure here would also move hidden captures of spawn f.
+          Binding identity distinguishes the builtin from a rebound alias. *)
+       (match f.Ast.node, arg.Ast.node with
+        | Ast.Var "spawn", Ast.Fun _
+          when List.assoc "spawn" env == List.assoc "spawn" initial_env ->
+          List.iter (fun (n, _) ->
+            match List.assoc_opt n env with
+            | Some { contents = V_vec a } -> a.vc_owner <- ov_released
+            | _ -> ()) (Ast.owned_vec_captures arg)
+        | _ -> ());
        (* A builtin is handed no position -- it raises `Eval_error (Loc.dummy,
           ...)` -- so the application node lends it one on the way past. Only
           when it has none: a builtin that called back into user code (vec_sort's

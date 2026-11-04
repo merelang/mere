@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.697 — 2026-11-04
+
+_Interpreter: match compiled OwnedVec handoff and generic length checks._
+
+Only a closure literal passed directly to the unshadowed builtin `spawn`
+releases its direct OwnedVec captures. The interpreter previously inspected
+every runtime callback body, so a callback passed through a function parameter,
+returned from a call or received over a channel could take ownership that the
+compiled backends kept in the parent. Aliased and rebound spawn builtins now
+also retain ownership, matching C, LLVM, Wasm and RISC-V.
+
+The interpreter records whether Vec storage is owned. Generic `len` now
+requires exclusive ownership for an OwnedVec, including empty storage and
+first-use claiming after an inline handoff. It previously used an ordinary
+Vec read, allowing the foreign read and freezing the owner's storage.
+Conversion back to Vec restores the ordinary freeze-on-foreign-read rule.
+
+The ownership gates compare 93 fixtures on RV32/RV64 against C. A 59-fixture
+subset also compares the interpreter, C, LLVM and Wasm, with independent
+expectations for handoff and ordinary Vec sharing and controls removing
+native conversion guards.
+
 ## v0.1.696 — 2026-11-04
 
 _RISC-V: a program that compacts a container cuts its arenas from the top of the heap._
