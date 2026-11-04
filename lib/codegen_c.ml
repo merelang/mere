@@ -952,11 +952,21 @@ let app_head_user_bound_c (x : Ast.expr) : bool =
   | Ast.Var n -> user_shadows n
   | _ -> false
 
+(* v0.1.701: an `fn2` only when the second stage's body is not itself a
+   `fn`. The two-argument entry writes that body out again, and when it is a
+   further lambda that lambda is emitted once from each entry -- every stage
+   doubled the stage below it, a curried lambda of n parameters carried its
+   body F(n) times (15 at n = 7; mere-ruby's LLVM IR held 14 copies of a
+   5.6 MB body). A closure without `fn2` takes the two-step path its callers
+   already fall back to, so only the saved intermediate closure is lost. *)
+let fn2_inner_ok (inner : Ast.expr) : bool =
+  match inner.Ast.node with Ast.Fun _ -> false | _ -> true
+
 (* Does this anonymous closure get an `fn2`? The construction site has to
    answer the same question as the drain that emits it, so both ask here. *)
 let anon_has_fn2 (return_ty : Ast.ty) (body : Ast.expr) : bool =
   match body.Ast.node, Ast.walk return_ty with
-  | Ast.Fun _, Ast.TyArrow _ -> true
+  | Ast.Fun (_, _, inner), Ast.TyArrow _ -> fn2_inner_ok inner
   | _ -> false
 
 (* Fresh names for anonymous closures + their env structs. *)
@@ -7075,7 +7085,7 @@ let emit_closure_adapter (ce : closure_emission) : string =
    twice in the C. *)
 let emit_closure_adapter_fn2 (ce : closure_emission) : (string * string) option =
   match ce.ce_body.Ast.node, Ast.walk ce.ce_return_ty with
-  | Ast.Fun (p2, _, inner), Ast.TyArrow (q, s2) ->
+  | Ast.Fun (p2, _, inner), Ast.TyArrow (q, s2) when fn2_inner_ok inner ->
     let q = Ast.walk q and s2 = Ast.walk s2 in
     set_inner_lifts_for_host ce.ce_host;
     let env_subst =

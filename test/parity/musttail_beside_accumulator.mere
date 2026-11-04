@@ -1,0 +1,28 @@
+// One function, two kinds of recursion: a tail call to a sibling, and a
+// self-call whose result is added to before it returns. LLVM's tail-recursion
+// pass turns the second into an accumulator loop and adds the accumulator after
+// every return -- the one behind the `musttail` included -- and the backend
+// then refuses to compile the program (v0.1.701: such self-calls are emitted
+// `notail` in a function that holds a musttail).
+type Node = Leaf of int | Pair of Node * Node | Wrap of Node | Many of Node list;
+
+let rec count = fn (n: Node) -> fn (deep: bool) ->
+  match n with
+  | Pair (a, b) -> (if deep then 1 else 0) + count a deep + count b deep
+  | Wrap inner -> count_all (Cons (inner, Nil)) deep
+  | Many xs -> count_all xs deep
+  | Leaf k -> if deep && k > 1 then 1 else 0
+and count_all = fn (xs: Node list) -> fn (deep: bool) ->
+  match xs with
+  | Nil -> 0
+  | Cons (x, rest) -> count x deep + count_all rest deep;
+
+let rec build = fn (d: int) ->
+  if d == 0 then Leaf d
+  else if d % 3 == 0 then Wrap (build (d - 1))
+  else if d % 3 == 1 then Pair (build (d - 1), Leaf d)
+  else Many (Cons (build (d - 1), Cons (Leaf 2, Nil)));
+
+let t = build 40;
+let _ = print (str_of_int (count t true));
+print (str_of_int (count t false))

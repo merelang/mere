@@ -937,6 +937,11 @@ let fresh_reg () =
   Printf.sprintf "%%t%d" n
 
 let label_counter = ref 0
+(* v0.1.701: the second stage of an `fn2` must not be another `fn`; the
+   reason is beside Codegen_c.fn2_inner_ok. *)
+let fn2_inner_ok (inner : Ast.expr) : bool =
+  match inner.Ast.node with Ast.Fun _ -> false | _ -> true
+
 let fresh_label base =
   let n = !label_counter in
   incr label_counter;
@@ -8529,7 +8534,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        is written once and read twice rather than restated. *)
     let has_fn2 =
       match fn_body.Ast.node, Ast.walk return_ty with
-      | Ast.Fun (_, _, _), Ast.TyArrow (t2, t3) ->
+      | Ast.Fun (_, _, inner), Ast.TyArrow (t2, t3) when fn2_inner_ok inner ->
         ty_is_concrete (Ast.walk param_ty)
         && ty_is_concrete (Ast.walk t2) && ty_is_concrete (Ast.walk t3)
       | _ -> false
@@ -9395,10 +9400,12 @@ and emit_user_app ?(tail = false) (env : env) (e : Ast.expr) : string =
    `fn`, that work has to happen between the two arguments, and an entry taking
    both at once cannot express it. Such a lambda gets no fn2 and keeps the
    two-step path. *)
+(* v0.1.701: no `fn2` when the second stage's body is another `fn` -- see
+   Codegen_c.fn2_inner_ok. The construction site asks the same. *)
 let emit_anon_adapter_fn2 (ce : closure_emission) : string option =
   match ce.ce_body.Ast.node, Ast.walk ce.ce_return_ty with
   | Ast.Fun (p2, _, body2), Ast.TyArrow (t2, t3)
-    when ty_is_concrete (Ast.walk ce.ce_param_ty)
+    when fn2_inner_ok body2 && ty_is_concrete (Ast.walk ce.ce_param_ty)
          && ty_is_concrete (Ast.walk t2) && ty_is_concrete (Ast.walk t3) ->
     let saved_instrs = !instrs in
     let saved_reg = !reg_counter and saved_lbl = !label_counter in
@@ -9756,6 +9763,39 @@ let emit_closure_adapter (f : fn_decl) : string =
 
 (* Emit a top-level fn definition. Each fn gets fresh register/label
    counters so the SSA names don't collide across functions. *)
+(* v0.1.701: the C backend's curried_body_via_direct (v0.1.592), here too.
+   The curried form of a function that has an uncurried twin calls the twin:
+   its innermost stage is the saturated call `f p1 .. pN`, which direct_spine
+   sends to `@mu_f__direct`. Without it every stage of the chain carried the
+   body again -- mere-ruby's `invoke_val_c0` (seven parameters, 5.8 MB of IR)
+   had three copies after v0.1.701's fn2 change and fifteen before it. Only
+   where no parameter is named like the function; direct_fns_llvm already
+   excludes region parameters and inner lifts. *)
+let curried_body_via_direct_llvm (f : fn_decl) : Ast.expr =
+  let src = unmu f.name in
+  match Hashtbl.find_opt direct_fns_llvm f.name with
+  | Some info
+    when List.length info.dl_params >= 2
+         && not (List.mem_assoc src info.dl_params) ->
+    let mk ty node = { Ast.loc = f.body.Ast.loc; ty = Some ty; node } in
+    let rec arrow = function
+      | [] -> info.dl_ret
+      | (_, t) :: rest -> Ast.TyArrow (t, arrow rest) in
+    let call =
+      let rec apply head rest =
+        match rest with
+        | [] -> head
+        | (p, t) :: more -> apply (mk (arrow more) (Ast.App (head, mk t (Ast.Var p)))) more in
+      apply (mk (arrow info.dl_params) (Ast.Var src)) info.dl_params in
+    let rec rebuild (e : Ast.expr) k =
+      if k = 0 then Some call
+      else match e.Ast.node with
+        | Ast.Fun (p, t, inner) ->
+          Option.map (fun b -> { e with Ast.node = Ast.Fun (p, t, b) }) (rebuild inner (k - 1))
+        | _ -> None in
+    (match rebuild f.body (List.length info.dl_params - 1) with Some b -> b | None -> f.body)
+  | _ -> f.body
+
 let emit_fn_def (f : fn_decl) : string =
   reg_counter := 0;
   label_counter := 0;
@@ -9795,7 +9835,7 @@ let emit_fn_def (f : fn_decl) : string =
   current_region_params_llvm := rps;
   let rv =
     Fun.protect ~finally:(fun () -> current_region_params_llvm := saved_rps)
-      (fun () -> emit_expr env f.body) in
+      (fun () -> emit_expr env (curried_body_via_direct_llvm f)) in
   if !llvm_returned then llvm_returned := false
   else emit_instr (Printf.sprintf "  ret %s %s" (llvm_ty_of f.return_ty) rv);
   debug_loc_suffix := saved_suffix;
@@ -19633,5 +19673,47 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     | Some nm when Hashtbl.mem declared_names nm -> false
     | Some nm -> Hashtbl.add declared_names nm (); true
     | None -> true in
-  String.concat "\n" parts
-  |> String.split_on_char '\n' |> List.filter keep |> List.map vector_align |> String.concat "\n"
+  (* v0.1.701: a function that holds a `musttail` call must not let LLVM turn
+     its other self-calls into an accumulator loop. TailRecursionElimination
+     rewrites `x = call @f(..); y = add x, k; ret y` into a loop that adds `k`
+     on the way out -- and adds it after every `ret` in the function, the ones
+     right behind a `musttail` included, which the backend then refuses
+     ("failed to perform tail call elimination on a call site marked musttail";
+     mere-ruby's rxp_count_rep has both shapes, and neither -O1 nor -O2 would
+     link it). `notail` on those self-calls keeps TRE off them, and only in
+     functions that carry a musttail: elsewhere the accumulator loop is kept. *)
+  let lines = String.split_on_char '\n' (String.concat "\n" parts) in
+  let fn_name line =
+    if String.length line > 7 && String.sub line 0 7 = "define " then
+      (match String.index_opt line '@' with
+       | Some i ->
+         let j = ref (i + 1) in
+         while !j < String.length line && line.[!j] <> '(' do incr j done;
+         Some (String.sub line i (!j - i))
+       | None -> None)
+    else None in
+  let with_musttail = Hashtbl.create 64 in
+  ignore (List.fold_left (fun cur line ->
+      match fn_name line with
+      | Some n -> Some n
+      | None ->
+        (match cur with
+         | Some n when has "musttail call " line -> Hashtbl.replace with_musttail n ()
+         | _ -> ());
+        if line = "}" then None else cur) None lines);
+  let notail_self cur line =
+    match cur with
+    | Some n when Hashtbl.mem with_musttail n && has (" = call ") line && has (n ^ "(") line ->
+      (match String.index_opt line '=' with
+       | Some i when String.length line > i + 7 && String.sub line i 7 = "= call " ->
+         String.sub line 0 i ^ "= notail call " ^ String.sub line (i + 7) (String.length line - i - 7)
+       | _ -> line)
+    | _ -> line in
+  let lines =
+    List.rev (snd (List.fold_left (fun (cur, acc) line ->
+        match fn_name line with
+        | Some n -> (Some n, line :: acc)
+        | None ->
+          let line' = notail_self cur line in
+          ((if line = "}" then None else cur), line' :: acc)) (None, []) lines)) in
+  lines |> List.filter keep |> List.map vector_align |> String.concat "\n"

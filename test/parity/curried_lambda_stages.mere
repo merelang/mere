@@ -1,0 +1,43 @@
+// A curried lambda of many parameters, applied all at once, two at a time,
+// one at a time, and partially. Only a lambda whose second stage returns a
+// plain value carries the two-argument entry: one whose second stage is
+// another `fn` used to write that `fn` out from both entries, so each stage
+// doubled the stages below it (v0.1.701). Every way of applying it must
+// still give the same answer, in the same order of effects.
+let trace = vec_new ();
+let note = fn (k: int) -> vec_push trace k;
+
+let make = fn (base: int) ->
+  fn (a: int) -> fn (b: int) -> fn (c: int) -> fn (d: int) -> fn (e: int) -> fn (f: int) ->
+    let _ = note (a + b + c + d + e + f) in
+    base * 1000000 + a * 100000 + b * 10000 + c * 1000 + d * 100 + e * 10 + f;
+
+let seven = make 9;
+let p2 = seven 1 2;
+let p4 = p2 3 4;
+let p5 = p4 5;
+
+// work between the stages: no fast entry may skip it
+let staged = fn (a: int) ->
+  let _ = note (100 + a) in
+  fn (b: int) ->
+    let _ = note (200 + b) in
+    fn (c: int) -> a * 100 + b * 10 + c;
+
+let vec_from = fn (xs: int list) ->
+  let v = vec_new () in
+  let _ = list_iter xs (fn (x: int) -> vec_push v x) in v;
+
+let pair = fn (a: int) -> fn (b: int) -> a * 10 + b;
+let triple = fn (a: int) -> fn (b: int) -> fn (c: int) -> a * 100 + b * 10 + c;
+
+let _ = print (str_of_int (seven 1 2 3 4 5 6));
+let _ = print (str_of_int (p5 6));
+let _ = print (str_of_int (p4 7 8));
+let _ = print (str_of_int (vec_fold (vec_from [1, 2, 3]) 0 pair));
+let _ = print (str_of_int ((triple 1) 2 3));
+let _ = print (str_of_int (vec_fold (vec_from [4, 5]) 0 (fn (acc: int) -> fn (x: int) -> triple acc x 1)));
+let s2 = staged 1;
+let _ = print (str_of_int (s2 2 3));
+let _ = print (str_of_int (staged 4 5 6));
+print (str_of_int (vec_len trace) ++ ":" ++ str_of_int (vec_get trace 0) ++ "," ++ str_of_int (vec_get trace (vec_len trace - 1)))

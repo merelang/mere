@@ -4,6 +4,49 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.701 — 2026-11-04
+
+_A curried lambda's body is written a fixed number of times, whatever its arity._
+
+The two-argument entry of a lambda (`fn2`, Q-139) writes the body of its
+second stage out again. When that body was itself a `fn`, the third stage was
+emitted once from each entry, and each further stage doubled the ones below
+it: a curried lambda of n parameters carried its body F(n) times on C, LLVM
+and Wasm (15 copies at n = 7), and LLVM did the same for the value closures of
+a top-level curried function. mere-ruby's LLVM IR held 14 copies of
+`invoke_val_c0`'s 5.6 MB body.
+
+A lambda now gets `fn2` only when its second stage returns a plain value. A
+closure without `fn2` takes the two-step path its callers already fall back
+to, so the only thing lost is the intermediate closure a two-argument call
+of a three-or-more-stage lambda used to skip. Emitted code across the 19
+downstream programs: mbrowse C 26.1 → 5.0 MB and LLVM IR 148.1 → 7.5 MB;
+mere-ruby C 48.7 → 37.3 MB and LLVM IR 260.6 → 113.0 MB; mengd LLVM IR
+13.0 → 4.8 MB. mere-ruby's corpus and its two benchmarks take the same user
+time as before.
+
+`test/parity/curried_lambda_stages.mere` applies a seven-stage lambda all at
+once, two at a time, partially and through `vec_fold`, with effects between
+stages. A unit test checks that the body's copies at seven parameters equal
+those at three (16 against 5 before).
+
+LLVM also takes the C backend's `curried_body_via_direct` (v0.1.592): the
+curried form of a top-level function that has an uncurried twin ends in a
+call to `@mu_f__direct`, so the body is not carried by every stage. With both
+changes mere-ruby's LLVM IR is 58.8 MB (260.6 MB in v0.1.699), mbrowse's
+6.1 MB and mengd's 3.1 MB.
+
+LLVM: a function that holds a `musttail` call marks its other self-calls
+`notail`. At -O1 and above, LLVM's TailRecursionElimination turns
+`x = call @f(..); y = add x, k; ret y` into an accumulator loop and adds the
+accumulator after every return, including the one right behind a `musttail`.
+The backend then stops with "failed to perform tail call elimination on a call
+site marked musttail". mere-ruby's LLVM build failed this way at -O1 and -O2
+in v0.1.699, in `rxp_count_rep`. parity.sh compiles IR at -O0, so nothing
+caught it. `scripts/llvm_musttail_opt_check.sh` builds
+`test/parity/musttail_beside_accumulator.mere` at -O1 and -O2, and its poison
+takes `notail` off and expects the build to fail.
+
 ## v0.1.700 — 2026-11-04
 
 _Interpreter: only one domain can claim a released OwnedVec._

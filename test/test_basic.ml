@@ -4888,6 +4888,25 @@ let () =
        then count (j + 4) (n + 1) else count (j + 1) n in
    check "codegen: guarded arms write the rest of the match once"
      (string_of_int (count 0 0)) "1");
+  (* v0.1.701: a curried lambda's body is written a fixed number of times,
+     whatever its arity -- the two-argument entry of a stage whose body is
+     another `fn` emitted that `fn` a second time, and the copies grew like
+     Fibonacci (16 at seven parameters). The body's constant is counted at
+     three and at seven parameters; the two must be equal. *)
+  (let copies n =
+     let ps = String.concat " " (List.init n (fun i -> Printf.sprintf "fn (a%d: int) ->" i)) in
+     let args = String.concat " " (List.init n (fun i -> string_of_int (i + 1))) in
+     let out = codegen_with_decls
+       (Printf.sprintf "let outer = fn (k: int) -> let big = %s k + 4242 in big %s;\nouter 1" ps args) in
+     let rec count i acc =
+       match String.index_from_opt out i '4' with
+       | None -> acc
+       | Some j ->
+         if j + 6 <= String.length out && String.sub out j 6 = "4242LL"
+         then count (j + 6) (acc + 1) else count (j + 1) acc in
+     count 0 0 in
+   check "codegen: a curried lambda's body does not grow with its arity"
+     (string_of_int (copies 7)) (string_of_int (copies 3)));
 
   (* --- C codegen: closure conversion (Phase 4 eighth slice) ---
      Inner `let n = fn x -> body` is lifted to a top-level fn with
@@ -5506,9 +5525,13 @@ let () =
   assert_llvm "llvm: capture stored into env via getelementptr"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "getelementptr %anon_0_env, ptr ";
+  (* v0.1.701: the capture `n` is an int, loaded as i64 from the env's first
+     field. This asked for `load i32` and passed only because the prelude's
+     list_fold stages, emitted as closures, read list tags as i32; with the
+     stages calling list_fold__direct they are gone, and so was the match. *)
   assert_llvm "llvm: capture loaded from env_self in adapter"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
-    "= load i32, ptr ";
+    "= load i64, ptr %t0";
   assert_llvm "llvm: anon closure value built with adapter pointer"
     (llvm "let make_adder = fn n -> fn x -> x + n in (make_adder 5) 10")
     "ptr @anon_0_fn, 1";

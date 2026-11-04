@@ -835,6 +835,11 @@ type closure_emission = {
 }
 let pending_closures : closure_emission list ref = ref []
 let anon_counter = ref 0
+(* v0.1.701: the second stage of an `fn2` must not be another `fn`; the
+   reason is beside Codegen_c.fn2_inner_ok. *)
+let fn2_inner_ok (inner : Ast.expr) : bool =
+  match inner.Ast.node with Ast.Fun _ -> false | _ -> true
+
 let fresh_anon_name () =
   let n = !anon_counter in
   incr anon_counter;
@@ -4941,7 +4946,8 @@ and emit_expr (e : Ast.expr) : unit =
        is a link error, and leaving -1 when one does is a missed fast path. *)
     let table_idx2 =
       match fn_body.Ast.node with
-      | Ast.Fun _ -> Some (register_in_table (adapter_name ^ "_fn2"))
+      | Ast.Fun (_, _, inner) when fn2_inner_ok inner ->
+        Some (register_in_table (adapter_name ^ "_fn2"))
       | _ -> None
     in
     pending_closures :=
@@ -5941,9 +5947,11 @@ let emit_anon_adapter (ce : closure_emission) : string =
    "Immediately another fn" is the whole condition, and it is the same one the
    order pin asks about: work between the two parameters cannot be expressed by
    an entry that takes both at once. *)
+(* v0.1.701: no `fn2` when the second stage's body is another `fn` -- see
+   fn2_inner_ok. table_idx2 above asks the same. *)
 let emit_anon_adapter2 (ce : closure_emission) : string option =
   match ce.ce_body.Ast.node with
-  | Ast.Fun (p2, _, body2) ->
+  | Ast.Fun (p2, _, body2) when fn2_inner_ok body2 ->
     let saved_instrs = !instrs in
     let saved_local_counter = !local_counter in
     let saved_locals = !locals in
