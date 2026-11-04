@@ -604,6 +604,12 @@ RISC-V and C mark reads through `show`, JSON and byte conversion, and through
 empty iteration, folding and Vec-to-OwnedVec conversion. C covers these paths
 as of v0.1.690; the ownership gate requires all its fixtures to match C.
 
+Vec read boundaries, including conversions, empty traversals, partial
+application and file output, are inventoried in
+[Vec read boundaries](vec-read-boundaries.md). The v0.1.703 audit closes
+additional interpreter, C and LLVM gaps and checks supported RISC-V paths
+against explicit expected results.
+
 **RISC-V Map guards (v0.1.691).** User Maps follow the same logical-thread
 rule: foreign reads through lookups (including a missing key), membership,
 length or iteration make them read-only. Set, delete (including a missing

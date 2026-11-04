@@ -1517,6 +1517,12 @@ As of v0.1.690, C marks foreign Vec reads through `show`, `to_json`,
 containers. Reading an independent immutable snapshot in another thread
 does not mark the source Vec shared.
 
+As of v0.1.703, Vec conversion and traversal entry checks include empty
+map/filter/concatenation inputs on C and raw-copy helpers on LLVM. The
+interpreter also marks filter, concatenation, byte/OwnedVec conversion and
+Vec-based file output. See [Vec read boundaries](vec-read-boundaries.md) for
+the complete inventory, copy independence and backend support.
+
 ### Thread operations inside Node Wasm workers (v0.1.688)
 
 The Node host supports `spawn`, `join` and `detach` from the main instance.

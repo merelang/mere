@@ -144,7 +144,7 @@ def checked(command, cwd, env=None):
     return result.stdout
 
 
-def run_suite(name, cases, poisons, plain, forbidden, poison, poison_check=None):
+def run_suite(name, cases, poisons, plain, forbidden, poison, poison_check=None, expected_outputs=None):
     memu = Path(os.environ.get("MEMU", ""))
     if not (memu / "riscv-runc/rv32i_run.mere").is_file():
         raise RuntimeError("set MEMU to a memu checkout; both widths must run")
@@ -173,6 +173,8 @@ def run_suite(name, cases, poisons, plain, forbidden, poison, poison_check=None)
             expected = (result.returncode, result.stdout, result.stderr)
             if expected[0] or expected[2]:
                 raise RuntimeError(f"{case}: unexpected C failure: {expected!r}")
+            if expected_outputs is not None and expected != (0, expected_outputs[case], b""):
+                raise RuntimeError(f"{case}: C violates the explicit expected result: {expected!r}")
             references[case] = expected
             for width in (32, 64):
                 build(case, width)

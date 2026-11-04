@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.703 — 2026-11-04
+
+_Vec reads are marked before conversions and traversals inspect storage._
+
+The interpreter now marks foreign reads through `vec_filter`, `vec_concat`,
+`vec_to_owned`, `bytes_of_vec`, `write_file_bytes` and `file_pwrite`. Get and
+SIMD load mark before checking bounds, so a failed length check also counts
+as a read. C marks map, filter and both concatenation inputs before reading
+lengths, even when empty, and marks Vec-based file output before its raw
+storage loop. LLVM marks iteration, folding, map, filter, concatenation,
+list conversion and Vec-to-OwnedVec conversion before directly reading the
+source. The checks run when the operation executes, not when it is captured
+in a closure. Converted storage and ownership metadata remain independent.
+
+`scripts/vec_read_check.py` checks explicit results on interpreter, C, LLVM
+and Wasm, with a separate RV32/RV64 mode for supported operations. Cases
+cover empty and full sources, failed lookups and SIMD loads, callback
+failure, strings, copies, argument/callback evaluation and delayed closure
+execution. Negative controls remove entry marks and RISC-V guards and
+reuse logical thread identities. CI requires both modes. The
+[read-boundary inventory](vec-read-boundaries.md) records each access point,
+metadata-only measurements, internal optimizer helpers and backend limits.
+
 ## v0.1.702 — 2026-11-04
 
 _macOS: mapped blocks of the same size are kept for reuse, up to 256 and 16 MB._

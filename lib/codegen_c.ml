@@ -4427,6 +4427,8 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of a_e.Ast.ty a_e.Ast.loc in
        Printf.sprintf
          "({ __auto_type __va = %s; __auto_type __vb = %s; \
+          __LANG_READ(__va); /* vec-concat-a-read */ \
+          __LANG_READ(__vb); /* vec-concat-b-read */ \
           mere_vec_%s* __new = mere_vec_%s_new(__va->region); \
           for (int __i = 0; __i < __va->len; __i++) \
             mere_vec_%s_push(__new, mere_vec_%s_get(__va, __i)); \
@@ -4514,6 +4516,7 @@ let rec emit_expr (e : Ast.expr) : string =
        let u_tag = vec_elem_tag_of e.Ast.ty e.Ast.loc in
        Printf.sprintf
          "({ __auto_type __vc = %s; __auto_type __cl = %s; \
+          __LANG_READ(__vc); /* vec-map-read */ \
           mere_vec_%s* __new = mere_vec_%s_new(__vc->region); \
           for (int __i = 0; __i < __vc->len; __i++) { \
             mere_vec_%s_push(__new, __cl.fn(__cl.env, mere_vec_%s_get(__vc, __i))); \
@@ -4830,6 +4833,7 @@ let rec emit_expr (e : Ast.expr) : string =
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
        Printf.sprintf
          "({ __auto_type __vc = %s; __auto_type __cl = %s; \
+          __LANG_READ(__vc); /* vec-filter-read */ \
           mere_vec_%s* __new = mere_vec_%s_new(__vc->region); \
           for (int __i = 0; __i < __vc->len; __i++) { \
             __auto_type __x = mere_vec_%s_get(__vc, __i); \
@@ -17743,6 +17747,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "static long long __lang_file_pwrite(FILE* f, long long off, mere_vec_int* v) {";
                "  if (off < 0) return 0;";
                "  if (fseek(f, (long)off, SEEK_SET) != 0) return 0;";
+               "  __LANG_READ(v); /* vec-pwrite-read */";
                "  for (int i = 0; i < v->len; i++) {";
                "    long long b = v->data[i];";
                "    if (b < 0 || b > 255) {";
@@ -17777,6 +17782,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
                "    fprintf(stderr, \"write_file_bytes: cannot open %s\\n\", path);";
                "    exit(1);";
                "  }";
+               "  __LANG_READ(v); /* vec-write-file-read */";
                "  for (int i = 0; i < v->len; i++) {";
                "    long long b = v->data[i];";
                "    if (b < 0 || b > 255) {";
