@@ -4873,7 +4873,21 @@ let () =
     (codegen_with_decls
       "type CgCol5 = A | B;\n\
        match A with | A when true -> 0 | _ -> 1")
-    "(1) ? (0LL)";
+    "&& ({ (1); })) ? ({ 0LL; })";
+  (* v0.1.699: the guard joins the arm's test, and the arms below are
+     written once -- not once after a failed test and again after a failed
+     guard, which doubled them per guarded arm *)
+  (let out = codegen_with_decls
+       "type CgCol6 = A of int | B of int;\n\
+        match A 3 with | A n when n == 1 -> 10 | A n when n == 2 -> 20 | A n when n == 4 -> 40 | B _ -> 77 | _ -> 99" in
+   let rec count i n =
+     match String.index_from_opt out i '7' with
+     | None -> n
+     | Some j ->
+       if j + 4 <= String.length out && String.sub out j 4 = "77LL"
+       then count (j + 4) (n + 1) else count (j + 1) n in
+   check "codegen: guarded arms write the rest of the match once"
+     (string_of_int (count 0 0)) "1");
 
   (* --- C codegen: closure conversion (Phase 4 eighth slice) ---
      Inner `let n = fn x -> body` is lifted to a top-level fn with

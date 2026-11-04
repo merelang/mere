@@ -4879,6 +4879,11 @@ and emit_expr (e : Ast.expr) : unit =
             emit_instr "if (result i32)";
             let prev = !locals in
             locals := bindings @ prev;
+            (* v0.1.699: a guard is never in tail position. The arm before
+               this one hands `saved_tail` on to the rest of the match, and
+               a guard that inherited it emitted `return_call` -- the
+               function returned the guard's bool. *)
+            wasm_tail_pos := false;
             emit_expr g;
             locals := prev;
             emit_instr "i32.wrap_i64";

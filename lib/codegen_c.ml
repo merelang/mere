@@ -4978,16 +4978,23 @@ let rec emit_expr (e : Ast.expr) : string =
         in
         let body_c =
           with_pat (fun () -> c_tail_pos := __in_tail; emit_expr body) in
-        let bound =
+        (* v0.1.699: a guard joins the test, and the rest of the match is
+           written ONCE. It used to be written twice -- after a failed test
+           and after a failed guard -- so every guarded arm doubled the code
+           of the arms below it: mere-ruby's eval_e (9+ guarded arms) was
+           70 MB of C, and clang 18 spent 14 minutes in SROA on it. The
+           bindings are written twice instead (field reads only), and the
+           guard still runs once. The second copy of `next` also sat inside
+           the arm's bindings, so a later arm that read an outer name the
+           pattern shadowed read the pattern's value; outside them now. *)
+        let test =
           match guard with
-          | None ->
-            Printf.sprintf "({ %s%s; })" bindings body_c
+          | None -> test
           | Some g ->
             let guard_c = with_pat (fun () -> emit_expr g) in
-            Printf.sprintf "({ %s(%s) ? (%s) : (%s); })"
-              bindings guard_c body_c next
+            Printf.sprintf "(%s) && ({ %s(%s); })" test bindings guard_c
         in
-        Printf.sprintf "(%s) ? %s : (%s)" test bound next
+        Printf.sprintf "(%s) ? ({ %s%s; }) : (%s)" test bindings body_c next
     in
     Printf.sprintf
       "({ __auto_type __scrut = %s; %s; })"

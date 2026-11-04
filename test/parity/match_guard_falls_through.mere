@@ -1,0 +1,65 @@
+// A guard that fails falls through to the arms below it. Those arms see the
+// names of the enclosing scope, not the failed arm's bindings: the C backend
+// wrote them inside the arm's bindings, so `| _ -> n` read the pattern's `n`
+// (v0.1.699). The guard runs once per arm it is asked of, and a tail call in
+// a guarded arm still loops. A guard is never in tail position: on Wasm the
+// second guard inherited it and a call there became `return_call`, so the
+// function returned the guard's bool (v0.1.699).
+type E = A of int | B of int | C of int * int;
+
+let shadow = fn (n: int) -> fn (e: E) ->
+  match e with
+  | A n when n == 1 -> "guarded " ++ str_of_int n
+  | C (n, m) when n > m -> "c " ++ str_of_int n
+  | _ -> "outer " ++ str_of_int n;
+
+let asked = vec_new ();
+let _ = vec_push asked 0;
+let ask = fn (k: int) -> fn (v: bool) ->
+  let _ = vec_set asked 0 (vec_get asked 0 * 10 + k) in v;
+
+let many = fn (e: E) ->
+  match e with
+  | A n when ask 1 (n == 1) -> "a1"
+  | A n when ask 2 (n == 2) -> "a2"
+  | B n when ask 3 (n == 3) -> "b3"
+  | A n when ask 4 (n == 4) -> "a4"
+  | C (x, y) when ask 5 (x == y) -> "c="
+  | A n -> "a " ++ str_of_int n
+  | B n -> "b " ++ str_of_int n
+  | C (x, _) -> "c " ++ str_of_int x;
+
+let rec count = fn (acc: int) -> fn (e: E) ->
+  match e with
+  | A n when n > 0 -> count (acc + 1) (A (n - 1))
+  | A _ -> acc
+  | B n when n > 0 -> count (acc + 2) (B (n - 1))
+  | _ -> acc;
+
+// a guard that calls the function it is in
+let rec parity = fn (n: int) ->
+  match n with
+  | 0 -> true
+  | k when parity (k - 1) -> false
+  | _ -> true;
+
+let run = fn (e: E) ->
+  let _ = vec_set asked 0 0 in
+  let r = many e in
+  print (r ++ " asked " ++ str_of_int (vec_get asked 0));
+
+let _ = print (shadow 5 (A 3));
+let _ = print (shadow 5 (A 1));
+let _ = print (shadow 5 (C (2, 9)));
+let _ = print (shadow 5 (C (9, 2)));
+let _ = print (shadow 5 (B 1));
+let _ = run (A 2);
+let _ = run (A 4);
+let _ = run (A 7);
+let _ = run (B 3);
+let _ = run (B 8);
+let _ = run (C (6, 6));
+let _ = run (C (6, 7));
+let _ = print (str_of_int (count 0 (A 100000)));
+let _ = print (str_of_int (count 0 (B 10)));
+print (if parity 7 then "even" else "odd")

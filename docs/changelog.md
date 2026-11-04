@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.699 — 2026-11-04
+
+_C: a guarded match arm writes the rest of the match once. Wasm: a guard is never a tail call._
+
+The C backend emitted the arms below a guarded arm twice: once after a failed
+pattern test and once after a failed guard. Each guarded arm doubled the code
+of every arm below it. mere-ruby's `eval_e` has 9 or more guarded arms. It was
+70 MB of C in one function, with about 970,000 locals. clang 18 at `-O2` spent
+14 minutes in SROA on that one function, and downstream_cc_check took 1031 to
+1144 seconds against its 1200-second limit. The guard is now part of the arm's
+test, so the rest of the match is written once. The arm's bindings are written
+twice; they are field reads only, and the guard still runs once. mere-ruby's C
+went from 132 MB to 48.7 MB, and `eval_e` from 70.8 MB to 0.42 MB.
+
+The second copy also sat inside the failed arm's bindings. A later arm that
+read an outer name shadowed by the pattern read the pattern's value instead:
+`match e with | A n when n == 1 -> ... | _ -> n` gave the `n` from `A`. The
+interpreter, LLVM and Wasm gave the outer `n`.
+
+Wasm: the arm before a guarded arm handed tail position on to the rest of the
+match, and the guard inherited it. A call in that guard was emitted as
+`return_call`, so the function returned the guard's bool. The program then
+printed nothing or hit a stack overflow. The guard is now emitted out of tail
+position.
+
+`test/parity/match_guard_falls_through.mere` covers all three. The C and Wasm
+binaries of v0.1.698 fail it. A unit test counts the copies of a later arm in the C:
+8 before, 1 now.
+
 ## v0.1.698 — 2026-11-04
 
 _Formatting is a container read._
