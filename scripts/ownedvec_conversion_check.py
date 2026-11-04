@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OwnedVec conversion must check and claim its source, even when empty."""
+"""OwnedVec access and conversion share the inline-only spawn handoff rule."""
 import argparse
 from pathlib import Path
 import shutil
@@ -19,10 +19,10 @@ def main():
         if not shutil.which(tool):
             raise RuntimeError(f"required tool missing: {tool}")
     cases = {k: v for k, v in fixtures().items() if
-             (k.startswith("foreign_") and k.endswith("_to_vec")) or
+             k.startswith(("foreign_", "handoff_", "generic_vec_")) or
              (k.startswith("after_move_") and k.endswith("_to_vec")) or
              k.startswith("conversion_claim_") or k in {"local_move"}}
-    assert len(cases) == 11
+    assert len(cases) == 59
     checks = 0
     with tempfile.TemporaryDirectory(prefix="ownedvec-conversion-") as directory:
         tmp = Path(directory)
@@ -34,19 +34,25 @@ def main():
             result = execute([tmp / "case"], tmp)
             return result.returncode, result.stdout, result.stderr
         for name, source in cases.items():
-            if name.startswith("foreign_"):
-                # Hide the OwnedVec behind a function alias so every backend
-                # sees an opaque callback rather than a direct move capture.
-                source = source.replace('let _ = owned_vec_to_vec g in "allowed"',
-                                        'let _ = convert () in "allowed"')
-                source = source.replace('let results = channel_new ();',
-                                        'let convert = fn () -> owned_vec_to_vec g;\nlet results = channel_new ();')
             file = tmp / "case.mere"
             file.write_text(source)
             c = checked([MERE, "-c", file], tmp)
             ref = run_native(c, "C")
-            if ref[0] or ref[2] or b"allowed\n" in ref[1]:
-                raise RuntimeError(f"{name}: C allowed conversion or failed unexpectedly: {ref!r}")
+            if ref[0] or ref[2]:
+                raise RuntimeError(f"{name}: unexpected C failure: {ref!r}")
+            if name.startswith(("foreign_", "after_move_")) and b"allowed\n" in ref[1]:
+                raise RuntimeError(f"{name}: C allowed foreign access: {ref!r}")
+            if name.startswith("handoff_"):
+                if name.endswith("_inline"):
+                    valid = ref[1] == b"allowed\nowner-blocked\n"
+                else:
+                    valid = ref[1].startswith(b"owned_vec_len: an OwnedVec belongs to one thread") and ref[1].endswith(b"\n2\n")
+                if not valid:
+                    raise RuntimeError(f"{name}: C violated the handoff contract: {ref!r}")
+            if name.startswith("generic_vec_"):
+                size = b"0" if name.endswith("_empty") else b"1"
+                if ref[1] != size + b"\nshared\n":
+                    raise RuntimeError(f"{name}: C violated ordinary Vec sharing: {ref!r}")
             checks += 1
             interp = execute([MERE, file], tmp)
             if (interp.returncode, interp.stdout, interp.stderr) != ref:
@@ -77,7 +83,7 @@ def main():
                         raise RuntimeError(f"POISON {name}: {backend} did not expose the missing conversion guard")
                     checks += 1
                     print(f"  ok    POISON {name}: {backend}", flush=True)
-        assert checks == (48 if args.poison else 44)
+        assert checks == (240 if args.poison else 236)
         print(f"ownedvec_conversion: ok ({checks} checks)")
 
 

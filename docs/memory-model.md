@@ -447,7 +447,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.695)
+## 4. Implemented memory behavior (v0.1.697)
 
 ### Concurrency and sharing
 
@@ -650,6 +650,21 @@ As of v0.1.695, C, LLVM and the interpreter check ownership before
 before copying. C and LLVM defer automatic scope cleanup when a captured
 OwnedVec may outlive the scope through a ThreadHandle; the program registry
 retains its buffer until shutdown.
+
+As of v0.1.697, the interpreter uses the same handoff boundary as the
+compiled backends: only a closure literal passed directly to the unshadowed
+builtin `spawn` releases its direct OwnedVec bindings. Function parameters,
+call results, channel messages, annotated callbacks and aliased or rebound
+spawn builtins do not release hidden captures. The interpreter previously
+inspected runtime callback bodies and released their captures even at these
+opaque call sites. A callback whose body is visible can instead be rejected
+by the frontend before execution; runtime checks cover callbacks that remain
+opaque to that analysis.
+
+The interpreter also distinguishes OwnedVec storage for generic `len`:
+it requires exclusive ownership and claims released storage, just as
+`owned_vec_len` does. An ordinary Vec, including the result of
+`owned_vec_to_vec`, keeps the freeze-on-foreign-read behavior.
 
 The container checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
