@@ -4,6 +4,33 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.698 — 2026-11-04
+
+_Formatting is a container read._
+
+The interpreter checks ownership before `show` or `to_json` touches container
+storage. Foreign reads of Vec, Map, StrBuf and ByteBuf make them permanently
+read-only, including empty containers. ListBuf formatting requires its owner
+and preserves the builder's frozen state. OwnedVec formatting requires
+exclusive access and claims released storage. Recursive formatting applies
+the checks to containers inside tuples, records, variants, lists, options
+and other containers. Formatting in the owner and sending the resulting
+immutable string to another thread leave the source writable.
+
+C also checks ownership at the start of OwnedVec `show`, including empty
+vectors and first-use claiming after an inline spawn handoff.
+
+An interpreter `strbuf_push v` partial application now checks the buffer's
+current owner when its string argument arrives. It previously captured the
+owner integer at partial application, so a writer saved before a foreign
+read could still mutate shared storage.
+
+The formatting gates cover 264 interpreter fixtures and 84 C comparisons,
+with eight controls removing C guards. Another gate compares 32 nested Vec
+formatting fixtures on RV32/RV64 against C, with controls removing read
+checks and duplicating logical thread identities. The checks cover the
+storage-traversing formatting paths supported by each backend.
+
 ## v0.1.697 — 2026-11-04
 
 _Interpreter: match compiled OwnedVec handoff and generic length checks._

@@ -6139,6 +6139,7 @@ let emit_show_fn (tag : string) (t : Ast.ty) : string =
     let elem_show = "show_" ^ ty_tag elem_ty in
     let read_mark = match Ast.walk t with
       | Ast.TyCon ("Vec", _) -> "__LANG_READ(v); /* vec-show-read */"
+      | Ast.TyCon ("OwnedVec", _) -> "__lang_ov_use(&v->owner, \"show\"); /* owned-show-owner */"
       | _ -> "" in
     Printf.sprintf
       "%s {\n  %s\n  \
