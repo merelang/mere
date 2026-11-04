@@ -868,6 +868,10 @@ jobs:
           sh scripts/wasm_worker_thread_check.sh --poison
           python3 scripts/c_vec_read_check.py --poison
 
+      - name: container_format_owner (show and JSON reads preserve container ownership)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: python3 scripts/container_format_owner_check.py --poison
+
       # A saturated call of a curried inner function allocates no closures on
       # C, LLVM and Wasm (Q-142, v0.1.583): mandelbrot's inner loop was 104
       # B/iter on Wasm and 235 MB on LLVM before.
@@ -1539,6 +1543,10 @@ jobs:
       - name: rv_vec_owner (logical threads own Vecs, RV32 and RV64 against C)
         if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_vec_owner_check.py --poison
+
+      - name: container_format_owner (nested Vec formatting, RV32 and RV64 against C)
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/container_format_owner_check.py --rv-only --poison
 
       - name: rv_map_owner (logical threads own Maps, RV32 and RV64 against C)
         if: ${{ !cancelled() && matrix.group == 'riscv' }}

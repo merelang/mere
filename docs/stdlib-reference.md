@@ -1454,6 +1454,15 @@ As of v0.1.697, the interpreter follows this same handoff rule as C, LLVM,
 Wasm and RISC-V. Its generic `len` also enforces OwnedVec ownership, including
 empty storage; converting to Vec restores ordinary Vec sharing behavior.
 
+Since v0.1.698, interpreter `show` and `to_json` also enforce these rules
+while recursively formatting containers. Vec, Map, StrBuf and ByteBuf become
+read-only after a foreign formatting read, including empty storage. ListBuf
+formatting requires its owner and preserves finalization; OwnedVec formatting
+requires exclusive ownership and claims released storage. C also checks
+OwnedVec `show`. Immutable strings produced in the owner can be shared
+without freezing their source. A saved interpreter `strbuf_push v` writer
+checks the latest sharing state when its string argument is applied.
+
 **`sync type`** vouches that a type is safe to share, and is refused when the
 type holds a builtin container (`Map`, `Vec`, `StrBuf`, `ByteBuf`, `ListBuf`,
 `OwnedVec`, `File`, ...): those have no lock for the marker to stand for.

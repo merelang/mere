@@ -384,7 +384,9 @@ and to_string = function
     "f32x4(" ^ format_float a ^ ", " ^ format_float b ^ ", "
             ^ format_float c ^ ", " ^ format_float d ^ ")"
   | V_u8x16 bs -> "u8x16[" ^ hex_of_string (Bytes.to_string bs) ^ "]"
-  | V_bytebuf b -> "bytebuf[" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "]"
+  | V_bytebuf b ->
+    read_bb b;
+    "bytebuf[" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "]"
   | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
   | V_str s -> Ast.escape_string s
@@ -410,13 +412,17 @@ and to_string = function
     let parts = List.map (fun (f, v) -> f ^ " = " ^ to_string v) fields in
     name ^ " { " ^ String.concat ", " parts ^ " }"
   | V_vec arr ->
+    if arr.vc_owned then ov_use "show" arr else read_vec arr;
     let elems = Array.to_list (vecbuf_live arr) in
     "Vec[" ^ String.concat ", " (List.map to_string elems) ^ "]"
   | V_lb b ->
+    own "ListBuf" "show" b.lb_owner;
     "ListBuf[" ^ String.concat ", " (List.rev_map to_string b.lb_items) ^ "]"
-  | V_strbuf { sb = buf; _ } ->
+  | V_strbuf ({ sb = buf; _ } as b) ->
+    read_sb b;
     "StrBuf[" ^ Ast.escape_string (Buffer.contents buf) ^ "]"
   | V_map m ->
+    read_map m;
     let parts = List.map (fun k ->
       let v = Hashtbl.find m.m_tbl k in
       to_string k ^ " => " ^ to_string v) (map_live_keys m) in
@@ -442,6 +448,7 @@ and to_json_string = function
     "[" ^ String.concat ", " (List.map (fun x -> to_json_string (V_float x)) [a; b; c; d]) ^ "]"
   | V_u8x16 bs -> "\"" ^ hex_of_string (Bytes.to_string bs) ^ "\""
   | V_bytebuf b ->
+    read_bb b;
     "\"" ^ hex_of_string (Bytes.sub_string b.bb_data 0 b.bb_len) ^ "\""
   | V_float f -> format_float f
   | V_bool b -> if b then "true" else "false"
@@ -474,11 +481,14 @@ and to_json_string = function
         Ast.escape_string f ^ ":" ^ to_json_string v) fields in
     "{" ^ String.concat "," parts ^ "}"
   | V_vec arr ->
+    if arr.vc_owned then ov_use "to_json" arr else read_vec arr;
     "[" ^ String.concat "," (List.map to_json_string (Array.to_list (vecbuf_live arr))) ^ "]"
   | V_lb b ->
+    own "ListBuf" "to_json" b.lb_owner;
     "[" ^ String.concat "," (List.rev_map to_json_string b.lb_items) ^ "]"
-  | V_strbuf { sb = buf; _ } -> Ast.escape_string (Buffer.contents buf)
+  | V_strbuf ({ sb = buf; _ } as b) -> read_sb b; Ast.escape_string (Buffer.contents buf)
   | V_map m ->
+    read_map m;
     let parts = List.map (fun k ->
       let v = Hashtbl.find m.m_tbl k in
       (* JSON object keys must be strings: use the key's string form. *)
@@ -2193,9 +2203,9 @@ let builtin_strbuf_new =
 let builtin_strbuf_push =
   V_builtin ("strbuf_push", fun v ->
     match v with
-    | V_strbuf { sb = buf; sb_owner } ->
+    | V_strbuf ({ sb = buf; _ } as b) ->
       V_builtin ("strbuf_push_p1", fun s ->
-        own "StrBuf" "strbuf_push" sb_owner;
+        own "StrBuf" "strbuf_push" b.sb_owner;
         match s with
         | V_str s -> Buffer.add_string buf s; V_unit
         | _ -> failwith "strbuf_push: expected str")

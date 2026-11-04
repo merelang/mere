@@ -447,7 +447,7 @@ out); the builder itself is a container and obeys the escape rules above.
 
 ---
 
-## 4. Implemented memory behavior (v0.1.697)
+## 4. Implemented memory behavior (v0.1.698)
 
 ### Concurrency and sharing
 
@@ -665,6 +665,25 @@ The interpreter also distinguishes OwnedVec storage for generic `len`:
 it requires exclusive ownership and claims released storage, just as
 `owned_vec_len` does. An ordinary Vec, including the result of
 `owned_vec_to_vec`, keeps the freeze-on-foreign-read behavior.
+
+As of v0.1.698, the interpreter treats `show` and `to_json` as storage reads.
+Vec, Map, StrBuf and ByteBuf mark a foreign read before inspecting their
+contents, including empty storage. ListBuf requires its owner for formatting
+and retains its frozen state; formatting in the owner leaves an unfinished
+builder writable. OwnedVec requires exclusive ownership and claims released
+storage before formatting. C also guards its OwnedVec `show` helper at entry.
+
+Recursive formatting checks each container it visits, including containers
+inside tuples, records, variants, lists, options and other containers. An
+immutable string snapshot can be read by another thread without marking its
+source shared. A saved interpreter `strbuf_push v` partial application checks
+the current sharing state when the string argument is supplied.
+
+[`container_format_owner_check.py`](https://github.com/merelang/mere/blob/main/scripts/container_format_owner_check.py)
+covers all six container families on the interpreter, Vec formatting and
+OwnedVec `show` on C, and Vec formatting on RV32/RV64. Formatting
+representations and availability differ by backend; the gate compares paths
+that traverse container storage.
 
 The container checks enforce access rules at operation boundaries; they do not
 lock an entire operation against concurrent access or synchronize FFI code.
