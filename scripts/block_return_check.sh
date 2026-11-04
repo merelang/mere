@@ -35,7 +35,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 case "$(uname -s)" in
   Darwin) FIX="$ROOT/test/block_return/freed.mere"; WANT=8000; WHAT="a 400 MB region was freed"
-          POISON='s/^  if (total < __LANG_BLK_MAP_MIN) return malloc(total);$/  return malloc(total);/; s/^  if (total < __LANG_BLK_MAP_MIN) free(p); else munmap(p, total);$/  free(p);/; s/^  if (old_total < __LANG_BLK_MAP_MIN \&\& new_total < __LANG_BLK_MAP_MIN) return realloc(p, new_total);$/  return realloc(p, new_total);/'
+          POISON='s/^  if (total < __LANG_BLK_MAP_MIN) return malloc(total);$/  return malloc(total);/; s/^  if (total < __LANG_BLK_MAP_MIN) { free(p); return; }$/  free(p); return;/; s/^  if (old_total < __LANG_BLK_MAP_MIN \&\& new_total < __LANG_BLK_MAP_MIN) return realloc(p, new_total);$/  return realloc(p, new_total);/'
           HOW="with malloc blocks" ;;
   Linux)  ldd --version 2>&1 | grep -qi -e glibc -e 'gnu libc' || { echo "block_return: not glibc -- the threshold is glibc's"; exit 3; }
           FIX="$ROOT/test/region_deps/maps.mere"; WANT=1000; WHAT="a region of 1,000 compacted maps was left"

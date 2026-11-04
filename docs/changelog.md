@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.702 — 2026-11-04
+
+_macOS: mapped blocks of the same size are kept for reuse, up to 256 and 16 MB._
+
+Since v0.1.686 a region block of 16 KB or more is mapped on macOS and unmapped
+when freed. A program that makes and drops large strings paid a mapping, its
+page faults and an unmapping for each one: mere-ruby running `"x" * 100_000` a
+hundred thousand times mapped and unmapped 78,000 blocks of 100 KB, freed some
+80 at a time by its collector, and spent 1.1 s of 3.5 s in system time. Freed
+blocks now wait, up to 256 of them and 16 MB in all, for a request of the same
+size. The same run takes 1.9-2.4 s with 0.12 s of system time, at 5% more
+peak RSS (an all-malloc build: 1.8 s and 15% more). 32 kept blocks were too
+few for one collection's worth.
+
+A kept block is filled with 0xAA when it is kept and zeroed when it is handed
+out, as a fresh mapping is. Untouched, it let a pointer into freed memory read
+the old bytes and go on, where the unmapped block had faulted:
+region_uaf_check's `coro_pin_resumed` poison stayed green. Making it PROT_NONE
+also faulted, but gave back most of the gain (2.5 s).
+
+block_return_check still holds a freed 400 MB region under its 64 MB cap
+(16 MB resident now, 1 MB before: the kept blocks). Its poison edited the free
+path by its old text and no longer applied; it matches the new one.
+
 ## v0.1.701 — 2026-11-04
 
 _A curried lambda's body is written a fixed number of times, whatever its arity._

@@ -10674,13 +10674,56 @@ let region_runtime_helpers =
       "#if defined(__APPLE__)";
       "#include <sys/mman.h>";
       "#define __LANG_BLK_MAP_MIN ((size_t)16384)";
+      (* v0.1.702: mapped blocks are kept for the next request of the same
+         size -- at most 256 of them and 16 MB, far under the 64 MB the
+         block_return gate allows after a release. `"x" * 100_000` a hundred
+         thousand times in mere-ruby mapped and unmapped a 100 KB block per
+         string: 78,000 of each, freed some 80 at a time by a collection, 1.1 s
+         of its 3.5 s in system time. With the blocks kept it takes 1.9-2.4 s
+         and 0.12 s of system time, at 5% more peak RSS (the all-malloc build:
+         1.8 s, 15% more). 32 kept blocks were too few for one collection's
+         worth. A kept block is FILLED WITH 0xAA as it is kept: a pointer
+         into freed memory read 0xAA.. and failed at once, where an untouched
+         kept block let it read the old bytes and go on (region_uaf's
+         coro_pin_resumed poison stayed green). PROT_NONE did the same job
+         and gave back most of the gain (2.5 s). It is zeroed when it is
+         handed out, as a fresh mapping is. *)
+      "#define __LANG_BLK_KEEP_N 256";
+      "#define __LANG_BLK_KEEP_BYTES ((size_t)16 << 20)";
+      "static struct { void* p; size_t n; } __lang_blk_keep[__LANG_BLK_KEEP_N];";
+      "static int __lang_blk_keep_len = 0;";
+      "static size_t __lang_blk_keep_bytes = 0;";
+      "static pthread_mutex_t __lang_blk_keep_lock = PTHREAD_MUTEX_INITIALIZER;";
       "static void* __lang_blk_raw_alloc(size_t total) {";
       "  if (total < __LANG_BLK_MAP_MIN) return malloc(total);";
+      "  void* k = NULL;";
+      "  pthread_mutex_lock(&__lang_blk_keep_lock);";
+      "  for (int i = __lang_blk_keep_len - 1; i >= 0; i--)";
+      "    if (__lang_blk_keep[i].n == total) {";
+      "      k = __lang_blk_keep[i].p;";
+      "      __lang_blk_keep[i] = __lang_blk_keep[--__lang_blk_keep_len];";
+      "      __lang_blk_keep_bytes -= total;";
+      "      break;";
+      "    }";
+      "  pthread_mutex_unlock(&__lang_blk_keep_lock);";
+      "  if (k) { memset(k, 0, total); return k; }";
       "  void* p = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);";
       "  return p == MAP_FAILED ? NULL : p;";
       "}";
       "static void __lang_blk_raw_free(void* p, size_t total) {";
-      "  if (total < __LANG_BLK_MAP_MIN) free(p); else munmap(p, total);";
+      "  if (total < __LANG_BLK_MAP_MIN) { free(p); return; }";
+      "  pthread_mutex_lock(&__lang_blk_keep_lock);";
+      "  if (__lang_blk_keep_len < __LANG_BLK_KEEP_N && __lang_blk_keep_bytes + total <= __LANG_BLK_KEEP_BYTES) {";
+      "    memset(p, 0xAA, total);";
+      "    __lang_blk_keep[__lang_blk_keep_len].p = p;";
+      "    __lang_blk_keep[__lang_blk_keep_len].n = total;";
+      "    __lang_blk_keep_len++;";
+      "    __lang_blk_keep_bytes += total;";
+      "    pthread_mutex_unlock(&__lang_blk_keep_lock);";
+      "    return;";
+      "  }";
+      "  pthread_mutex_unlock(&__lang_blk_keep_lock);";
+      "  munmap(p, total);";
       "}";
       "static void* __lang_blk_raw_realloc(void* p, size_t old_total, size_t new_total) {";
       "  if (old_total < __LANG_BLK_MAP_MIN && new_total < __LANG_BLK_MAP_MIN) return realloc(p, new_total);";
