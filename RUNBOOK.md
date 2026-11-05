@@ -219,13 +219,17 @@ CI environment when validating the README's test count.
 
 CI (`.github/workflows/ci.yml`) runs the suite on ubuntu + macOS ×
 OCaml 5.1 / 5.4 (4-matrix). Integration checks use the validated Ubuntu 24.04
-image and run in six parallel groups:
-compiler, runtime, web, conformance, downstream and RISC-V. Each integration
-check runs once; package installation and required tool preflights run in
+image and run in nine parallel groups:
+compiler, runtime, containers, web, conformance, downstream, coroutines,
+RISC-V and RISC-V ownership. Each integration check runs once; package
+installation and required tool preflights run in
 every group. A failed group does not cancel the others. The required check
 retains its name,
 `Gates (cross-backend and differential)`. It passes only when the assignment
 check and every group succeed. Failed, cancelled or skipped groups fail it.
+The coroutine and both RISC-V groups require a memu checkout with the RV32
+and RV64 runners; a missing oracle fails the group instead of reducing it to
+native-only checks. Only the downstream group writes the compile cache.
 Run `ruby scripts/ci_gate_check.rb --self-test` to validate assignments and
 failure propagation after editing the workflow. Both `ci.yml` and `pages.yml`
 must be green before a release.

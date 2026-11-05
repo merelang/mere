@@ -2,6 +2,8 @@
 # Check that partitioning CI never drops a gate or hides a failed group.
 require "yaml"
 require "open3"
+require "tmpdir"
+require "fileutils"
 
 module CIGates
   class Invalid < StandardError; end
@@ -14,6 +16,7 @@ module CIGates
   CHECKOUT = "Check out the dogfood repositories"
   CACHE = "Restore the downstream compile cache"
   PACKAGES = "Install package dependencies"
+  CHECKOUT_GROUPS = %w[coroutines downstream riscv riscv-ownership].freeze
 
   def self.require!(condition, message)
     raise Invalid, message unless condition
@@ -92,7 +95,10 @@ module CIGates
       end
       case name
       when CHECKOUT
-        require!(selected.sort == %w[downstream riscv], "both downstream and RISC-V need checkouts")
+        require!(selected.sort == CHECKOUT_GROUPS, "downstream and every RISC-V oracle group need checkouts")
+        require!(!step["continue-on-error"], "missing required oracle checkouts must fail the group")
+        require!(step["env"] == {"MERE_REQUIRE_MEMU" => "${{ matrix.group != 'downstream' }}"},
+                 "every RISC-V oracle group must require memu")
       when CACHE
         require!(selected == ["downstream"], "only downstream may write the compile cache")
       else
@@ -119,6 +125,11 @@ module CIGates
   end
 
   def self.self_test(workflow)
+    without_checkout = lambda do |c, group|
+      selected = route(c[:checkout], c[:matrix]["group"]) - [group]
+      terms = selected.map { |name| "matrix.group == '#{name}'" }.join(" || ")
+      c[:checkout]["if"] = "${{ !cancelled() && (#{terms}) }}"
+    end
     mutations = {
       "missing condition" => ->(c) { c[:poison].delete("if") },
       "boolean condition" => ->(c) { c[:poison]["if"] = false },
@@ -133,7 +144,12 @@ module CIGates
       "unpinned runner" => ->(c) { c[:shard]["runs-on"] = "ubuntu-latest" },
       "optional groups" => ->(c) { c[:shard]["continue-on-error"] = true },
       "optional check" => ->(c) { c[:poison]["continue-on-error"] = true },
-      "missing RISC-V checkout" => ->(c) { c[:checkout]["if"] = "${{ !cancelled() && matrix.group == 'downstream' }}" },
+      "missing RISC-V checkout" => ->(c) { without_checkout.call(c, "riscv") },
+      "missing coroutine checkout" => ->(c) { without_checkout.call(c, "coroutines") },
+      "missing ownership checkout" => ->(c) { without_checkout.call(c, "riscv-ownership") },
+      "missing downstream checkout" => ->(c) { without_checkout.call(c, "downstream") },
+      "optional oracle checkout" => ->(c) { c[:checkout]["continue-on-error"] = true },
+      "optional memu" => ->(c) { c[:checkout]["env"]["MERE_REQUIRE_MEMU"] = "false" },
       "shared writable cache" => ->(c) { c[:cache]["if"] = "${{ !cancelled() && (matrix.group == 'compiler' || matrix.group == 'downstream') }}" },
       "missing full suite" => ->(c) { c[:steps].delete(c[:full]) },
       "empty full suite" => ->(c) { c[:full]["run"] = "true" },
@@ -165,7 +181,40 @@ module CIGates
       end
       raise Invalid, "negative control was not caught: #{label}"
     end
+    check_oracle_checkout(workflow["jobs"]["gate_shards"]["steps"].find { |s| s["name"] == CHECKOUT })
     puts "ci_gates: #{mutations.length} negative controls caught; 36 result combinations checked"
+  end
+
+  # Execute the workflow's checkout body with a fake clone, so losing an
+  # oracle cannot silently turn a newly isolated job into native-only coverage.
+  def self.check_oracle_checkout(step)
+    Dir.mktmpdir("mere-ci-checkout-") do |tmp|
+      FileUtils.mkdir_p(["#{tmp}/bin", "#{tmp}/workspace/test/downstream"])
+      File.write("#{tmp}/workspace/test/downstream/REPOS", "memu emulator compile\n")
+      File.write("#{tmp}/bin/git", <<~SH)
+        #!/bin/sh
+        [ "$MERE_CHECKOUT_CASE" != clone-failure ] || exit 1
+        for destination do :; done
+        mkdir -p "$destination/riscv-runc"
+        for width in 32 64; do
+          [ "$MERE_CHECKOUT_CASE" != "missing-$width" ] || continue
+          touch "$destination/riscv-runc/rv${width}i_run.mere"
+        done
+      SH
+      File.chmod(0755, "#{tmp}/bin/git")
+      %w[complete missing-32 missing-64 clone-failure].product(%w[true false]).each_with_index do |(state, required), i|
+        _, _, status = Open3.capture3({
+          "PATH" => "#{tmp}/bin:#{ENV.fetch('PATH')}",
+          "GITHUB_WORKSPACE" => "#{tmp}/workspace",
+          "RUNNER_TEMP" => "#{tmp}/run-#{i}",
+          "MERE_REQUIRE_MEMU" => required,
+          "MERE_CHECKOUT_CASE" => state
+        }, "/bin/sh", "-e", "-c", step.fetch("run"))
+        expected = state == "complete" || required == "false"
+        require!(status.success? == expected, "oracle checkout #{state}, required=#{required}: unexpected status")
+      end
+    end
+    puts "ci_gates: 8 oracle checkout cases checked"
   end
 end
 
