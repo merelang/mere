@@ -1576,6 +1576,14 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_ownedvec_owner_check.py --poison
 
+      - name: map_read (Map read boundaries on interpreter, C, LLVM and Wasm)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: python3 scripts/map_read_check.py --poison
+
+      - name: map_read_riscv (Map read boundaries against explicit results at both widths)
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/map_read_check.py --rv-only --poison
+
       - name: vec_read (conversion and traversal boundaries on interpreter, C, LLVM and Wasm)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: python3 scripts/vec_read_check.py --poison

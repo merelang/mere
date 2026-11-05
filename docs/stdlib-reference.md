@@ -1523,6 +1523,12 @@ interpreter also marks filter, concatenation, byte/OwnedVec conversion and
 Vec-based file output. See [Vec read boundaries](vec-read-boundaries.md) for
 the complete inventory, copy independence and backend support.
 
+As of v0.1.704, LLVM `map_iter` marks foreign reads before traversing either
+Map layout, including empty and fully deleted Maps. C also marks Map/Vec
+region-loop carry copies, and Wasm's linear missing-key lookup follows the
+catchable failure path. See [Map read boundaries](map-read-boundaries.md)
+for the inventory, delayed-call rules, copy ownership and backend limits.
+
 ### Thread operations inside Node Wasm workers (v0.1.688)
 
 The Node host supports `spawn`, `join` and `detach` from the main instance.

@@ -6956,7 +6956,7 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
        into m2's region itself (shallow for a container value, which keeps the
        handle __mdeep just built -- allocated in r, exactly right). *)
     Printf.sprintf
-      "%s {\n  %s* m2 = %s_new(r);\n  \
+      "%s {\n  __LANG_READ(v); /* map-carry-read */\n  %s* m2 = %s_new(r);\n  \
        for (int i = 0; i < v->len; i++) {\n    \
        if (v->dead[i]) continue;\n    \
        %s_set(m2, v->keys[i], __mdeep_%s(r, v->values[i]));\n  }\n  \
@@ -6966,7 +6966,7 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
     let el_tag = ty_tag el_ty in
     let vs = Printf.sprintf "mere_vec_%s" el_tag in
     Printf.sprintf
-      "%s {\n  %s* v2 = %s_new(r);\n  \
+      "%s {\n  __LANG_READ(v); /* vec-carry-read */\n  %s* v2 = %s_new(r);\n  \
        for (int i = 0; i < v->len; i++)\n    \
        %s_push(v2, __mdeep_%s(r, v->data[i]));\n  \
        return v2;\n}"

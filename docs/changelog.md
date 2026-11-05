@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.704 — 2026-11-05
+
+_Map iteration and region-loop copies mark their storage reads._
+
+LLVM `map_iter` now marks a foreign read before loading the length, keys,
+values or tombstones, including empty and fully deleted Maps and a callback
+that fails. The owner field follows the actual layout: field 10 for hashed
+keys and field 5 for the linear fallback. Creating a partial application or
+preparing a callback still does not read the Map. Wasm's linear Map lookup
+now raises the catchable missing-key failure, like the hashed layout, instead
+of trapping; the read mark still runs before a failed lookup. Wasm iteration
+also propagates failures after each callback stage, before reading a failed
+closure result or invoking a callback for another entry.
+
+C's region-loop carry copies now mark each source Map and Vec before copying
+its live contents, including nested containers. Those copies create fresh
+storage and ownership metadata; marking the source does not freeze the
+copy. Ordinary handle promotion retains identity and does not inspect slots.
+
+`scripts/map_read_check.py` checks explicit expected output across interpreter,
+C, LLVM and Wasm, plus supported RV32/RV64 paths. It covers all Map read APIs,
+empty and deleted storage, key families, failed lookups, delayed calls,
+callback failures, evaluation order and region-loop carries. Negative controls
+remove iteration/copy guards and RISC-V read guards or duplicate logical
+thread identities. Both modes are required in CI. The
+[Map read-boundary inventory](map-read-boundaries.md) records each storage
+access and the formatting and partial-application limits of each backend.
+
 ## v0.1.703 — 2026-11-04
 
 _Vec reads are marked before conversions and traversals inspect storage._

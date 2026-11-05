@@ -630,6 +630,13 @@ when empty, and repeated owner conversions are valid. Already-frozen push
 reports the frozen state before ownership, as C does. Growth and default-arena
 promotion preserve ownership. Immutable byte/list snapshots can be shared.
 
+Map read boundaries are inventoried in
+[Map read boundaries](map-read-boundaries.md). As of v0.1.704, LLVM marks
+`map_iter` before either layout's raw storage loads, C marks Map/Vec
+region-loop carry copies, and Wasm's linear missing-key lookup is catchable.
+The common read gate checks explicit expected results on all supported
+backends, including empty and fully deleted Maps and delayed calls.
+
 **RISC-V StrBuf guards (v0.1.693).** User StrBufs use a fourth ownership
 word in programs with green threads. Foreign length queries (including
 `len`) and string conversion freeze the buffer, including empty storage.
