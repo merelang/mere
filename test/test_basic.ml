@@ -4605,10 +4605,11 @@ let () =
   assert_c "codegen: P_int compiles to equality"
     (codegen "match 3 with | 0 -> 100 | _ -> 200")
     "(__scrut) == 0";
-  (* v0.1.620: by length, as `==` compares -- strcmp stopped at a NUL *)
+  (* v0.1.620: by length, as `==` compares -- strcmp stopped at a NUL
+     (v0.1.705: through __lang_str_eq, which asks the lengths first) *)
   assert_c "codegen: P_str compares by length"
     (codegen "match \"hi\" with | \"a\" -> 1 | _ -> 2")
-    "__lang_str_cmp((__scrut), (__sl_";
+    "__lang_str_eq((__scrut), (__sl_";
   assert_c "codegen: P_bool true compiles to == 1"
     (codegen "match true with | true -> 1 | false -> 0")
     "(__scrut) == 1";

@@ -2227,9 +2227,9 @@ let rec emit_expr (e : Ast.expr) : string =
     let a_ty = match a.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
     (match Ast.walk a_ty, op with
      | Ast.TyStr, Ast.Eq ->
-       Printf.sprintf "(__lang_str_cmp(%s, %s) == 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "__lang_str_eq(%s, %s)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Ne ->
-       Printf.sprintf "(__lang_str_cmp(%s, %s) != 0)" (emit_expr a) (emit_expr b)
+       Printf.sprintf "(!__lang_str_eq(%s, %s))" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Lt ->
        Printf.sprintf "(__lang_str_cmp(%s, %s) < 0)" (emit_expr a) (emit_expr b)
      | Ast.TyStr, Ast.Le ->
@@ -3617,7 +3617,7 @@ let rec emit_expr (e : Ast.expr) : string =
        (* str_eq a b — curried 2-arg; same as the `==`-on-str path
           (strcmp). Interp / Wasm have str_eq as a function; the C backend
           previously only had the `==` operator (mq dogfood P6). *)
-       Printf.sprintf "(__lang_str_cmp(%s, %s) == 0)"
+       Printf.sprintf "__lang_str_eq(%s, %s)"
          (emit_expr a_e) (emit_expr arg)
      | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_replace"; _ }, s_e); _ }, old_e) ->
        (* Phase 36: str_replace s old new — curried 3-arg *)
@@ -5306,7 +5306,7 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
   | Ast.P_str s ->
     (* v0.1.620: by length, as `==` compares -- `strcmp` stopped at the first
        NUL, so "a\u0000c" matched the arm `"a"` and "\u0000" matched `""` *)
-    (Printf.sprintf "(__lang_str_cmp((%s), (__sl_%d.s)) == 0)" v_c (str_literal_id s), "")
+    (Printf.sprintf "__lang_str_eq((%s), (__sl_%d.s))" v_c (str_literal_id s), "")
   | Ast.P_unit -> ("1", "")
   | Ast.P_constr (raw_cname, sub_opt) ->
     (* Phase 41 + 42: qualified ctor pattern (`| M.Foo -> ...`).
@@ -6687,7 +6687,7 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool -> header ^ " { return a == b; }"
   (* v0.1.620: by length, as `==` compares (strcmp stopped at a NUL) *)
-  | Ast.TyStr -> header ^ " { return __lang_str_cmp(a, b) == 0; }"
+  | Ast.TyStr -> header ^ " { return __lang_str_eq(a, b); }"
   | Ast.TyUnit -> header ^ " { (void)a; (void)b; return 1; }"
   | Ast.TyArrow _ -> header ^ " { (void)a; (void)b; return 0; }"
   | Ast.TyTuple ts ->
@@ -9675,6 +9675,15 @@ let str_concat_helper =
       "  if (r != 0) return r;";
       "  return la < lb ? -1 : (la > lb ? 1 : 0);";
       "}";
+      (* v0.1.705: equality asks the lengths first. Through __lang_str_cmp
+         every `==` ran memcmp over the shorter string whatever the lengths
+         were, and a dispatcher that tests a name against a chain of
+         literals -- mere-ruby's, 2,800 of them -- paid it for each. *)
+      "static inline int __lang_str_eq(const char* a, const char* b) {";
+      "  if (a == b) return 1;";
+      "  size_t la = __lang_str_size(a);";
+      "  return la == __lang_str_size(b) && (la == 0 || memcmp(a, b, la) == 0);";
+      "}";
       (* Copy a plain NUL-terminated C string into a header-carrying Mere str.
          Used at boundaries where a headerless C string enters Mere: asprintf
          results (show_* / str_of_int / str_of_float / format), getenv, argv. *)
@@ -11182,6 +11191,12 @@ let region_runtime_helpers =
       "";
       "static void __lang_region_charge(__lang_region* r) {";
       "  if (!r->site) return;";
+      (* v0.1.705: the tally is read only by the MERE_REGION_STATS report, and
+         taking it was a lock, a strcmp per site and a walk of the blocks at
+         every release of a named region: a region per statement made it 12%
+         of a `while` loop in mere-ruby. *)
+      "  if (__lang_dsites_on < 0) __lang_dsites_on = getenv(\"MERE_REGION_STATS\") != NULL;";
+      "  if (!__lang_dsites_on) return;";
       "  size_t cap = 0;";
       "  for (__lang_region_block* b = r->blocks; b; b = b->prev) cap += b->pad;";
       "  pthread_mutex_lock(&__lang_region_sites_lock);";
@@ -11510,7 +11525,9 @@ let region_runtime_helpers =
       "static void __lang_region_block_release(__lang_region* r) {";
       "  __lang_region_active_drop(r);";
       "  __lang_region_charge(r);";
-      "  if (r->keep && getenv(\"MERE_KEEP_TRACE\")) {";
+      "  static int __keep_trace = -1;";
+      "  if (__keep_trace < 0) __keep_trace = getenv(\"MERE_KEEP_TRACE\") != NULL;";
+      "  if (r->keep && __keep_trace) {";
       "    size_t kb = 0; for (__lang_region_block* b = r->blocks; b; b = b->prev) kb += b->pad;";
       "    fprintf(stderr, \"keep %s -> %s %zu\\n\", r->site ? r->site : \"?\",";
       "            r->keep == &__lang_kept_region ? \"(kept)\" : (r->keep->site ? r->keep->site : \"?\"), kb);";
@@ -11614,7 +11631,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
     match Ast.walk k with
     | Ast.TyInt | Ast.TyBool -> Printf.sprintf "(%s) == (%s)" a b
     (* v0.1.620: by length -- with strcmp, "a" and "a\u0000b" were one key *)
-    | Ast.TyStr -> Printf.sprintf "__lang_str_cmp((%s), (%s)) == 0" a b
+    | Ast.TyStr -> Printf.sprintf "__lang_str_eq((%s), (%s))" a b
     | Ast.TyTuple ts ->
       let parts = List.mapi (fun i t ->
         key_eq_for t
@@ -17294,6 +17311,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "static char* __lang_str_alloc(__lang_region* r, size_t len);";
       "static size_t __lang_str_size(const char* s);";
       "static int __lang_str_cmp(const char* a, const char* b);";
+      "static inline int __lang_str_eq(const char* a, const char* b);";
       "static const char* __lang_str_of_cstr(const char* s);";
       "static const char* __lang_str_dup_n(const char* s, size_t n);";
       "";

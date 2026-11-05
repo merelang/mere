@@ -4,6 +4,23 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.705 — 2026-11-05
+
+_String equality asks the lengths first; a named region's release keeps no tally unless asked._
+
+C's string `==`, `!=`, `str_eq`, a string-literal pattern and a string Map
+key now compare through `__lang_str_eq`: the same pointer is equal, different
+lengths are unequal, and only equal lengths reach `memcmp`. Before, each went
+through `__lang_str_cmp`, which ran `memcmp` over the shorter string whatever
+the lengths were. Ordering (`<`, `compare`) still uses `__lang_str_cmp`.
+
+Releasing a named region no longer takes the per-site tally (a lock, a
+`strcmp` per recorded site and a walk of the region's blocks) unless
+`MERE_REGION_STATS` is set, which is the only reader of that tally.
+`MERE_KEEP_TRACE` is read once. In mere-ruby, which opens a region per
+statement, the two together took an empty `while` turn from 0.89 to 0.59 us
+and a builtin call from 1.55 to 1.28 us more.
+
 ## v0.1.704 — 2026-11-05
 
 _Map iteration and region-loop copies mark their storage reads._
