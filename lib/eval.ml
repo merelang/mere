@@ -937,6 +937,7 @@ let builtin_write_file_bytes =
         | V_vec arr ->
           (try
              let oc = open_out_bin path in
+             read_vec arr;
              Array.iter (fun elt ->
                match elt with
                | V_int b when b >= 0 && b <= 255 ->
@@ -1935,8 +1936,8 @@ let builtin_f64x2_load =
       V_builtin ("f64x2_load_p1", fun idx ->
         match idx with
         | V_int i ->
-          f64x2_range "f64x2_load" arr i;
           read_vec arr;
+          f64x2_range "f64x2_load" arr i;
           (match arr.vc_data.(i), arr.vc_data.(i + 1) with
            | V_float a, V_float b -> V_f64x2 (a, b)
            | _ -> failwith "f64x2_load: expected float elements")
@@ -2045,11 +2046,12 @@ let builtin_vec_get =
       V_builtin ("vec_get_p1", fun idx ->
         match idx with
         | V_int i ->
+          read_vec arr;
           if i < 0 || i >= arr.vc_len then
             raise (Eval_error (Loc.dummy,
               Printf.sprintf "vec_get: index %d out of bounds (len = %d)"
                 i arr.vc_len))
-          else (read_vec arr; arr.vc_data.(i))
+          else arr.vc_data.(i)
         | _ -> failwith "vec_get: expected int index")
     | _ -> failwith "vec_get: expected Vec")
 
@@ -2492,6 +2494,8 @@ let builtin_vec_concat =
       V_builtin ("vec_concat_p1", fun v2 ->
         match v2 with
         | V_vec a2 ->
+          read_vec a1;
+          read_vec a2;
           V_vec (vecbuf_of_array (Array.append (vecbuf_live a1) (vecbuf_live a2)))
         | _ -> failwith "vec_concat: 2nd arg expected Vec")
     | _ -> failwith "vec_concat: 1st arg expected Vec")
@@ -2565,6 +2569,7 @@ let builtin_vec_filter =
     match v with
     | V_vec arr ->
       V_builtin ("vec_filter_p1", fun pred ->
+        read_vec arr;
         let filtered = Array.of_list (
           List.filter (fun x ->
             match !apply_value_ref pred x with
@@ -2625,8 +2630,9 @@ let builtin_vec_to_owned =
   V_builtin ("vec_to_owned", fun v ->
     match v with
     | V_vec arr ->
-      (* Deep copy: the underlying mutable array is duplicated so the
-         OwnedVec result is independent of the source Vec's lifetime. *)
+      read_vec arr;
+      (* Copy the slots into independent storage; element identities remain
+         unchanged, including nested mutable values. *)
       V_vec (vecbuf_of_array ~owned:true (Array.copy (vecbuf_live arr)))
     | _ -> failwith "vec_to_owned: expected Vec")
 
@@ -3730,6 +3736,7 @@ let builtin_file_pwrite =
           V_builtin ("file_pwrite_bytes", fun bv ->
             match bv with
             | V_vec arr ->
+              read_vec arr;
               let a = vecbuf_live arr in
               let len = Array.length a in
               let buf = Bytes.create len in
@@ -4122,6 +4129,7 @@ let builtin_bytes_of_vec =
   V_builtin ("bytes_of_vec", fun v ->
     match v with
     | V_vec arr ->
+      read_vec arr;
       let a = vecbuf_live arr in
       let b = Buffer.create (Array.length a) in
       Array.iter (function

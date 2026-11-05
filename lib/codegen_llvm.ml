@@ -11405,6 +11405,10 @@ let emit_vec_concat_helper_llvm (elem_ty : Ast.ty) : string =
   String.concat "\n"
     [ Printf.sprintf "define ptr @mere_vec_%s_concat(ptr %%a, ptr %%b) {" tag;
       "entry:";
+      Printf.sprintf "  %%__vec_read0 = getelementptr %%%s, ptr %%a, i32 0, i32 4" struct_name;
+      "  call void @__lang_read_mark(ptr %__vec_read0) ; vec-concat-a-read";
+      Printf.sprintf "  %%__vec_read1 = getelementptr %%%s, ptr %%b, i32 0, i32 4" struct_name;
+      "  call void @__lang_read_mark(ptr %__vec_read1) ; vec-concat-b-read";
       (* Allocate new Vec in a's region. *)
       Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%a, i32 0, i32 3" struct_name;
       "  %reg = load ptr, ptr %rp";
@@ -11654,6 +11658,8 @@ let emit_vec_iter_helper_llvm (elem_ty : Ast.ty) : string =
   String.concat "\n"
     [ Printf.sprintf "define i32 @mere_vec_%s_iter(ptr %%v, %%%s %%cl) {" tag cname;
       "entry:";
+      Printf.sprintf "  %%__vec_read0 = getelementptr %%%s, ptr %%v, i32 0, i32 4" struct_name;
+      "  call void @__lang_read_mark(ptr %__vec_read0) ; vec-iter-read";
       "  %env = extractvalue %" ^ cname ^ " %cl, 0";
       "  %fn = extractvalue %" ^ cname ^ " %cl, 1";
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" struct_name;
@@ -11794,6 +11800,8 @@ let emit_vec_fold_helper_llvm (elem_ty : Ast.ty) (acc_ty : Ast.ty) : string =
         "define %s @mere_vec_%s_fold_%s(ptr %%v, %s %%init, %%%s %%outer) {"
         c_acc t_tag u_tag c_acc outer_cl;
       "entry:";
+      Printf.sprintf "  %%__vec_read0 = getelementptr %%%s, ptr %%v, i32 0, i32 4" struct_name;
+      "  call void @__lang_read_mark(ptr %__vec_read0) ; vec-fold-read";
       "  %outer_env = extractvalue %" ^ outer_cl ^ " %outer, 0";
       "  %outer_fn = extractvalue %" ^ outer_cl ^ " %outer, 1";
       "  %outer_fn2 = extractvalue %" ^ outer_cl ^ " %outer, 2";
@@ -11855,6 +11863,8 @@ let emit_vec_map_helper_llvm (elem_ty : Ast.ty) (out_ty : Ast.ty) : string =
         "define ptr @mere_vec_%s_map_%s(ptr %%v, %%%s %%cl) {"
         t_tag u_tag cname;
       "entry:";
+      Printf.sprintf "  %%__vec_read0 = getelementptr %%%s, ptr %%v, i32 0, i32 4" t_struct;
+      "  call void @__lang_read_mark(ptr %__vec_read0) ; vec-map-read";
       Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%v, i32 0, i32 3" t_struct;
       "  %region = load ptr, ptr %rp";
       Printf.sprintf "  %%new = call ptr @mere_vec_%s_new(ptr %%region)" u_tag;
@@ -11894,6 +11904,8 @@ let emit_vec_filter_helper_llvm (elem_ty : Ast.ty) : string =
         "define ptr @mere_vec_%s_filter(ptr %%v, %%%s %%cl) {"
         tag cname;
       "entry:";
+      Printf.sprintf "  %%__vec_read0 = getelementptr %%%s, ptr %%v, i32 0, i32 4" t_struct;
+      "  call void @__lang_read_mark(ptr %__vec_read0) ; vec-filter-read";
       Printf.sprintf "  %%rp = getelementptr %%%s, ptr %%v, i32 0, i32 3" t_struct;
       "  %region = load ptr, ptr %rp";
       Printf.sprintf "  %%new = call ptr @mere_vec_%s_new(ptr %%region)" tag;
@@ -12096,6 +12108,8 @@ let emit_vec_to_owned_helper_llvm (elem_ty : Ast.ty) : string =
   String.concat "\n"
     [ Printf.sprintf "define ptr @mere_vec_to_owned_%s(ptr %%v) {" tag;
       "entry:";
+      Printf.sprintf "  %%__vec_read0 = getelementptr %%%s, ptr %%v, i32 0, i32 4" v_struct;
+      "  call void @__lang_read_mark(ptr %__vec_read0) ; vec-to-owned-read";
       Printf.sprintf "  %%new = call ptr @mere_owned_vec_%s_new()" tag;
       Printf.sprintf "  %%lp = getelementptr %%%s, ptr %%v, i32 0, i32 1" v_struct;
       "  %len = load i32, ptr %lp";
@@ -12178,6 +12192,8 @@ let emit_vec_to_list_helper_llvm (elem_ty : Ast.ty) (list_ty : Ast.ty)
   String.concat "\n"
     [ Printf.sprintf "define ptr @mere_vec_to_list_%s(ptr %%v) {" t_tag;
       "entry:";
+      Printf.sprintf "  %%__vec_read0 = getelementptr %%%s, ptr %%v, i32 0, i32 4" v_struct;
+      "  call void @__lang_read_mark(ptr %__vec_read0) ; vec-list-read";
       (* Allocate Nil node *)
       Printf.sprintf "  %%node_size_p = getelementptr %%%s, ptr null, i32 1" node_struct;
       "  %node_size = ptrtoint ptr %node_size_p to i64";
