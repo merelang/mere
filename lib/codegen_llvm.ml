@@ -11716,15 +11716,17 @@ let emit_map_iter_helper_llvm (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let struct_name = "mere_map_" ^ k_tag ^ "_" ^ v_tag in
   let inner_cl = closure_struct_name v_ty Ast.TyUnit in
   let outer_cl = closure_struct_name k_ty (Ast.TyArrow (v_ty, Ast.TyUnit)) in
-  (* Q-063: only the HASHED runtime carries the tombstone fields; the linear
-     fallback's struct is five fields wide and reading a `dead` pointer out of
-     it would be a read past the end. Same predicate that chooses the runtime,
-     so the two cannot drift apart. *)
+  (* Only the hashed runtime carries tombstones. Use the runtime-selection
+     predicate for both its dead slots and its owner field: hashed Maps keep
+     the owner at field 10; the linear fallback keeps it at field 5. *)
   let tombstoned = map_key_index_safe k_ty in
+  let owner_idx = if tombstoned then 10 else 5 in
   String.concat "\n"
     ([ Printf.sprintf "define i32 @mere_map_%s_%s_iter(ptr %%m, %%%s %%outer) {"
         k_tag v_tag outer_cl;
       "entry:";
+      Printf.sprintf "  %%__map_read_p = getelementptr %%%s, ptr %%m, i32 0, i32 %d" struct_name owner_idx;
+      "  call void @__lang_read_mark(ptr %__map_read_p) ; map-iter-read";
       Printf.sprintf "  %%outer_env = extractvalue %%%s %%outer, 0" outer_cl;
       Printf.sprintf "  %%outer_fn = extractvalue %%%s %%outer, 1" outer_cl;
       Printf.sprintf "  %%outer_fn2 = extractvalue %%%s %%outer, 2" outer_cl;

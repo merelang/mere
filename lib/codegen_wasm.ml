@@ -9879,7 +9879,8 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
                                        (i32.mul (local.get $i) (i32.const 8)))))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $scan_lp)))
-    (unreachable))
+    ;; A missing key follows the catchable failure path on the linear layout too.
+    (call $__lang_fail (global.get $__lang_mapget_msg)))
   (func $mere_map_%s_has (param $m8 i64) (param $k i64) (result i64)
     (local $m i32)
     (local $i i32) (local $len i32) (local $keys i32)
@@ -9947,10 +9948,12 @@ let emit_map_runtime_wasm (k_ty : Ast.ty) : string =
             (local.set $inner_cl (i32.wrap_i64
               (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
                              (local.get $outer_fn))))
+            (if (global.get $__lang_fail_flag) (then (return (i64.extend_i32_u (global.get $__lang_fail_sentinel))))) ;; map-iter-key-fail
             (drop (call_indirect (type $cl)
                     (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
                     (local.get $v)
                     (i32.load offset=4 (local.get $inner_cl))))))
+        (if (global.get $__lang_fail_flag) (then (return (i64.extend_i32_u (global.get $__lang_fail_sentinel))))) ;; map-iter-value-fail
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (i64.const 0))
@@ -10372,10 +10375,12 @@ let emit_map_runtime_wasm_hashed (k_ty : Ast.ty) : string =
             (local.set $inner_cl (i32.wrap_i64
               (call_indirect (type $cl) (i64.extend_i32_u (local.get $outer_env)) (local.get $k)
                              (local.get $outer_fn))))
+            (if (global.get $__lang_fail_flag) (then (return (i64.extend_i32_u (global.get $__lang_fail_sentinel))))) ;; map-iter-key-fail
             (drop (call_indirect (type $cl)
                     (i64.extend_i32_u (i32.load offset=0 (local.get $inner_cl)))
                     (local.get $v)
                     (i32.load offset=4 (local.get $inner_cl))))))
+        (if (global.get $__lang_fail_flag) (then (return (i64.extend_i32_u (global.get $__lang_fail_sentinel))))) ;; map-iter-value-fail
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lp)))
     (i64.const 0))

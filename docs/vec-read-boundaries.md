@@ -23,6 +23,7 @@ length and contents, rather than a snapshot taken when it was created.
 | `show`, `to_json` | When visiting the Vec, including one nested in a record, tuple, list or variant; see [formatting ownership](memory-model.md) for supported representations |
 | `f64x2_load` | Before checking the lane bounds, including failure |
 | `write_file_bytes`, `file_pwrite` | Before inspecting Vec storage to write or convert it to bytes |
+| C region-loop carry copy | Before recursively copying a source Vec, including one nested in a Map; see [Map read boundaries](map-read-boundaries.md) |
 | `vec_bytes` | No element-storage read: measures arena allocation, so it does not mark the Vec shared |
 
 File operations may fail before inspecting the Vec: for example, opening or
@@ -53,6 +54,8 @@ raw storage loop. LLVM guards iteration, folding, map, filter, concatenation,
 list conversion and Vec-to-OwnedVec conversion before their raw copies.
 Wasm already marks these supported paths through entry guards or checked
 length/get helpers.
+As of v0.1.704, C also marks Vec reads in the deep region-loop carry copier;
+normal handle promotion retains identity without copying slots.
 
 `scripts/vec_read_check.py --poison` checks interpreter, C, LLVM and Wasm
 against explicit expected output. It covers empty/full inputs, failed access,
