@@ -116,6 +116,8 @@ jobs:
 
   # Separate runners isolate fixed ports, build outputs and large compilations.
   # Every group keeps the same pinned tools and required preflights.
+  # Container and coroutine suites have their own groups so they do not add to
+  # the runtime and RISC-V execution paths' measured critical times.
   gate_shards:
     name: Gate group (${{ matrix.group }})
     needs: gate_plan
@@ -125,7 +127,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [compiler, runtime, web, conformance, downstream, riscv]
+        group:
+          - compiler
+          - runtime
+          - containers
+          - web
+          - conformance
+          - downstream
+          - coroutines
+          - riscv
+          - riscv-ownership
 
     steps:
       - uses: actions/checkout@v5
@@ -865,7 +876,7 @@ jobs:
       # v0.1.582: and a container another thread has read is read-only, an
       # OwnedVec belongs to the thread spawn moved it into.
       - name: owner_check (a container is written only by the thread that made it)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: |
           sh scripts/owner_check.sh --poison
           sh scripts/wasm_map_owner_check.sh --poison
@@ -876,11 +887,11 @@ jobs:
           python3 scripts/c_vec_read_check.py --poison
 
       - name: container_format_owner (show and JSON reads preserve container ownership)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: python3 scripts/container_format_owner_check.py --poison
 
       - name: ownedvec_claim (the interpreter gives released storage to one domain)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: opam exec -- sh scripts/ownedvec_claim_check.sh --poison
 
       # A saturated call of a curried inner function allocates no closures on
@@ -1464,8 +1475,9 @@ jobs:
       # compiled at all. The script now refuses to pass on zero, and this step
       # now runs whenever the gates do.
       - name: Check out the dogfood repositories
-        if: ${{ !cancelled() && (matrix.group == 'downstream' || matrix.group == 'riscv') }}
-        continue-on-error: true
+        if: ${{ !cancelled() && (matrix.group == 'downstream' || matrix.group == 'coroutines' || matrix.group == 'riscv' || matrix.group == 'riscv-ownership') }}
+        env:
+          MERE_REQUIRE_MEMU: ${{ matrix.group != 'downstream' }}
         run: |
           mkdir -p "$RUNNER_TEMP/downstream"
           cd "$RUNNER_TEMP/downstream"
@@ -1478,6 +1490,16 @@ jobs:
               "https://github.com/284km/$r.git" "$r" \
               || { echo "clone failed: $r (the gate will report it absent)"; continue; }
           done
+          # Some harnesses can run without memu and report only their native
+          # half. Each isolated RISC-V group must require both guest runners.
+          if [ "$MERE_REQUIRE_MEMU" = true ]; then
+            for width in 32 64; do
+              test -f "memu/riscv-runc/rv${width}i_run.mere" || {
+                echo "missing memu RV${width} runner"
+                exit 1
+              }
+            done
+          fi
           # Dependency resolution is NOT here: downstream_check.sh runs
           # `mere install` itself when a repo has a mere.toml and no
           # .mere_modules, so the gate asks the same question on a fresh clone
@@ -1538,7 +1560,7 @@ jobs:
       # v0.1.623: here, after the clones, so that RISC-V's column (both widths,
       # on memu, with poisons over the prelude) runs too.
       - name: coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'coroutines' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/coro_check.sh --poison
 
       # ⚠ THIS GATE WAS IN NO WORKFLOW. rv_exec_check is the differential
@@ -1552,48 +1574,48 @@ jobs:
         run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_exec_check.sh
 
       - name: rv_vec_owner (logical threads own Vecs, RV32 and RV64 against C)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_vec_owner_check.py --poison
 
       - name: container_format_owner (nested Vec formatting, RV32 and RV64 against C)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/container_format_owner_check.py --rv-only --poison
 
       - name: rv_map_owner (logical threads own Maps, RV32 and RV64 against C)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: |
           MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_map_owner_check.py --poison
 
       - name: rv_builder_owner (ByteBuf and ListBuf, RV32 and RV64 against C)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_builder_owner_check.py --poison
 
       - name: rv_strbuf_owner (logical threads own StrBufs, RV32 and RV64 against C)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_strbuf_owner_check.py --poison
 
       - name: rv_ownedvec_owner (exclusive access and handoff, RV32 and RV64 against C)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_ownedvec_owner_check.py --poison
 
       - name: map_read (Map read boundaries on interpreter, C, LLVM and Wasm)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: python3 scripts/map_read_check.py --poison
 
       - name: map_read_riscv (Map read boundaries against explicit results at both widths)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/map_read_check.py --rv-only --poison
 
       - name: vec_read (conversion and traversal boundaries on interpreter, C, LLVM and Wasm)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: python3 scripts/vec_read_check.py --poison
 
       - name: vec_read_riscv (supported read boundaries against explicit results at both widths)
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/vec_read_check.py --rv-only --poison
 
       - name: ownedvec_conversion (access, conversion and spawn handoff on interpreter, C, LLVM and Wasm)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: python3 scripts/ownedvec_conversion_check.py --poison
 
       # v0.1.637 (Q-200): a failing program fails the same way on RISC-V --
