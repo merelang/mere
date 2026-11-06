@@ -244,8 +244,10 @@ Run `ruby scripts/ci_gate_check.rb --self-test` to validate assignments and
 failure propagation after editing the workflow. Both `ci.yml` and `pages.yml`
 must be green before a release.
 
-The build matrix, Pages and shared distribution build allow up to 30 minutes
-for compiler setup and 15 minutes for dependencies, within a 60-minute job.
+The build matrix, integration groups, Pages and shared distribution build
+allow up to 30 minutes for compiler setup and 15 minutes for dependencies.
+Build, Pages and distribution jobs have a 60-minute limit; integration groups
+retain their 90-minute limit.
 Dependency installation uses `scripts/retry.sh`: one retry after five seconds,
 with the second attempt's exit status preserved. Opam downloads have two
 attempts. Cancellation and command lookup failures stop immediately.

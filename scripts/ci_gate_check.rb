@@ -99,7 +99,8 @@ module CIGates
         require!(!step.key?("if"), "setup and required preflights must run in every group")
       end
       if step["name"].to_s.start_with?("Install ", "Set up ") || step["name"].to_s.start_with?("PostgreSQL")
-        require!(step["timeout-minutes"].is_a?(Integer) && (1..15).cover?(step["timeout-minutes"]),
+        ceiling = step["name"] == "Set up OCaml" ? 30 : 15
+        require!(step["timeout-minutes"].is_a?(Integer) && (1..ceiling).cover?(step["timeout-minutes"]),
                  "#{step['name']}: network setup needs a bounded timeout")
       end
     end
@@ -194,6 +195,7 @@ module CIGates
       "optional RISC-V install" => ->(c) { c[:steps].find { |s| s["name"] == RISCV_TOOLS.first }["continue-on-error"] = true },
       "unbounded package install" => ->(c) { c[:steps].find { |s| s["name"] == RISCV_TOOLS.first }.delete("timeout-minutes") },
       "unbounded setup action" => ->(c) { c[:steps].find { |s| s["name"] == "Set up OCaml" }.delete("timeout-minutes") },
+      "excessive compiler setup" => ->(c) { c[:steps].find { |s| s["name"] == "Set up OCaml" }["timeout-minutes"] = 31 },
       "global preflight in isolated group" => ->(c) { c[:steps].find { |s| s["name"] == PREFLIGHT }.delete("env") },
       "missing group dependency" => ->(c) { c[:final]["needs"] = ["gate_plan"] },
       "skipped final check" => ->(c) { c[:final].delete("if") },

@@ -152,7 +152,7 @@ jobs:
         timeout-minutes: 5
 
       - name: Set up OCaml
-        timeout-minutes: 15
+        timeout-minutes: 30
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: "5.4"
