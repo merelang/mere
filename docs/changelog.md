@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.710 — 2026-11-06
+
+_Returned closures retain their inferred argument types through aliases._
+
+Single-use specialization now propagates concrete uses back through alias
+chains and repeats when a producer exposes another use. A returned coroutine
+body no longer needs an explicit `Coro[unit]` parameter annotation to compile
+on C and LLVM. Nested bindings of the same name retain their own uses.
+Regression cases cover ordinary and sized coroutines, repeated
+use without repeating factory side effects, and C copies out of a region.
+A four-backend parity case passes records, tuples, functions and SIMD values
+through aliased returned closures. The parity corpus now has 247 programs.
+
+The standard-library reference describes current host I/O support, including
+`read_lines`, `env_var` and the Wasm stderr sink. Executed examples cover empty
+files, final newlines and process-environment agreement.
+
+Linux CI, Pages and release jobs configure bounded APT downloads before
+OCaml setup and use the official HTTPS Ubuntu archive in place of the Azure
+archive alias. Existing opam caches remain enabled. Configuration controls
+cover ordering, required execution, download bounds and cache use; all 187
+required gates and four build configurations remain enabled.
+
 ## v0.1.709 — 2026-11-06
 
 _C allocations honor the alignment of captured SIMD values and typed payloads._

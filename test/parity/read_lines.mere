@@ -1,6 +1,5 @@
-// `read_lines` on interp and C; LLVM and Wasm refuse it by name (Phase 5.1 /
-// 6.1 MVP), which is the honest half of a partial implementation and what
-// parity records as UNSUP.
+// `read_lines` on the interpreter, C, LLVM and Wasm. The file is supplied by
+// the native runtime or the Wasm host; a browser needs a host file provider.
 //
 // Its C runtime section (`__lang_read_lines`) had no program at all until this
 // one. It turned out to be correct -- unlike the two sections that were in the
@@ -10,12 +9,18 @@
 // The file is written first so the case does not depend on anything outside
 // itself. Blank line and no trailing newline are in the payload on purpose:
 // they are where a line splitter's off-by-one lives.
-let path = "/tmp/mere_parity_read_lines.txt";
+let path = "/tmp/mere_parity_read_lines_" ++ str_of_int (random_int 1000000000);
 let _ = write_file path "alpha\nbeta\n\ngamma";
 
 let ls = read_lines path;
 {
   print (str_of_int (len ls));
   print (match ls with | Nil -> "-" | Cons (h, _) -> h);
-  print (str_join "|" ls)
+  print (str_join "|" ls);
+  let _ = write_file path "" in
+  let _ = print_int (list_len (read_lines path)) in
+  let _ = write_file path "alpha\n" in
+  let _ = print_int (list_len (read_lines path)) in
+  let _ = file_delete path in
+  ()
 }

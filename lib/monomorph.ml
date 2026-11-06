@@ -538,7 +538,11 @@ let note_arrow_use ~arrows_only ~residual (seen : (string, Ast.ty) Hashtbl.t) (e
         | _ -> ())
      | _ -> ())
 
-let find_all_concrete_arrows_in ?(arrows_only = true) ?(residual = false) (name : string)
+(* A binding's continuation must exclude nested bindings of the same name.
+   Whole-program function discovery also scans definitions themselves, so it
+   retains its existing treatment unless the caller requests [scope_lets]. *)
+let find_all_concrete_arrows_in ?(arrows_only = true) ?(residual = false)
+    ?(scope_lets = false) (name : string)
     (exprs : Ast.expr list) : Ast.ty list =
   let seen : (string, Ast.ty) Hashtbl.t = Hashtbl.create 4 in
   let rec go (e : Ast.expr) =
@@ -551,9 +555,12 @@ let find_all_concrete_arrows_in ?(arrows_only = true) ?(residual = false) (name 
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
-    | Ast.With (_, v, b) -> go v; go b
+    | Ast.Let (p, v, b) ->
+      go v; if not scope_lets || not (List.mem name (pattern_vars p)) then go b
+    | Ast.Let_rec (bs, b) ->
+      if not scope_lets || not (List.exists (fun (n, _, _) -> n = name) bs) then
+        (List.iter (fun (_, _, v) -> go v) bs; go b)
+    | Ast.With (n, v, b) -> go v; if not scope_lets || n <> name then go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     (* A fn parameter named `name` shadows an outer `name` (see
        find_concrete_arrow); only the Fun binder is handled. *)
@@ -574,7 +581,8 @@ let find_all_concrete_arrows_in ?(arrows_only = true) ?(residual = false) (name 
         if List.mem name (pattern_vars p) then ()
         else ((match g with Some ge -> go ge | None -> ()); go b)) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_loop (_, n, b) -> if not scope_lets || n <> name then go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
@@ -693,17 +701,21 @@ let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
     | Ast.App (a, b) -> go a; go b
     | Ast.Neg a | Ast.Annot (a, _) -> go a
-    | Ast.Let (_, v, b) -> go v; go b
-    | Ast.Let_rec (bs, b) -> List.iter (fun (_, _, v) -> go v) bs; go b
-    | Ast.With (_, v, b) -> go v; go b
+    | Ast.Let (p, v, b) -> go v; if not (List.mem name (pattern_vars p)) then go b
+    | Ast.Let_rec (bs, b) ->
+      if not (List.exists (fun (n, _, _) -> n = name) bs) then
+        (List.iter (fun (_, _, v) -> go v) bs; go b)
+    | Ast.With (n, v, b) -> go v; if n <> name then go b
     | Ast.If (c, t, e_) -> go c; go t; go e_
     | Ast.Fun (p, _, b) -> if p <> name then go b
     | Ast.Constr (_, a) -> (match a with Some x -> go x | None -> ())
     | Ast.Match (s, arms) ->
-      go s; List.iter (fun (_, g, b) ->
-        (match g with Some ge -> go ge | None -> ()); go b) arms
+      go s; List.iter (fun (p, g, b) ->
+        if not (List.mem name (pattern_vars p)) then
+          ((match g with Some ge -> go ge | None -> ()); go b)) arms
     | Ast.Tuple es -> List.iter go es
-    | Ast.Region_block (_, b) | Ast.Region_loop (_, _, b) -> go b
+    | Ast.Region_block (_, b) -> go b
+    | Ast.Region_loop (_, n, b) -> if n <> name then go b
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, v) -> go v) fs
     | Ast.Field_get (a, _) -> go a
@@ -712,14 +724,21 @@ let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
   List.iter go exprs; !found
 
 let specialize_single_use_local_fns (root : Ast.expr) : unit =
-  let rec go (e : Ast.expr) =
+  let changed = ref true in
+  let specialize vty t =
+    try
+      Typer.unify Loc.dummy (erase_container_regions vty) t;
+      if ty_is_concrete (Ast.walk vty) then changed := true
+    with _ -> ()
+  in
+  let specialize_binding (e : Ast.expr) =
     (match e.Ast.node with
      | Ast.Let ({ Ast.pnode = Ast.P_var n; _ },
                 ({ Ast.node = Ast.Fun _; ty = Some vty; _ } as value), body)
        when not (ty_is_concrete (Ast.walk vty)) ->
-       (match find_all_concrete_arrows_in n [body] with
+       (match find_all_concrete_arrows_in ~scope_lets:true n [body] with
         | [arrow] when not (has_unresolved_use_of n [body]) ->
-          (try Typer.unify Loc.dummy (erase_container_regions vty) arrow with _ -> ())
+          specialize vty arrow
         | _ -> ());
        let _ = value in ()
      (* The same treatment for a local `let` bound to a polymorphic VALUE. The
@@ -731,9 +750,9 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
        ignore n
      | Ast.Let ({ Ast.pnode = Ast.P_var n; _ }, { Ast.ty = Some vty; _ }, body)
        when not (ty_is_concrete (Ast.walk vty)) ->
-       (match find_all_concrete_arrows_in ~arrows_only:false n [body] with
+       (match find_all_concrete_arrows_in ~arrows_only:false ~scope_lets:true n [body] with
         | [t] when not (has_unresolved_use_of n [body]) ->
-          (try Typer.unify Loc.dummy (erase_container_regions vty) t with _ -> ())
+          specialize vty t
         | _ -> ())
      | Ast.Let_rec (bindings, body) ->
        (* Single-use specialization for a local `let rec` group, RESTRICTED to
@@ -767,13 +786,15 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
              body :: List.filter_map (fun (_, _, v) ->
                if v == value then None else Some v) bindings
            in
-           (match find_all_concrete_arrows_in n scan_roots with
-            | [arrow] -> (try Typer.unify Loc.dummy (erase_container_regions vty) arrow with _ -> ())
+           (match find_all_concrete_arrows_in ~scope_lets:true n scan_roots with
+            | [arrow] -> specialize vty arrow
             | _ -> ())
          | _ -> ()) bindings
-     | _ -> ());
+     | _ -> ())
+  in
+  let rec go (e : Ast.expr) =
     (* Recurse into every sub-expression so nested local fns are handled. *)
-    match e.Ast.node with
+    (match e.Ast.node with
     | Ast.Int_lit _ | Ast.Float_lit _ | Ast.Bool_lit _ | Ast.Str_lit _
     | Ast.Unit_lit | Ast.Var _ -> ()
     | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b)
@@ -795,9 +816,17 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
     | Ast.Ref (_, _, a) -> go a
     | Ast.Record_lit (_, fs) -> List.iter (fun (_, e) -> go e) fs
     | Ast.Field_get (a, _) -> go a
-    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs
+    | Ast.Record_update (a, fs) -> go a; List.iter (fun (_, e) -> go e) fs);
+    specialize_binding e
   in
-  go root
+  (* A returned closure can pass through several generalized aliases before
+     its argument becomes concrete. Propagate uses back through those aliases
+     before specializing their producers; repeat when a producer exposes a
+     new concrete use inside its body. *)
+  while !changed do
+    changed := false;
+    go root
+  done
 
 (* Phase 23.3: deep-clone an expression with fresh tyvars.
    For multi-instantiation specialization of poly fns: the original

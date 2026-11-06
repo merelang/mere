@@ -1,0 +1,26 @@
+// C copies a returned body out of a region before creating the coroutine.
+let root = coro_root ();
+let out = vec_new ();
+let calls = vec_new ();
+let make_body = fn n ->
+  let _ = vec_push calls n in
+  fn _me -> fn (_u: unit) -> coro_exit (
+    let _ = vec_push out n in root) ();
+let first = region R { make_body 13 };
+let second = first;
+let c = coro_new second;
+let _ = coro_switch c;
+let d = coro_new_sized 65536 second;
+let _ = coro_switch d;
+let make_typed = fn n ->
+  let _ = vec_push calls n in
+  fn (_me: Coro[unit]) -> fn (_u: unit) -> coro_exit (
+    let _ = vec_push out n in root) ();
+let typed = region R { make_typed 17 };
+let c2 = coro_new typed;
+let _ = coro_switch c2;
+let d2 = coro_new_sized 65536 typed;
+let _ = coro_switch d2;
+let _ = print (str_of_int (vec_get out 0) ++ " " ++ str_of_int (vec_get out 1)
+  ++ " " ++ str_of_int (vec_get out 2) ++ " " ++ str_of_int (vec_get out 3));
+print_int (vec_len calls)

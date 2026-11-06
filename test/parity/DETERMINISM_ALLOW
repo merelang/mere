@@ -9,3 +9,4 @@ file_exists_random_int asserts only structure (a draw from 6 is in range, a draw
 file_delete uses random_int only to name its scratch file (parity and rv_exec may run it at once); nothing drawn is printed
 dirs_and_env uses random_int only to name its scratch directory (parity and rv_exec may run it at once); nothing drawn is printed
 proc_cwd uses random_int only to name its scratch file (parity and rv_exec may run it at once); nothing drawn is printed
+read_lines uses random_int only to name its scratch file; only fixed file contents and line counts reach stdout

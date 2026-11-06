@@ -276,6 +276,21 @@ module CIGates
         end
       end
     end
+    [["ci.yml", "build", true], ["ci.yml", "gate_shards", false],
+     ["pages.yml", "build", false], ["release-build.yml", "binary", true]].each do |file, name, conditional|
+      steps = workflows.fetch(file).fetch("jobs").fetch(name).fetch("steps")
+      matches = steps.select { |s| s["name"] == "Configure Ubuntu package downloads" }
+      require!(matches.length == 1, "#{file}/#{name}: Ubuntu package configuration must run once")
+      apt = matches.first
+      setup = steps.find { |s| s["name"] == "Set up OCaml" }
+      require!(steps.index(apt) < steps.index(setup), "#{file}/#{name}: configure downloads before OCaml setup")
+      require!(apt["run"] == "sudo python3 scripts/ci_apt_setup.py /etc/apt" &&
+               apt["timeout-minutes"] == 1 && !apt["continue-on-error"],
+               "#{file}/#{name}: require bounded Ubuntu package configuration")
+      require!(conditional ? apt["if"] == "${{ runner.os == 'Linux' }}" : !apt.key?("if"),
+               "#{file}/#{name}: Ubuntu package configuration must run on every Linux runner")
+      require!(setup.fetch("with")["cache"] == true, "#{file}/#{name}: retain the opam compiler cache")
+    end
     pages = workflows.fetch("pages.yml").fetch("jobs").fetch("build").fetch("steps")
     apt = pages.find { |s| s["name"] == "Install wabt (wat2wasm)" }
     curl = pages.find { |s| s["name"] == "Install binaryen (wasm-opt), pinned as in ci.yml" }
@@ -355,6 +370,31 @@ module CIGates
       end
       raise Invalid, "setup negative control stayed green: #{poison}"
     end
+    [["ci.yml", "build"], ["ci.yml", "gate_shards"],
+     ["pages.yml", "build"], ["release-build.yml", "binary"]].each do |file, name|
+      %w[missing late optional skipped timeout cache].each do |poison|
+        copy = Marshal.load(Marshal.dump(workflows))
+        steps = copy.fetch(file).fetch("jobs").fetch(name).fetch("steps")
+        apt = steps.find { |s| s["name"] == "Configure Ubuntu package downloads" }
+        case poison
+        when "missing" then steps.delete(apt)
+        when "late" then steps.delete(apt); steps.push(apt)
+        when "optional" then apt["continue-on-error"] = true
+        when "skipped" then apt["if"] = false
+        when "timeout" then apt.delete("timeout-minutes")
+        when "cache" then steps.find { |s| s["name"] == "Set up OCaml" }.fetch("with")["cache"] = false
+        end
+        begin
+          check_setup(copy)
+        rescue Invalid, KeyError
+          checks += 1
+          next
+        end
+        raise Invalid, "setup negative control stayed green: #{file}/#{name}/#{poison}"
+      end
+    end
+    stdout, stderr, status = Open3.capture3("python3", File.expand_path("ci_apt_setup_test.py", __dir__))
+    require!(status.success?, "Ubuntu package configuration tests failed: #{stdout}#{stderr}")
     check_retry
     puts "ci_gates: #{checks} setup negative controls caught; dependency retry behavior checked"
   end

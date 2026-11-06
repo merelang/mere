@@ -1,0 +1,27 @@
+// Concrete argument types must reach a closure factory through every alias.
+type point = { x: int, y: int };
+let make = fn n -> fn _value -> n;
+let first = make 42;
+let second = first;
+let third = second;
+let _ = print_int (third (point { x = 1, y = 2 }));
+let tuple_first = make 43;
+let tuple_second = tuple_first;
+let tuple_third = tuple_second;
+let _ = print_int (tuple_third (1, true));
+let fn_first = make 44;
+let fn_second = fn_first;
+let fn_third = fn_second;
+let _ = print_int (fn_third (fn n -> n + 1));
+let simd_first = make 45;
+let simd_second = simd_first;
+let simd_third = simd_second;
+let _ = print_int (simd_third (u8x16_splat 7));
+// Specializing the outer function reveals another use in its body.
+let run = fn value ->
+  let keep = fn x -> x in
+  let first = keep in
+  let second = first in
+  second value;
+let run_alias = run;
+print_int ((run_alias (point { x = 46, y = 2 })).x)

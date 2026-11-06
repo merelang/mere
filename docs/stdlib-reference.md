@@ -424,13 +424,27 @@ inside a region block that is otherwise doing its job. A `bytes` is one flat
 allocation and does not hit that. Reach for `file_pread` when the page is numbers;
 reach for `file_pread_bytes` when it is a file.
 
-**★ Codegen status** (v0.1.246 for the first two): `print_no_nl` and `print_err` lower
-on **interp + C + LLVM**; both were refused by LLVM until it grew a `write(fd, ...)`
-for its own panic diagnostic, at which point they were three lines each. On **Wasm**
-`print_err` is **refused**: it used to write to the same host sink as `print`, so a
-diagnostic landed in the program's own output and nothing said so, and the JS host ABI
-has no second sink to give it. `print` / `print_int` / `print_bool` / `read_file` /
-`write_file` work in all 3 backends (Wasm goes through host imports; `scripts/run_wasm.js` provides puts / read_file / write_file). `print_int` / `print_bool` were the exception until v0.1.190 — this line claimed them for years while only the interpreter had them; C emitted a call to an undefined symbol and LLVM / Wasm refused outright. They now lower on all four (C through `printf`, LLVM and Wasm through the `str_of_int` they already had), locked by `test/parity/print_int_bool.mere`. `read_lines` / `env_var` are **interpreter-only** (codegen would need `'a list` / `'a option` construction + systematic outside-world access; not yet covered by Phases 22-31). `args` works on **all four** backends: C and LLVM read the argc/argv their `main` was handed, Wasm folds the host's `arg_count` / `arg_get` (v0.1.159 for Wasm, v0.1.169 for LLVM). The native-CLI / dogfood builtins `run` / `print_err` / `file_exists` / `file_mtime` / `file_size` / `tty_raw` / `tty_restore` / `read_key` / `random_int` also work on the **C native** backend (added for the `mk` / `mrog` / `mwasm` dogfoods, v0.1.13-v0.1.21).
+**★ Host I/O support.** `print`, `print_int`, `print_bool`, `print_no_nl`,
+`print_err`, `read_file`, `write_file`, `read_lines`, `env_var` and `args` have
+lowerings on the interpreter, C, LLVM and Wasm. `print_err` writes to stderr
+on native runtimes and the Node Wasm host; `print_no_nl` writes to stdout
+without adding a newline.
+
+`read_lines` returns a `str list`: an empty file gives `Nil`, blank lines are
+kept, and a final newline does not add an empty element. `env_var` returns
+`Some value` for a present variable and `None` when it is absent. The native
+backends use the process environment; ordinary Wasm uses its host's environment
+provider, and a WASI component uses the environment supplied by its runner.
+A browser host without an environment provider has no process environment to
+expose. File access likewise depends on the Wasm host or the component's
+granted filesystem access.
+
+[`test/parity/read_lines.mere`](../test/parity/read_lines.mere) exercises file
+splitting on all four backends, and
+[`test/parity/dirs_and_env.mere`](../test/parity/dirs_and_env.mere) checks directory
+operations and agreement between `env_var` and `env_pairs`. The generated
+[host matrix](host-matrix.md) records lowering availability, including RISC-V;
+its `yes` cells do not establish that a browser or sandbox grants an operation.
 
 ```
 let _ = print "Hello";
