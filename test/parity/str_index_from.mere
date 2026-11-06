@@ -1,0 +1,66 @@
+// str_index_from, where it can differ from str_index_of on the rest of the
+// haystack: the search starts AT `from` (a hit there counts), a needle that
+// straddles `from` is not found, an offset below 0 reads as 0, an offset past
+// the end finds nothing, the empty needle answers the offset while it is within
+// the haystack, and a haystack holding NUL is searched by its length.
+//
+// It exists for a search that resumes past its last hit -- a scanner, a regex
+// prefilter -- which had str_index_of (always from 0) and walked the rest a
+// byte at a time.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+let i = fn (x: int) -> print (str_of_int x);
+let large_offset = 2147483647;
+let negative_offset = 0 - large_offset - 1;
+
+// --- resuming: each hit, then the next from one past it ---
+let _ = i (str_index_from "a@b@c@" "@" 0);      // 1
+let _ = i (str_index_from "a@b@c@" "@" 2);      // 3
+let _ = i (str_index_from "a@b@c@" "@" 4);      // 5
+let _ = i (str_index_from "a@b@c@" "@" 6);      // -1
+
+// --- a hit AT from counts; one that starts before it does not ---
+let _ = i (str_index_from "abcabc" "abc" 3);    // 3
+let _ = i (str_index_from "abcabc" "bca" 2);    // -1
+let _ = i (str_index_from "aaaa" "aa" 1);       // 1
+let _ = i (str_index_from "aaaa" "aa" 3);       // -1
+
+// --- the offset's edges ---
+let _ = i (str_index_from "abc" "a" (0 - 5));   // 0
+let _ = i (str_index_from "abc" "c" 2);         // 2
+let _ = i (str_index_from "abc" "c" 3);         // -1
+let _ = i (str_index_from "abc" "c" 99);        // -1
+let _ = i (str_index_from "" "a" 0);            // -1
+let _ = i (str_index_from "abc" "bc" large_offset); // -1
+let _ = i (str_index_from "abc" "bc" (large_offset - 1)); // -1
+let _ = i (str_index_from "abc" "a" negative_offset); // 0
+
+// --- the empty needle answers the offset inside the haystack ---
+let _ = i (str_index_from "abc" "" 0);          // 0
+let _ = i (str_index_from "abc" "" 2);          // 2
+let _ = i (str_index_from "abc" "" 3);          // 3
+let _ = i (str_index_from "abc" "" 4);          // -1
+let _ = i (str_index_from "abc" "" (0 - 1));    // 0
+let _ = i (str_index_from "abc" "" large_offset); // -1
+let _ = i (str_index_from "abc" "" negative_offset); // 0
+
+// --- the needle longer than what is left ---
+let _ = i (str_index_from "abcd" "cde" 2);      // -1
+let _ = i (str_index_from "ab" "abc" 0);        // -1
+
+// --- NUL in the haystack and in the needle ---
+let z = chr 0;
+let h = "a" ++ z ++ "b" ++ z ++ "c";
+let _ = i (str_index_from h z 0);               // 1
+let _ = i (str_index_from h z 2);               // 3
+let _ = i (str_index_from h (z ++ "c") 0);      // 3
+let _ = i (str_index_from h "c" 4);             // 4
+
+// --- UTF-8 positions are byte offsets ---
+let _ = i (str_index_from "🦊a🦊" "🦊" 1);       // 5
+let _ = i (str_index_from "🦊a🦊" "a" 1);        // 4
+let _ = i (str_index_from "🦊a🦊" "🦊" 5);       // 5
+
+// --- agrees with str_index_of from 0 ---
+let _ = i (str_index_from "hello world" "o" 0 - str_index_of "hello world" "o");  // 0

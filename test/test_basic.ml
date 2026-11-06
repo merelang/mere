@@ -1872,6 +1872,25 @@ let () =
   check "str_last_index_of type"
     (Pipeline.type_of "str_last_index_of") "(str -> (str -> int))";
 
+  check "str_index_from: resumes after a previous hit"
+    (Pipeline.process "str_index_from \"a@b@c\" \"@\" 2") "3";
+  check "str_index_from: includes a hit at the offset"
+    (Pipeline.process "str_index_from \"abcabc\" \"abc\" 3") "3";
+  check "str_index_from: a hit before the offset is excluded"
+    (Pipeline.process "str_index_from \"abcabc\" \"bca\" 2") "-1";
+  check "str_index_from: largest offset cannot overflow"
+    (Pipeline.process "str_index_from \"abc\" \"bc\" int_max") "-1";
+  check "str_index_from: minimum offset starts at zero"
+    (Pipeline.process "str_index_from \"abc\" \"a\" int_min") "0";
+  check "str_index_from: empty needle matches at the end"
+    (Pipeline.process "str_index_from \"abc\" \"\" 3") "3";
+  check "str_index_from: empty needle past the end is absent"
+    (Pipeline.process "str_index_from \"abc\" \"\" 4") "-1";
+  check "str_index_from: saved partial application"
+    (Pipeline.process "let search = str_index_from \"a@b@c\" \"@\" in search 2") "3";
+  check "str_index_from type"
+    (Pipeline.type_of "str_index_from") "(str -> (str -> (int -> int)))";
+
   check "str_split: basic split"
     (Pipeline.process
        "type 'a list = Nil | Cons of 'a * 'a list;\n\

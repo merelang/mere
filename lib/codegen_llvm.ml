@@ -5920,6 +5920,16 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
                   "  %s = call i64 @__lang_str_index_of(ptr %s, ptr %s)"
                   raw hv nv);
     raw
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "str_index_from"; _ }, h_e); _ }, n_e); _ }, f_e) ->
+    (* v0.1.707: str_index_from h n from — curried, three deep. *)
+    let hv = emit_expr env h_e in
+    let nv = emit_expr env n_e in
+    let fv = emit_expr env f_e in
+    let raw = fresh_reg () in
+    emit_instr (Printf.sprintf
+                  "  %s = call i64 @__lang_str_index_from(ptr %s, ptr %s, i64 %s)"
+                  raw hv nv fv);
+    raw
   | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_last_index_of"; _ }, h_e); _ }, n_e) ->
     (* v0.1.302: str_last_index_of h n — curried, same shape. *)
     let hv = emit_expr env h_e in
@@ -14459,6 +14469,45 @@ let str_concat_helper =
       "  br label %loop";
       "loop:";
       "  %i = phi i64 [ 0, %pre ], [ %inext, %cont ]";
+      "  %p = getelementptr i8, ptr %h, i64 %i";
+      "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nn)";
+      "  %eq = icmp eq i32 %c, 0";
+      "  br i1 %eq, label %found, label %cont";
+      "cont:";
+      "  %inext = add i64 %i, 1";
+      "  %done = icmp ugt i64 %inext, %last";
+      "  br i1 %done, label %retneg, label %loop";
+      "found:";
+      "  ret i64 %i";
+      "retneg:";
+      "  ret i64 -1";
+      "}";
+      "";
+      (* v0.1.707: str_index_from — __lang_str_index_of's loop, started at
+         `from` (below 0 reads as 0). The empty needle answers `from` while it
+         is within the haystack, -1 past it. *)
+      "define i64 @__lang_str_index_from(ptr %h, ptr %n, i64 %from) {";
+      "entry:";
+      "  %hn = call i64 @__lang_str_size(ptr %h)";
+      "  %nn = call i64 @__lang_str_size(ptr %n)";
+      "  %neg = icmp slt i64 %from, 0";
+      "  %f = select i1 %neg, i64 0, i64 %from";
+      "  %is_empty = icmp eq i64 %nn, 0";
+      "  br i1 %is_empty, label %empty, label %chk";
+      "empty:";
+      "  %fin = icmp ule i64 %f, %hn";
+      "  br i1 %fin, label %retf, label %retneg";
+      "retf:";
+      "  ret i64 %f";
+      "chk:";
+      "  %toolong = icmp ugt i64 %nn, %hn";
+      "  br i1 %toolong, label %retneg, label %pre";
+      "pre:";
+      "  %last = sub i64 %hn, %nn";
+      "  %past = icmp ugt i64 %f, %last";
+      "  br i1 %past, label %retneg, label %loop";
+      "loop:";
+      "  %i = phi i64 [ %f, %pre ], [ %inext, %cont ]";
       "  %p = getelementptr i8, ptr %h, i64 %i";
       "  %c = call i32 @memcmp(ptr %p, ptr %n, i64 %nn)";
       "  %eq = icmp eq i32 %c, 0";

@@ -120,6 +120,8 @@ let _ = print_int (list_len (vec_to_list v));' ;;
     random_float) echo 'let _ = print_int (if random_float () < 1.0 then 1 else 0);' ;;
     rvlist_len) echo 'let _ = print_int (len (Cons (1, Nil)));' ;;
     str_count|str_last_index_of) echo "let _ = print_int ($1 \"abab\" \"ab\");" ;;
+    # v0.1.707
+    str_index_from) echo 'let _ = print_int (str_index_from "abab" "ab" 1);' ;;
     utf8_chars) echo 'let _ = print_int (list_len (utf8_chars "ab"));' ;;
     vec_iter) echo 'let v = vec_new ();
 let _ = vec_push v 1;

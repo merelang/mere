@@ -1,0 +1,9 @@
+// The largest interpreter integer must be rejected before adding the needle
+// length to it. This wide fixture complements the RV32-compatible catalogue.
+let large_offset = 4611686018427387903;
+let negative_offset = 0 - large_offset - 1;
+let _ = print_int (str_index_from "abc" "bc" large_offset); // -1
+let _ = print_int (str_index_from "abc" "bc" (large_offset - 1)); // -1
+let _ = print_int (str_index_from "abc" "a" negative_offset); // 0
+let _ = print_int (str_index_from "abc" "" large_offset); // -1
+print_int (str_index_from "abc" "" negative_offset) // 0

@@ -3460,6 +3460,10 @@ let rec emit_expr (e : Ast.expr) : string =
           the needle. Emits a call to the runtime helper. *)
        Printf.sprintf "__lang_str_index_of(%s, %s)"
          (emit_expr h_e) (emit_expr arg)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "str_index_from"; _ }, h_e); _ }, n_e) ->
+       (* v0.1.707: str_index_from h n from — the outer App carries `from`. *)
+       Printf.sprintf "__lang_str_index_from(%s, %s, %s)"
+         (emit_expr h_e) (emit_expr n_e) (emit_expr arg)
      | Ast.App ({ node = Ast.Var "str_last_index_of"; _ }, h_e) ->
        (* v0.1.302: same shape, searching from the end. *)
        Printf.sprintf "__lang_str_last_index_of(%s, %s)"
@@ -9766,6 +9770,26 @@ let str_concat_helper =
       "  if (nn > hn) return -1;";
       "  const char* last = h + (hn - nn);";
       "  const char* p = h;";
+      "  while (p <= last) {";
+      "    const char* q = (const char*)memchr(p, (unsigned char)n[0], (size_t)(last - p) + 1);";
+      "    if (!q) return -1;";
+      "    if (memcmp(q, n, nn) == 0) return (int64_t)(q - h);";
+      "    p = q + 1;";
+      "  }";
+      "  return -1;";
+      "}";
+      "";
+      (* v0.1.707: str_index_from — __lang_str_index_of's memchr walk, started
+         at `from` (below 0 reads as 0). The empty needle answers `from` while
+         it is within the haystack. The window's end is still derived from
+         `last`, never counted down beside the pointer (see above). *)
+      "static int64_t __lang_str_index_from(const char* h, const char* n, int64_t from) {";
+      "  size_t hn = __lang_str_size(h), nn = __lang_str_size(n);";
+      "  size_t f = from < 0 ? 0 : (size_t)from;";
+      "  if (nn == 0) return f <= hn ? (int64_t)f : -1;";
+      "  if (nn > hn || f > hn - nn) return -1;";
+      "  const char* last = h + (hn - nn);";
+      "  const char* p = h + f;";
       "  while (p <= last) {";
       "    const char* q = (const char*)memchr(p, (unsigned char)n[0], (size_t)(last - p) + 1);";
       "    if (!q) return -1;";
