@@ -1,4 +1,4 @@
-// range-version: affine,load,store
+// range-version: affine,load,product,store,strict
 // Large bounds must select the checked loop even when adding the access width
 // would wrap. Exercise both the plain-index and endpoint guards.
 let low = let s = bit_shl 1 31 in if s < 0 then s else
@@ -12,14 +12,23 @@ let rec load = fn i ->
 let rec affine = fn i ->
   if i >= high then () else
     let _ = u8x16_load b (i + 0) in affine (i + 1);
+// The endpoints i=0 and i=2 wrap to zero; i=1 is out of bounds.
+let rec product = fn i ->
+  if i == 3 then () else
+    let _ = u8x16_load b (i * low) in product (i + 1);
+// Normalizing a strict exit must not evaluate high + 1 in the guard.
+let rec strict = fn i ->
+  if i > high then () else
+    let _ = u8x16_load b i in strict (i + 1);
 let v = vec_new ();
 let _ = vec_push v 1.0;
 let _ = vec_push v 2.0;
-let pair = f64x2_make 9.0 9.0;
 let rec store = fn i ->
   if i >= high then () else
-    let _ = f64x2_store v i pair in store (i + 1);
+    let _ = f64x2_store v i (f64x2_make 9.0 9.0) in store (i + 1);
 let _ = print (try_or (fn () -> let _ = load start in "bad") "caught");
 let _ = print (try_or (fn () -> let _ = affine start in "bad") "caught");
+let _ = print (try_or (fn () -> let _ = product 0 in "bad") "caught");
+let _ = print (try_or (fn () -> let _ = strict 0 in "bad") "caught");
 let _ = print (try_or (fn () -> let _ = store start in "bad") "caught");
 print (if vec_get v 0 == 1.0 && vec_get v 1 == 2.0 then "kept" else "bad")

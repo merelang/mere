@@ -31,6 +31,10 @@ failure, before any access or write using the rejected index.
 
 Range-check versioning uses the same remaining-length rule when selecting an
 unchecked loop, including its plain-index and derived-index endpoint guards.
+Derived indices also prove that their arithmetic intermediates fit within the
+container length before evaluating them; an overflowing product cannot make
+two wrapped endpoints admit an invalid access between them. Indices that do
+not satisfy this conservative proof retain their per-access checks.
 `test/range_version/span_overflow.mere` compares the checked and optimized loops
 at each integer model's upper bound and checks that refused stores preserve data.
 
