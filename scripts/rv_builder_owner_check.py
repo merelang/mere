@@ -144,7 +144,8 @@ def checked(command, cwd, env=None):
     return result.stdout
 
 
-def run_suite(name, cases, poisons, plain, forbidden, poison, poison_check=None, expected_outputs=None):
+def run_suite(name, cases, poisons, plain, forbidden, poison, poison_check=None, expected_outputs=None,
+              prelude_poisons=()):
     memu = Path(os.environ.get("MEMU", ""))
     if not (memu / "riscv-runc/rv32i_run.mere").is_file():
         raise RuntimeError("set MEMU to a memu checkout; both widths must run")
@@ -218,13 +219,24 @@ def run_suite(name, cases, poisons, plain, forbidden, poison, poison_check=None,
                     raise RuntimeError("POISON duplicate identities remained green")
                 checks += 1
             print("  ok    POISON duplicate logical identities", flush=True)
+            for case, marker in prelude_poisons:
+                if prelude.count(marker) != 1:
+                    raise RuntimeError(f"{case}: expected one prelude boundary")
+                (tmp / "prelude.mere").write_text(prelude.replace(marker, ""))
+                for width in (32, 64):
+                    build(case, width, env)
+                    actual = run(width)
+                    if actual[0] or actual[2] or b"allowed\n" not in actual[1] or actual == references[case]:
+                        raise RuntimeError(f"POISON {case}: RV{width} did not expose the removed prelude boundary: {actual!r}")
+                    checks += 1
+                print(f"  ok    POISON {case}: removed prelude boundary", flush=True)
         (tmp / "plain.mere").write_text(plain)
         for flag in ("-rvg", "-rv64g"):
             debug = checked([MERE, flag, tmp / "plain.mere"], tmp)
             if any(label.encode() in debug for label in forbidden):
                 raise RuntimeError("ownership helpers remain without green threads")
             checks += 1
-        expected = len(cases) * 2 + 2 + ((len(poisons) * 2 + 2) if poison else 0)
+        expected = len(cases) * 2 + 2 + ((len(poisons) * 2 + 2 + len(prelude_poisons) * 2) if poison else 0)
         assert checks == expected, "some checks did not run"
         print(f"{name}: ok ({len(cases)} fixtures at both widths against C; {checks} checks)")
 

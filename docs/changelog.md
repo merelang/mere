@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.706 — 2026-11-06
+
+_Buffer boundaries have common expected results; ListBuf refusals agree._
+
+LLVM checks a ListBuf's frozen flag before its owner on push, so a frozen
+foreign builder reports the same catchable failure as interpreter, C, Wasm
+and RISC-V. An unfinished foreign builder still fails before mutation.
+
+RISC-V ListBufs store their creation region depth alongside the frozen flag.
+Push rejects another current depth without appending or freezing; returning
+to the creation depth permits building again. Conversion skips both metadata
+words, retains insertion order and is allowed at another depth.
+
+`scripts/buffer_boundary_check.py` uses one catalogue of explicit expected
+results for ByteBuf, StrBuf and ListBuf. It covers empty/full storage, failed
+bounds checks, rejected writes, immutable snapshots, saved calls, argument
+order/failure and ListBuf freezing and region boundaries. Interpreter, C,
+LLVM and Wasm run the supported common cases; RV32/RV64 require their C
+reference to meet the same expectations first. Negative controls remove
+read, owner, freeze and region checks or duplicate logical thread identities.
+Both modes are required in CI. See the [boundary inventory](buffer-boundaries.md)
+for access points and backend limits.
+
 ## v0.1.705 — 2026-11-05
 
 _String equality asks the lengths first; a named region's release keeps no tally unless asked._
