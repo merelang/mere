@@ -1618,6 +1618,14 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: python3 scripts/ownedvec_conversion_check.py --poison
 
+      - name: buffer_boundary (ByteBuf, StrBuf and ListBuf against explicit results)
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
+        run: python3 scripts/buffer_boundary_check.py --poison
+
+      - name: buffer_boundary_riscv (the same buffer contracts at both widths)
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/buffer_boundary_check.py --rv-only --poison
+
       # v0.1.637 (Q-200): a failing program fails the same way on RISC-V --
       # stdout, stderr and the exit status each against C -- with a poison
       # that folds the streams back together, the shape before.

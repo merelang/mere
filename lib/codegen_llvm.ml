@@ -6868,9 +6868,6 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     if ty_has_arrow elem_ty then emit_instr "  call void @__lang_region_keep_above(ptr null)";
     let gep i = let r = fresh_reg () in
       emit_instr (Printf.sprintf "  %s = getelementptr %%__lang_listbuf, ptr %s, i32 0, i32 %d" r b i); r in
-    (let ow = fresh_reg () in
-     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow (gep 5));
-     emit_instr (owner_call ow "ListBuf" "lb_push"));
     let l_frozen = fresh_label "lb_frozen" and l_chk = fresh_label "lb_chk"
     and l_other = fresh_label "lb_other" and l_ok = fresh_label "lb_ok"
     and l_link = fresh_label "lb_link" and l_head = fresh_label "lb_head"
@@ -6883,6 +6880,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr "  call void @__lang_fail_impl(ptr @.lb_frozen_msg)";
     emit_instr "  unreachable";
     emit_instr (l_chk ^ ":");
+    (let ow = fresh_reg () in
+     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" ow (gep 5));
+     emit_instr (owner_call ow "ListBuf" "lb_push"));
     let bd = fresh_reg () and cur = fresh_reg () and same = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = load i32, ptr %s" bd (gep 3));
     emit_instr (Printf.sprintf "  %s = load i32, ptr @__lang_region_depth" cur);

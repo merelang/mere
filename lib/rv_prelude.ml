@@ -843,17 +843,19 @@ let rvbb_of_bytes = fn (b: bytes) ->
   let rec go = fn (i: int) -> if i >= bytes_len b then () else (let _ = vec_push v (bytes_get b i) in go (i + 1)) in
   let _ = go 0 in
   v;
-// ListBuf: element 0 is the frozen flag, the elements follow; the list is made
-// when it is asked for, in the order pushed
-let rvlb_new = fn (u: unit) -> let v = (vec_new () : int Vec) in let _ = vec_push v 0 in v;
+// ListBuf: frozen flag, creation region depth, then elements. The list is
+// made when asked for, in the order pushed. A rejected push changes neither
+// metadata nor elements, and conversion is valid at another depth.
+let rvlb_new = fn (u: unit) -> let v = (vec_new () : int Vec) in let _ = vec_push v 0 in let _ = vec_push v (__rv_rtw 1) in v;
 let rvlb_push = fn (v: int Vec) -> fn (x: int) ->
   let _ = __rv_vec_write v "lb_push" in
   if vec_get v 0 == 1 then fail "lb_push: the builder was already turned into a list by lb_to_list"
+  else if vec_get v 1 != __rv_rtw 1 then fail "lb_push: the builder belongs to a region that is not current"
   else vec_push v x;
 let rvlb_to_list = fn (v: int Vec) ->
   let _ = __rv_vec_write v "lb_to_list" in
   let _ = vec_set v 0 1 in
-  let rec go = fn (i: int) -> fn (acc: int list) -> if i < 1 then acc else go (i - 1) (Cons (vec_get v i, acc)) in
+  let rec go = fn (i: int) -> fn (acc: int list) -> if i < 2 then acc else go (i - 1) (Cons (vec_get v i, acc)) in
   go (vec_len v - 1) Nil;
 // OwnedVec: a Vec; the conversions copy, as C's do
 let rvov_get = fn (v: int Vec) -> fn (i: int) ->

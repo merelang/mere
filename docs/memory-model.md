@@ -630,6 +630,14 @@ when empty, and repeated owner conversions are valid. Already-frozen push
 reports the frozen state before ownership, as C does. Growth and default-arena
 promotion preserve ownership. Immutable byte/list snapshots can be shared.
 
+As of v0.1.706, RISC-V ListBufs also remember their creation region depth.
+Push rejects a different current depth before appending; returning to the
+creation depth permits further pushes. Conversion may run at another depth
+and still freezes the builder. LLVM now reports an already-frozen push before
+checking ownership, matching the other backends. The
+[buffer boundary inventory](buffer-boundaries.md) records these contracts and
+the common tests with explicit expected results on all six execution targets.
+
 Map read boundaries are inventoried in
 [Map read boundaries](map-read-boundaries.md). As of v0.1.704, LLVM marks
 `map_iter` before either layout's raw storage loads, C marks Map/Vec
