@@ -8188,6 +8188,10 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  memset(&ss, 0, sizeof ss);";
       "  ssize_t n = recvfrom((int)fd, __mem + p, (size_t)cap, (int)flags, (struct sockaddr*)&ss, &sl);";
       "  if (n < 0) return __sock_none(errno);";
+      "  /* Darwin may return zero bytes and no sender for a zero-capacity";
+      "     receive with no queued datagram. Do not fabricate a successful";
+      "     packet; match the would-block/timeout result of a nonzero receive. */";
+      "  if (cap == 0 && sl == 0) return __sock_none(EAGAIN);";
       "  char* address = __sock_text((struct sockaddr*)&ss, sl);";
       "  if (!address[0]) return address;";
       "  char out[1280];";

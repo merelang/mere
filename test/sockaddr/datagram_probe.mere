@@ -12,6 +12,10 @@ extern fn tcp_close: int -> int;
 extern fn tcp_set_timeout: int -> int -> int;
 extern fn io_set_nonblocking: int -> int;
 extern fn fd_last_errno: unit -> int;
+extern fn io_poll_new: int -> int;
+extern fn io_poll_add: int -> int -> int -> int;
+extern fn io_poll_wait: int -> int -> int;
+extern fn io_poll_del: int -> int -> int;
 extern fn mem_alloc: int -> int;
 extern fn mem_set_u8: int -> int -> int -> int;
 extern fn mem_to_str: int -> int -> str;
@@ -37,6 +41,14 @@ let run = fn (family: int) -> fn (host: str) ->
   let ca = sock_local_addr c in
   let p = mem_alloc 16 in
   let q = mem_alloc 16 in
+  // Darwin can report a successful zero-capacity recvfrom without a packet.
+  // A timeout/error must stay distinguishable from a genuine empty datagram.
+  let _ = tcp_set_timeout b 100 in
+  let _ = check "no packet at zero capacity" (str_eq (sock_recvfrom b q 0 0) "" && fd_last_errno () > 0) in
+  let _ = check "no packet at positive capacity" (str_eq (sock_recvfrom b q 1 0) "" && fd_last_errno () > 0) in
+  let _ = tcp_set_timeout b 1000 in
+  let poll = io_poll_new 0 in
+  let _ = io_poll_add poll b 1 in
   let _ = mem_set_u8 p 0 65 in
   let _ = mem_set_u8 p 1 0 in
   let _ = mem_set_u8 p 2 255 in
@@ -48,6 +60,19 @@ let run = fn (family: int) -> fn (host: str) ->
   let _ = check "receive binary" (str_eq (mem_to_str q 3) data && fd_last_errno () == 0) in
   let _ = check "second destination" (sock_sendto a p 0 0 host (port ca) == 0) in
   let _ = check "empty packet has sender" (str_eq (sock_recvfrom c q 16 0) (packet 0 aa)) in
+  // A queued packet may still be consumed with zero capacity, with a valid
+  // sender and without touching payload storage. Poll removes arrival races.
+  let _ = mem_set_u8 q 0 90 in
+  let _ = check "send for zero capacity" (sock_sendto a p 3 0 host (port ba) == 3) in
+  let _ = check "zero-capacity packet ready" (io_poll_wait poll 1000 > 0) in
+  let _ = check "zero-capacity sender" (str_eq (sock_recvfrom b q 0 0) (packet 0 aa) && fd_last_errno () == 0) in
+  let _ = check "zero capacity preserves storage" (str_eq (mem_to_str q 1) "Z") in
+  let _ = check "zero capacity consumes packet" (io_poll_wait poll 0 == 0) in
+  let _ = check "send empty for zero capacity" (sock_sendto a p 0 0 host (port ba) == 0) in
+  let _ = check "empty zero-capacity packet ready" (io_poll_wait poll 1000 > 0) in
+  let _ = check "empty zero-capacity sender" (str_eq (sock_recvfrom b q 0 0) (packet 0 aa) && fd_last_errno () == 0) in
+  let _ = check "empty zero-capacity packet consumed" (io_poll_wait poll 0 == 0) in
+  let _ = io_poll_del poll b in
   let _ = check "binding unchanged" (str_eq (sock_local_addr a) aa) in
   let _ = check "no connected peer" (str_eq (sock_peer_addr a) "" && fd_last_errno () > 0) in
   let _ = check "send before truncation" (sock_sendto a p 3 0 host (port ba) == 3) in
@@ -55,6 +80,8 @@ let run = fn (family: int) -> fn (host: str) ->
   let _ = check "truncated byte" (str_eq (mem_to_str q 1) "A") in
   let _ = check "nonblocking" (io_set_nonblocking b == 0) in
   let _ = check "packet remainder discarded" (str_eq (sock_recvfrom b q 16 0) "" && fd_last_errno () > 0) in
+  let would_block = fd_last_errno () in
+  let _ = check "nonblocking zero capacity without packet" (str_eq (sock_recvfrom b q 0 0) "" && fd_last_errno () == would_block) in
   let _ = check "hostname refused without lookup" (sock_sendto a p 1 0 "localhost" (port ba) == 0 - 2 && fd_last_errno () == 0) in
   let _ = check "bad port" (sock_sendto a p 1 0 host 65536 == 0 - 1 && fd_last_errno () > 0) in
   let _ = check "negative buffer" (sock_sendto a (0 - 1) 1 0 host (port ba) == 0 - 1 && fd_last_errno () > 0) in
