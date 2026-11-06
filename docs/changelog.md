@@ -23,7 +23,8 @@ files, final newlines and process-environment agreement.
 
 Linux CI, Pages and release jobs configure bounded APT downloads before
 OCaml setup and use the official HTTPS Ubuntu archive in place of the Azure
-archive alias. Existing opam caches remain enabled. Configuration controls
+archive alias, including mirror lists referenced by `mirror+file` sources.
+Existing opam caches remain enabled. Configuration controls
 cover ordering, required execution, download bounds and cache use; all 187
 required gates and four build configurations remain enabled.
 
