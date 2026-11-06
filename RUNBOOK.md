@@ -262,7 +262,7 @@ This covers direct source entries and the runner's `apt-mirrors.txt` or
 Repository suites, components, signing keys and other mirrors are preserved.
 The setup action's opam cache remains enabled. Compare actual setup step
 durations and cache-hit messages when measuring changes: a cache hit does not
-avoid the action's system-package installation. All 187 gates and all four
+avoid the action's system-package installation. All 188 gates and all four
 build configurations remain required.
 
 ## Binary releases

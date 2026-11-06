@@ -1057,6 +1057,9 @@ jobs:
       - name: sockaddr_check (tcp_listen_at, sock_bind, getsockname, getpeername, fd_last_errno)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/sockaddr_check.sh
+      - name: datagram_check (addressed UDP on C and LLVM)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: sh scripts/datagram_check.sh
 
       # v0.1.677: the system log. syslog(3) takes varargs and openlog(3) keeps
       # the ident pointer, so the runtime makes both calls; the message goes
