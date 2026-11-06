@@ -17,6 +17,10 @@ RISC-V's existing unsigned-sum guard is retained and tested at both widths.
 The same subtraction-based checks protect two-element `f64x2_load/store`
 and sixteen-byte `u8x16_load`, including both Wasm representations and the
 RISC-V float prelude. Failed SIMD stores preserve their original elements.
+Range-check versioning proves bound and index arithmetic before selecting an
+unchecked loop, so overflowing products cannot conceal an invalid access
+between two wrapped endpoints. Unboxed Wasm helpers return immediately after
+recording a catchable SIMD failure.
 The [range inventory](range-boundaries.md) records the related string, byte,
 buffer and Vec operations and their integer-limit coverage.
 

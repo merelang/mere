@@ -46,13 +46,19 @@
 # mistake this would look like: suite 2773, parity 196/0, the bootstrap tests
 # that RUN the self-hosted compiler under node, and this file's own behaviour
 # check (3 of 3 optimized modules answer what the interpreter does).
-chip8.wasm                     5567     6804
+# v0.1.708: range-versioning now proves bound and index arithmetic before
+# selecting unchecked accesses. With wasm-opt 132, chip8 grows 6344 -> 6820 B
+# and gameboy 15326 -> 16728 B. This is the cost of the added safety guards,
+# not a removed demo: three frames of each optimized module produce identical
+# drawing operations before and after the change. Recenter only these two
+# bands at the measured size, retaining the -10% / +10% policy.
+chip8.wasm                     6138     7502
 counter.wasm                   2121     2592
 echo.wasm                      1523     1862
 fibonacci.wasm                 1700     2077
 fizzbuzz.wasm                  1593     1947
 g2048.wasm                     5348     6537
-gameboy.wasm                  13377    16350
+gameboy.wasm                  15055    18401
 hello.wasm                     1757     2148
 # raytrace.wasm: lowered v0.1.500 from 8577/10484. Q-141 took the float boxing
 # out of this backend and the shipped module went 9530 -> 6107 B (-36%) -- by
