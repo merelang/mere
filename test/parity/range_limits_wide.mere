@@ -17,4 +17,13 @@ let _ = vec_push v 7;
 let _ = print_int (try_or (fn () -> vec_get v wide) (-1)); // -1
 let _ = print (try_or (fn () -> let _ = vec_set v wide 9 in "allowed") "caught"); // caught
 let _ = print_int (vec_get v 0); // 7
-print_int (str_index_from "abc" "a" wide) // -1
+let _ = print_int (str_index_from "abc" "a" wide); // -1
+let fv = vec_new ();
+let _ = vec_push fv 1.0;
+let _ = vec_push fv 2.0;
+let _ = print (try_or (fn () -> let _ = f64x2_load fv wide in "allowed") "caught"); // caught
+let _ = print (try_or (fn () -> let _ = f64x2_store fv wide (f64x2_make 9.0 9.0) in "allowed") "caught"); // caught
+let _ = print (if vec_get fv 0 == 1.0 && vec_get fv 1 == 2.0 then "kept" else "bad"); // kept
+let _ = print (try_or (fn () -> let _ = u8x16_load (bytes_of_str "0123456789abcdef") wide in "allowed") "caught"); // caught
+let _ = print_int (try_or (fn () -> u8x16_extract (u8x16_from_bytes (bytes_of_str "0123456789abcdef")) wide) (-1)); // -1
+print (try_or (fn () -> let _ = f64x2_extract (f64x2_make 1.0 2.0) wide in "allowed") "caught") // caught

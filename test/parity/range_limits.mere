@@ -39,4 +39,25 @@ let _ = print (try_or (fn () -> let _ = vec_set v high 9 in "allowed") "caught")
 let _ = print (try_or (fn () -> let _ = vec_set v low 9 in "allowed") "caught"); // caught
 let _ = print_int (vec_get v 0);                  // 7
 let _ = print_int (str_index_from "aba" "a" high); // -1
-print_int (str_index_from "aba" "a" low)           // 0
+let _ = print_int (str_index_from "aba" "a" low); // 0
+let fv = vec_new ();
+let _ = vec_push fv 1.0;
+let _ = vec_push fv 2.0;
+let fload = fn i -> try_or (fn () -> let _ = f64x2_load fv i in "allowed") "caught";
+let fstore = fn i -> try_or (fn () -> let _ = f64x2_store fv i (f64x2_make 9.0 9.0) in "allowed") "caught";
+let _ = print (fload high);                      // caught
+let _ = print (fload (high - 1));                // caught
+let _ = print (fload low);                       // caught
+let _ = print (fstore high);                     // caught
+let _ = print (fstore (high - 1));               // caught
+let _ = print (fstore low);                      // caught
+let _ = print (fstore 1);                        // caught
+let _ = print (if f64x2_reduce_add (f64x2_load fv 0) == 3.0 then "ok" else "bad"); // ok
+let _ = print (if vec_get fv 0 == 1.0 && vec_get fv 1 == 2.0 then "kept" else "bad"); // kept
+let sixteen = bytes_of_str "0123456789abcdef";
+let ul = fn i -> try_or (fn () -> let _ = u8x16_load sixteen i in "allowed") "caught";
+let _ = print (ul high);                         // caught
+let _ = print (ul (high - 15));                  // caught
+let _ = print (ul low);                          // caught
+let _ = print (ul 1);                            // caught
+print_int (u8x16_extract (u8x16_load sixteen 0) 0) // 48

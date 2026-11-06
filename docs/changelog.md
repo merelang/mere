@@ -14,6 +14,9 @@ length before copying. The interpreter no longer leaks an internal exception
 when a maximum start plus count overflows; C, LLVM and Wasm reject the same
 full-width inputs as catchable range failures. Wasm validates before narrowing.
 RISC-V's existing unsigned-sum guard is retained and tested at both widths.
+The same subtraction-based checks protect two-element `f64x2_load/store`
+and sixteen-byte `u8x16_load`, including both Wasm representations and the
+RISC-V float prelude. Failed SIMD stores preserve their original elements.
 The [range inventory](range-boundaries.md) records the related string, byte,
 buffer and Vec operations and their integer-limit coverage.
 
