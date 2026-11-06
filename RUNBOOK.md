@@ -257,6 +257,8 @@ the setup validator and its controls run in the gate-assignment job.
 Linux jobs configure APT before OCaml setup, including the package downloads
 made inside the setup action. The Azure Ubuntu archive alias is replaced by
 the official HTTPS archive, with two retries and 30-second HTTP/HTTPS timeouts.
+This covers direct source entries and the runner's `apt-mirrors.txt` or
+`mirrors/*.list` files used through `mirror+file` source declarations.
 Repository suites, components, signing keys and other mirrors are preserved.
 The setup action's opam cache remains enabled. Compare actual setup step
 durations and cache-hit messages when measuring changes: a cache hit does not

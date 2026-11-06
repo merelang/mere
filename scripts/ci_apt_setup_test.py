@@ -43,6 +43,33 @@ class AptSetupTest(unittest.TestCase):
             self.assertIn('Acquire::http::Timeout "30";', config)
             self.assertIn('Acquire::https::Timeout "30";', config)
 
+    def test_mirror_lists_referenced_by_source_declarations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "sources.list.d"
+            sources.mkdir()
+            source = sources / "ubuntu.sources"
+            declaration = (
+                "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\n"
+                "Suites: noble noble-updates\nComponents: main universe\n"
+                "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n")
+            source.write_text(declaration)
+            mirror = root / "apt-mirrors.txt"
+            mirror.write_text(
+                "http://azure.archive.ubuntu.com/ubuntu/ priority:1\n"
+                "https://archive.ubuntu.com/ubuntu/ priority:2\n")
+            nested = root / "mirrors"
+            nested.mkdir()
+            alternate = nested / "ubuntu.list"
+            alternate.write_text("https://azure.archive.ubuntu.com/ubuntu\n")
+            self.assertEqual(configure(root), 2)
+            self.assertEqual(source.read_text(), declaration)
+            self.assertEqual(mirror.read_text(),
+                "https://archive.ubuntu.com/ubuntu/ priority:1\n"
+                "https://archive.ubuntu.com/ubuntu/ priority:2\n")
+            self.assertEqual(alternate.read_text(), "https://archive.ubuntu.com/ubuntu\n")
+            self.assertEqual(configure(root), 0)
+
     def test_empty_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(configure(Path(directory)), 0)

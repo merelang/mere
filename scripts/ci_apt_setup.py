@@ -11,6 +11,9 @@ def configure(root):
     sources = [root / "sources.list"]
     directory = root / "sources.list.d"
     sources += sorted(directory.glob("*.list")) + sorted(directory.glob("*.sources"))
+    # Ubuntu runners can select mirrors through mirror+file URIs instead of
+    # placing archive URLs directly in their source declarations.
+    sources += [root / "apt-mirrors.txt"] + sorted((root / "mirrors").glob("*.list"))
     updated = 0
     for source in sources:
         if not source.is_file():
