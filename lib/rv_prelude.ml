@@ -190,6 +190,17 @@ let str_index_of = fn h -> fn n ->
       else scan (i + 1) in
     scan 0;
 let str_contains = fn h -> fn n -> str_index_of h n >= 0;
+let str_index_from = fn h -> fn n -> fn from ->
+  let hl = str_len h in let nl = str_len n in
+  let f = if from < 0 then 0 else from in
+  if nl == 0 then (if f <= hl then f else 0 - 1)
+  else
+    let last = hl - nl in
+    let rec scan = fn i ->
+      if i > last then 0 - 1
+      else if str_eq (substring h i (i + nl)) n then i
+      else scan (i + 1) in
+    scan f;
 
 // The builders go through StrBuf, which is a real byte buffer on this backend
 // (amortized O(1) push). They used to fold `++` over an accumulator: correct,

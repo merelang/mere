@@ -208,6 +208,7 @@ machine rather than a host.
 | `str_count` | yes | yes | yes | yes |
 | `str_ends_with` | yes | yes | yes | yes |
 | `str_eq` | yes | yes | yes | yes |
+| `str_index_from` | yes | yes | yes | yes |
 | `str_index_of` | yes | yes | yes | yes |
 | `str_last_index_of` | yes | yes | yes | yes |
 | `str_len` | yes | yes | yes | yes |

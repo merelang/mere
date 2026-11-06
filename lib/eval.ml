@@ -1529,6 +1529,35 @@ let builtin_str_last_index_of =
         | _ -> failwith "str_last_index_of: 2nd arg expected str")
     | _ -> failwith "str_last_index_of: 1st arg expected str")
 
+(* v0.1.707: str_index_from h n from — the first index of n in h at or after
+   byte `from` (below 0 reads as 0), -1 if none. The empty needle answers
+   `from` while it is within the haystack, as str_index_of's answers 0. *)
+let builtin_str_index_from =
+  V_builtin ("str_index_from", fun haystack ->
+    match haystack with
+    | V_str h ->
+      V_builtin ("str_index_from_partial", fun needle ->
+        match needle with
+        | V_str n ->
+          V_builtin ("str_index_from_partial2", fun from ->
+            match from with
+            | V_int f0 ->
+              let h_len = String.length h in
+              let n_len = String.length n in
+              let f = if f0 < 0 then 0 else f0 in
+              if n_len = 0 then V_int (if f <= h_len then f else -1)
+              else
+                let last = h_len - n_len in
+                let rec scan i =
+                  if i > last then V_int (-1)
+                  else if String.sub h i n_len = n then V_int i
+                  else scan (i + 1)
+                in
+                scan f
+            | _ -> failwith "str_index_from: 3rd arg expected int")
+        | _ -> failwith "str_index_from: 2nd arg expected str")
+    | _ -> failwith "str_index_from: 1st arg expected str")
+
 (* Helper: produce an OCaml list of str → wrap as V_constr Nil/Cons chain. *)
 let rec str_list_to_v = function
   | [] -> V_constr ("Nil", None)
@@ -4314,6 +4343,7 @@ let initial_env : env =
     ("str_count", ref builtin_str_count);
     ("str_index_of", ref builtin_str_index_of);
     ("str_last_index_of", ref builtin_str_last_index_of);
+    ("str_index_from", ref builtin_str_index_from);
     ("str_split", ref builtin_str_split);
     ("utf8_len", ref builtin_utf8_len);
     ("utf8_chars", ref builtin_utf8_chars);

@@ -3345,6 +3345,11 @@ let initial_env : env =
        the compiled backends. *)
     ("str_last_index_of",
        mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyInt))));
+    (* v0.1.707: str_index_of from a byte offset. A search that resumes past
+       its last hit (a scanner, a regex prefilter) had only str_index_of, which
+       starts at 0, so it walked the rest itself a byte at a time. *)
+    ("str_index_from",
+       mono (Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyStr, Ast.TyArrow (Ast.TyInt, Ast.TyInt)))));
     ("str_split",
        mono (Ast.TyArrow (Ast.TyStr,
               Ast.TyArrow (Ast.TyStr,

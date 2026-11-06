@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.707 — 2026-11-06
+
+_`str_index_from`: str_index_of from a byte offset._
+
+`str_index_from h n from` is the first position of `n` in `h` at or after
+byte `from`, or -1. An offset below 0 reads as 0, one past the end finds
+nothing, and the empty needle answers the offset while it is within the
+haystack. On the C backend it is `__lang_str_index_of`'s memchr walk started
+at the offset; the other backends run their own loop from it. Bounds checks
+also handle the largest integer offset without overflowing.
+
+A search that resumes past its last hit had only `str_index_of`, which starts
+at 0, so it walked the rest itself a byte at a time. A regexp prefilter that
+looks for a required literal can use the offset to resume each search.
+
+test/parity/str_index_from covers the interpreter, C, LLVM and Wasm, including
+integer limits, empty needles, UTF-8 byte offsets and embedded NUL bytes.
+The same fixture runs on RV32 and RV64 under the emulator.
+rv_prelude_check has its probe.
+
 ## v0.1.706 — 2026-11-06
 
 _Buffer boundaries have common expected results; ListBuf refusals agree._
