@@ -1,0 +1,20 @@
+// Wide arguments must be rejected before a Wasm address is narrowed to i32.
+// RV32 refuses this literal; the portable range_limits fixture covers RV32.
+let wide = 4294967296;
+let b = bytes_of_str "abc";
+let _ = print_int (try_or (fn () -> bytes_len (bytes_slice b wide 0)) (-1)); // -1
+let _ = print_int (try_or (fn () -> bytes_len (bytes_slice b wide 1)) (-1)); // -1
+let _ = print_int (try_or (fn () -> bytes_len (bytes_slice b 0 wide)) (-1)); // -1
+let _ = print_int (try_or (fn () -> bytes_get b wide) (-1)); // -1
+let _ = print (try_or (fn () -> substring "abc" 0 wide) "caught"); // caught
+let bb = bytebuf_new 1;
+let _ = bytebuf_set bb 0 65;
+let _ = print_int (try_or (fn () -> bytebuf_get bb wide) (-1)); // -1
+let _ = print (try_or (fn () -> let _ = bytebuf_set bb wide 9 in "allowed") "caught"); // caught
+let _ = print_int (bytebuf_get bb 0); // 65
+let v = vec_new ();
+let _ = vec_push v 7;
+let _ = print_int (try_or (fn () -> vec_get v wide) (-1)); // -1
+let _ = print (try_or (fn () -> let _ = vec_set v wide 9 in "allowed") "caught"); // caught
+let _ = print_int (vec_get v 0); // 7
+print_int (str_index_from "abc" "a" wide) // -1

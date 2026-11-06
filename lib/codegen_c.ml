@@ -12280,7 +12280,7 @@ let bytes_runtime ~arena =
       "  return b;";
       "}";
       "static mere_bytes* __lang_bytes_slice(mere_bytes* b, long long start, long long len) {";
-      "  if (start < 0 || len < 0 || start + len > b->len) {";
+      "  if (start < 0 || len < 0 || start > b->len || len > b->len - start) {";
       (* v0.1.278: abort() is not a failure the language defines -- try_or
           cannot catch it and the shell reports 134. The interpreter raises a
           catchable failure here, as it does for every other bad index. *)

@@ -4086,7 +4086,8 @@ let builtin_bytes_slice =
       V_builtin ("bytes_slice_p2", fun len ->
         match start, len with
         | V_int start, V_int len ->
-          if start < 0 || len < 0 || start + len > String.length s then
+          let size = String.length s in
+          if start < 0 || len < 0 || start > size || len > size - start then
             raise (Eval_error (Loc.dummy, "bytes_slice: range out of bounds"));
           bytes_v (String.sub s start len)
         | _ -> failwith "bytes_slice: expected int start/len")))

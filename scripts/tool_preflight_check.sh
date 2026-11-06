@@ -26,6 +26,8 @@
 #   sh scripts/tool_preflight_check.sh              # report
 #   sh scripts/tool_preflight_check.sh --required   # CI: absent => red
 #   sh scripts/tool_preflight_check.sh --poison     # the gate can still go red
+# MERE_CI_GROUP selects that group's gates; global wiring and derivation floors
+# are still checked, so isolating tools cannot hide a missing CI gate.
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,7 +35,7 @@ cd "$ROOT" || exit 2
 CI_YML="${TOOL_PREFLIGHT_CI_YML-.github/workflows/ci.yml}"
 MODE="${1:-}"
 
-# --poison: six ways this check could stop meaning anything, each asserted by
+# --poison: ways this check could stop meaning anything, each asserted by
 # the message it must print rather than by a non-zero exit.
 if [ "$MODE" = "--poison" ]; then
   fails=0
@@ -72,7 +74,21 @@ if [ "$MODE" = "--poison" ]; then
   sed 's/OBJDUMP=riscv64-linux-gnu-objdump /OBJDUMP=no-such-objdump-poison /' "$CI_YML" > "$tmp/override.yml"
   run "CI overrides a gate's tool with one that is not there" \
     "ABSENT   no-such-objdump-poison" GITHUB_ACTIONS=true TOOL_PREFLIGHT_CI_YML="$tmp/override.yml"
-  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 6 caught"; exit 0; }
+  run "RISC-V still requires its emulator" \
+    "ABSENT   qemu-system-riscv32" MERE_CI_GROUP=riscv MERE_PREFLIGHT_FAKE_MISSING=qemu-system-riscv32
+  run "compiler still requires its native compiler" \
+    "ABSENT   clang" MERE_CI_GROUP=compiler MERE_PREFLIGHT_FAKE_MISSING=clang
+  for group in compiler web; do
+    out=$(MERE_CI_GROUP="$group" MERE_PREFLIGHT_FAKE_MISSING=qemu-system-riscv32 sh "$0" 2>&1)
+    if [ $? -ne 0 ] || ! printf '%s' "$out" | grep -qF "gate group: $group" \
+       || printf '%s' "$out" | grep -qF "ABSENT   qemu-system-riscv32"; then
+      echo "POISON NOT CAUGHT — unrelated emulator required by $group"
+      fails=$((fails + 1))
+    else
+      echo "poison caught: $group does not require an unrelated emulator"
+    fi
+  done
+  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 10 caught"; exit 0; }
   echo "tool_preflight --poison: $fails not caught"; exit 1
 fi
 
@@ -185,6 +201,25 @@ while read -r t; do
   else printf '%s\n' "$t" >> "$tmp/local_only"; fi
 done < "$tmp/tools"
 
+req=$(wc -l < "$tmp/required" | tr -d ' ')
+if [ -n "${MERE_CI_GROUP-}" ]; then
+  if ! ruby scripts/ci_gate_check.rb --group "$MERE_CI_GROUP" > "$tmp/group-commands"; then
+    echo "tool_preflight: FAIL — cannot derive the active gate group's commands"
+    exit 1
+  fi
+  cp "$tmp/required" "$tmp/global-required"
+  : > "$tmp/required"
+  while IFS="$(printf '\t')" read -r t unused; do
+    for g in $(awk -F'\t' -v t="$t" '$1 == t { print $2 }' "$tmp/pairs"); do
+      if grep -qF "scripts/$g" "$tmp/group-commands"; then
+        printf '%s\t%s\n' "$t" "$g" >> "$tmp/required"
+        break
+      fi
+    done
+  done < "$tmp/global-required"
+  echo "tool_preflight: gate group: $MERE_CI_GROUP ($req globally required tools)"
+fi
+
 fake="${MERE_PREFLIGHT_FAKE_MISSING-}"
 missing=0
 echo "tool_preflight: $n_tools tools named by $(cut -f2 "$tmp/pairs" | sort -u | wc -l | tr -d ' ') gates"
@@ -197,8 +232,8 @@ while IFS="$(printf '\t')" read -r t g; do
   fi
 done < "$tmp/required"
 
-req=$(wc -l < "$tmp/required" | tr -d ' ')
-echo "  $req of them are needed by a gate CI runs; $missing absent"
+scope_req=$(wc -l < "$tmp/required" | tr -d ' ')
+echo "  $scope_req of them are needed by this invocation; $missing absent"
 
 # ⚠ A FLOOR, because the first version of this script printed "0 of them are
 # needed by a gate CI runs" and called itself ok. The derivation had silently

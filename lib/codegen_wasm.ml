@@ -9258,15 +9258,17 @@ let bytes_runtime_wasm = {|
     (local $start i32)
     (local $len i32)
     (local.set $b (i32.wrap_i64 (local.get $b8)))
-    (local.set $start (i32.wrap_i64 (local.get $start8)))
-    (local.set $len (i32.wrap_i64 (local.get $len8)))
-    ;; v0.1.278: there was no range check here at all
-    (if (i32.or (i32.or (i64.lt_s (local.get $start8) (i64.const 0))
-                        (i64.lt_s (local.get $len8) (i64.const 0)))
-                (i64.gt_s (i64.add (local.get $start8) (local.get $len8))
-                          (i64.extend_i32_s (i32.load (local.get $b)))))
+    ;; Check full-width unsigned arguments before narrowing. The subtraction
+    ;; may wrap for an invalid start, whose first comparison already rejects it.
+    (if (i32.or (i64.gt_u (local.get $start8)
+                          (i64.extend_i32_u (i32.load (local.get $b))))
+                (i64.gt_u (local.get $len8)
+                          (i64.sub (i64.extend_i32_u (i32.load (local.get $b)))
+                                   (local.get $start8))))
       (then (return (call $__lang_fail
                       (i64.extend_i32_u (global.get $__lang_bytes_slice_msg))))))
+    (local.set $start (i32.wrap_i64 (local.get $start8)))
+    (local.set $len (i32.wrap_i64 (local.get $len8)))
     (local.set $o (i32.wrap_i64 (call $__lang_bytes_alloc (i64.extend_i32_s (local.get $len)))))
     (local.set $i (i32.const 0))
     (block $end (loop $lp

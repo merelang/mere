@@ -13855,12 +13855,10 @@ let bytes_runtime_llvm =
       (* v0.1.278: there was no range check here at all -- it copied from
          wherever the arithmetic pointed *)
       "  %blen = load i64, ptr %b";
-      "  %s_lt0 = icmp slt i64 %start, 0";
-      "  %l_lt0 = icmp slt i64 %len, 0";
-      "  %sum = add i64 %start, %len";
-      "  %over = icmp sgt i64 %sum, %blen";
-      "  %bad1 = or i1 %s_lt0, %l_lt0";
-      "  %bad = or i1 %bad1, %over";
+      "  %past = icmp ugt i64 %start, %blen";
+      "  %remaining = sub i64 %blen, %start";
+      "  %over = icmp ugt i64 %len, %remaining";
+      "  %bad = or i1 %past, %over";
       "  br i1 %bad, label %slicefail, label %sliceok";
       "slicefail:";
       "  call void @__lang_fail_impl(ptr @.bslice_msg)";

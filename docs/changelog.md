@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.708 — 2026-11-06
+
+_Byte ranges are checked without overflowing; CI installs its RISC-V oracles
+only where they run._
+
+`bytes_slice` now compares the requested count with the remaining byte
+length before copying. The interpreter no longer leaks an internal exception
+when a maximum start plus count overflows; C, LLVM and Wasm reject the same
+full-width inputs as catchable range failures. Wasm validates before narrowing.
+RISC-V's existing unsigned-sum guard is retained and tested at both widths.
+The [range inventory](range-boundaries.md) records the related string, byte,
+buffer and Vec operations and their integer-limit coverage.
+
+CI keeps all 187 required checks and nine groups. QEMU and the RISC-V
+disassembler are installed only for their RISC-V group; required-tool checks
+use each group's assigned gates while retaining global coverage checks.
+Network setup has time limits and bounded retries, so a slow package mirror
+fails visibly instead of holding unrelated groups indefinitely.
+
 ## v0.1.707 — 2026-11-06
 
 _`str_index_from`: str_index_of from a byte offset._

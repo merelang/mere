@@ -7520,6 +7520,24 @@ let () =
     "\"00ff10\"";
   check "bytes: interp str bridge and slice"
     (Pipeline.process "str_of_bytes (bytes_slice (bytes_of_str \"hello world\") 6 5)") "\"world\"";
+  check "bytes_slice: empty slice at the end"
+    (Pipeline.process "bytes_len (bytes_slice (bytes_of_str \"abc\") 3 0)") "0";
+  check "bytes_slice: empty source and range"
+    (Pipeline.process "bytes_len (bytes_slice (bytes_of_str \"\") 0 0)") "0";
+  List.iter (fun (name, start, len) ->
+    check ("bytes_slice: " ^ name)
+      (Pipeline.process ("try_or (fn () -> bytes_len (bytes_slice (bytes_of_str \"abc\") ("
+        ^ start ^ ") (" ^ len ^ "))) (-1)")) "-1")
+    [ "negative start", "-1", "0";
+      "negative length", "0", "-1";
+      "past-end empty range", "4", "0";
+      "maximum start with zero length", "int_max", "0";
+      "maximum start plus one", "int_max", "1";
+      "near-maximum start plus two", "int_max - 1", "2";
+      "one plus maximum length", "1", "int_max";
+      "maximum start and length", "int_max", "int_max";
+      "minimum start", "int_min", "0";
+      "minimum length", "0", "int_min" ];
   assert_contains "bytes: C backend emits the length-prefixed mere_bytes runtime"
     (let prog = typed_prog
        "let b = bytes_of_hex \"00ff00\" in bytes_len b" in
