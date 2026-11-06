@@ -66,13 +66,13 @@ module CIGates
   def self.check(workflow)
     jobs = workflow.fetch("jobs")
     plan = jobs.fetch("gate_plan")
-    require!(!plan["continue-on-error"] && !plan["if"], "gate assignment must be required")
+    require!(!plan["continue-on-error"] && !plan.key?("if"), "gate assignment must be required")
     require!(plan.fetch("steps").any? { |s| s["run"] == "ruby scripts/ci_gate_check.rb --self-test" },
              "the assignment job must run the coverage and failure controls")
     shard = jobs.fetch("gate_shards")
     require!(shard["runs-on"] == "ubuntu-24.04", "integration checks must use the validated Ubuntu 24.04 image")
     require!(Array(shard["needs"]) == ["gate_plan"], "groups must wait for gate assignment")
-    require!(!shard["if"] && !shard["continue-on-error"], "gate groups must be required")
+    require!(!shard.key?("if") && !shard["continue-on-error"], "gate groups must be required")
     require!(shard.fetch("strategy")["fail-fast"] == false, "one failed group must not cancel the rest")
     matrix = shard.fetch("strategy").fetch("matrix")
     require!(matrix.keys == ["group"], "matrix include/exclude must not add or remove gate groups")
@@ -96,7 +96,7 @@ module CIGates
         require!(step["timeout-minutes"].is_a?(Integer) && (1..5).cover?(step["timeout-minutes"]),
                  "RISC-V package installation needs a bounded timeout")
       else
-        require!(!step["if"], "setup and required preflights must run in every group")
+        require!(!step.key?("if"), "setup and required preflights must run in every group")
       end
       if step["name"].to_s.start_with?("Install ", "Set up ") || step["name"].to_s.start_with?("PostgreSQL")
         require!(step["timeout-minutes"].is_a?(Integer) && (1..15).cover?(step["timeout-minutes"]),
@@ -224,6 +224,171 @@ module CIGates
     puts "ci_gates: #{mutations.length} negative controls caught; 36 result combinations checked"
   end
 
+  # Setup bounds also cover the matrix and publication workflows. Compiler
+  # setup can take 26 minutes on a cold runner, so it has a separate ceiling
+  # from the smaller tool downloads in the integration groups.
+  def self.check_setup(workflows)
+    jobs = {
+      "ci.yml" => {"build" => 60, "gate_plan" => 10, "gate_shards" => 90, "gates" => 5},
+      "pages.yml" => {"build" => 60, "deploy" => 10},
+      "release-build.yml" => {"binary" => 60},
+      "release.yml" => {"create-release" => 10, "checksums" => 20}
+    }
+    jobs.each do |file, names|
+      workflow = workflows.fetch(file)
+      names.each do |name, ceiling|
+        job = workflow.fetch("jobs").fetch(name)
+        timeout = job["timeout-minutes"]
+        require!(timeout.is_a?(Integer) && (1..ceiling).cover?(timeout),
+                 "#{file}/#{name}: job needs a bounded timeout")
+        require!(!job["continue-on-error"], "#{file}/#{name}: setup failure must remain visible")
+        require!(!job.key?("if") || (file == "ci.yml" && name == "gates" && job["if"] == "${{ always() }}"),
+                 "#{file}/#{name}: required jobs must not be skipped")
+        job.fetch("steps").each do |step|
+          if step["uses"].to_s.start_with?("actions/checkout@", "actions/upload-", "actions/deploy-pages@")
+            t = step["timeout-minutes"]
+            require!(t.is_a?(Integer) && (1..5).cover?(t), "#{file}/#{name}: network action needs a bounded timeout")
+            require!(!step["continue-on-error"], "#{file}/#{name}: required network action must report failure")
+            if file == "release-build.yml" && step["uses"].to_s.start_with?("actions/upload-artifact@")
+              require!(step["if"] == "${{ !inputs.publish-draft }}", "distribution inspection artifact must retain its condition")
+            else
+              require!(!step.key?("if"), "#{file}/#{name}: required network action must not be skipped")
+            end
+          end
+        end
+      end
+    end
+    [["ci.yml", "build", true], ["pages.yml", "build", false], ["release-build.yml", "binary", false]].each do |file, name, tests|
+      job = workflows.fetch(file).fetch("jobs").fetch(name)
+      require!(job.fetch("env")["OPAMRETRIES"] == "2", "#{file}: bound opam download attempts")
+      [["Set up OCaml", 30], ["Install dependencies", 15]].each do |label, ceiling|
+        matches = job.fetch("steps").select { |s| s["name"] == label }
+        require!(matches.length == 1, "#{file}: required setup step is missing or duplicated")
+        step = matches.first
+        t = step["timeout-minutes"]
+        require!(t.is_a?(Integer) && (1..ceiling).cover?(t), "#{file}/#{label}: setup needs a bounded timeout")
+        require!(!step.key?("if") && !step["continue-on-error"], "#{file}/#{label}: setup must be required")
+        if label == "Install dependencies"
+          expected = "sh scripts/retry.sh opam install . --deps-only" + (tests ? " --with-test" : "")
+          require!(step["run"] == expected, "#{file}: dependency installation must retain its bounded retry")
+        end
+      end
+    end
+    pages = workflows.fetch("pages.yml").fetch("jobs").fetch("build").fetch("steps")
+    apt = pages.find { |s| s["name"] == "Install wabt (wat2wasm)" }
+    curl = pages.find { |s| s["name"] == "Install binaryen (wasm-opt), pinned as in ci.yml" }
+    [apt, curl].each do |step|
+      require!(step && step["timeout-minutes"].is_a?(Integer) && (1..10).cover?(step["timeout-minutes"]),
+               "Pages tool installation needs a bounded timeout")
+      require!(!step.key?("if") && !step["continue-on-error"], "Pages tool installation must remain required")
+    end
+    apt_commands = apt.fetch("run").lines.select { |line| line.include?("sudo apt-get") }
+    require!(apt_commands.length == 2 && apt_commands.all? { |line|
+      %w[Acquire::Retries=2 Acquire::http::Timeout=30 Acquire::https::Timeout=30].all? { |flag| line.include?(flag) }
+    }, "Pages apt requests need bounded retries and timeouts")
+    require!(%w[--retry\ 2 --connect-timeout\ 20 --max-time\ 180].all? { |flag| curl.fetch("run").include?(flag) },
+             "Pages curl requests need bounded retries and timeouts")
+    [["release-build.yml", "binary", "Upload to draft release and verify the served bytes"],
+     ["release.yml", "create-release", "Create (or reuse) the release"],
+     ["release.yml", "checksums", "Publish checksums of the verified release assets"]].each do |file, job, label|
+      step = workflows.fetch(file).fetch("jobs").fetch(job).fetch("steps").find { |s| s["name"] == label }
+      require!(step && step["timeout-minutes"].is_a?(Integer) && (1..15).cover?(step["timeout-minutes"]),
+               "#{file}/#{label}: release transfer needs a bounded timeout")
+      require!(!step["continue-on-error"], "#{file}/#{label}: release transfer must report failure")
+      expected_condition = file == "release-build.yml" ? "${{ inputs.publish-draft }}" : nil
+      require!(expected_condition ? step["if"] == expected_condition : !step.key?("if"),
+               "#{file}/#{label}: release transfer must retain its condition")
+    end
+  end
+
+  def self.setup_self_test(workflows)
+    checks = 0
+    [["ci.yml", "build"], ["pages.yml", "build"], ["release-build.yml", "binary"]].each do |file, name|
+      ["job", "compiler", "dependencies", "retry", "optional", "skipped", "downloads", "skipped-job", "optional-job", "boolean-step"].each do |poison|
+        copy = Marshal.load(Marshal.dump(workflows))
+        job = copy.fetch(file).fetch("jobs").fetch(name)
+        setup = job.fetch("steps").find { |s| s["name"] == "Set up OCaml" }
+        deps = job.fetch("steps").find { |s| s["name"] == "Install dependencies" }
+        case poison
+        when "job" then job.delete("timeout-minutes")
+        when "compiler" then setup["timeout-minutes"] = 31
+        when "dependencies" then deps.delete("timeout-minutes")
+        when "retry" then deps["run"] = "opam install . --deps-only"
+        when "optional" then setup["continue-on-error"] = true
+        when "skipped" then setup["if"] = "false"
+        when "downloads" then job.fetch("env").delete("OPAMRETRIES")
+        when "skipped-job" then job["if"] = false
+        when "optional-job" then job["continue-on-error"] = true
+        when "boolean-step" then setup["if"] = false
+        end
+        begin
+          check_setup(copy)
+        rescue Invalid, KeyError
+          checks += 1
+          next
+        end
+        raise Invalid, "setup negative control stayed green: #{file}/#{poison}"
+      end
+    end
+    %w[apt curl checkout transfer deployment artifact tool-optional tool-skipped transfer-optional artifact-optional].each do |poison|
+      copy = Marshal.load(Marshal.dump(workflows))
+      steps = copy["pages.yml"]["jobs"]["build"]["steps"]
+      case poison
+      when "apt" then steps.find { |s| s["name"] == "Install wabt (wat2wasm)" }["run"].gsub!("Acquire::Retries=2", "Acquire::Retries=0")
+      when "curl" then steps.find { |s| s["name"] == "Install binaryen (wasm-opt), pinned as in ci.yml" }["run"].gsub!("--max-time 180", "")
+      when "checkout" then steps.find { |s| s["uses"].to_s.start_with?("actions/checkout@") }.delete("timeout-minutes")
+      when "transfer" then copy["release.yml"]["jobs"]["checksums"]["steps"].last.delete("timeout-minutes")
+      when "deployment" then copy["pages.yml"]["jobs"]["deploy"]["steps"].first["if"] = false
+      when "artifact" then copy["release-build.yml"]["jobs"]["binary"]["steps"].find { |s| s["uses"].to_s.start_with?("actions/upload-artifact@") }["if"] = false
+      when "tool-optional" then steps.find { |s| s["name"] == "Install wabt (wat2wasm)" }["continue-on-error"] = true
+      when "tool-skipped" then steps.find { |s| s["name"] == "Install binaryen (wasm-opt), pinned as in ci.yml" }["if"] = false
+      when "transfer-optional" then copy["release.yml"]["jobs"]["checksums"]["steps"].last["continue-on-error"] = true
+      when "artifact-optional" then copy["release-build.yml"]["jobs"]["binary"]["steps"].find { |s| s["uses"].to_s.start_with?("actions/upload-artifact@") }["continue-on-error"] = true
+      end
+      begin
+        check_setup(copy)
+      rescue Invalid, KeyError
+        checks += 1
+        next
+      end
+      raise Invalid, "setup negative control stayed green: #{poison}"
+    end
+    check_retry
+    puts "ci_gates: #{checks} setup negative controls caught; dependency retry behavior checked"
+  end
+
+  def self.check_retry
+    script = File.expand_path("retry.sh", __dir__)
+    Dir.mktmpdir("mere-network-retry-") do |tmp|
+      FileUtils.mkdir_p("#{tmp}/bin")
+      File.write("#{tmp}/bin/sleep", "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$RETRY_SLEEP\"\n")
+      File.write("#{tmp}/command", <<~SH)
+        #!/bin/sh
+        [ "$#" = 1 ] && [ "$1" = 'argument with spaces' ] || exit 77
+        n=0
+        [ ! -f "$RETRY_COUNT" ] || n=$(cat "$RETRY_COUNT")
+        n=$((n + 1)); echo "$n" > "$RETRY_COUNT"
+        [ "$RETRY_MODE" != fail ] || exit 42
+        [ "$RETRY_MODE" != cancel ] || exit 130
+        [ "$RETRY_MODE" != missing ] || exit 127
+        [ "$RETRY_MODE" != once ] || [ "$n" -gt 1 ] || exit 41
+      SH
+      File.chmod(0755, "#{tmp}/bin/sleep")
+      File.chmod(0755, "#{tmp}/command")
+      {"success" => [0, 1], "once" => [0, 2], "fail" => [42, 2], "cancel" => [130, 1], "missing" => [127, 1]}.each do |mode, (code, count)|
+        env = {"PATH" => "#{tmp}/bin:#{ENV.fetch('PATH')}", "RETRY_MODE" => mode,
+               "RETRY_COUNT" => "#{tmp}/count-#{mode}", "RETRY_SLEEP" => "#{tmp}/sleep-#{mode}"}
+        _, _, status = Open3.capture3(env, "/bin/sh", script, "#{tmp}/command", "argument with spaces")
+        require!(status.exitstatus == code && File.read(env["RETRY_COUNT"]).to_i == count,
+                 "dependency retry #{mode}: wrong status or attempt count")
+        sleeps = File.exist?(env["RETRY_SLEEP"]) ? File.readlines(env["RETRY_SLEEP"]).map(&:strip) : []
+        require!(sleeps == (count == 1 ? [] : ["5"]), "dependency retry #{mode}: wrong backoff")
+      end
+      _, _, status = Open3.capture3("/bin/sh", script)
+      require!(status.exitstatus == 2, "dependency retry must reject an empty command")
+    end
+  end
+
   # Execute the workflow's checkout body with a fake clone, so losing an
   # oracle cannot silently turn a newly isolated job into native-only coverage.
   def self.check_oracle_checkout(step)
@@ -268,9 +433,15 @@ if $PROGRAM_NAME == __FILE__
       exit 0
     end
     assigned = CIGates.check(workflow)
+    workflows = {"ci.yml" => workflow}
+    %w[pages.yml release-build.yml release.yml].each do |name|
+      workflows[name] = YAML.safe_load(File.read(File.join(File.dirname(path), name)), aliases: false)
+    end
+    CIGates.check_setup(workflows)
     puts "ci_gates: #{assigned.values.sum(&:length)} checks assigned exactly once across #{assigned.length} groups"
     assigned.each { |group, checks| puts "  #{group}: #{checks.length}" }
     CIGates.self_test(workflow) if ARGV.include?("--self-test")
+    CIGates.setup_self_test(workflows) if ARGV.include?("--self-test")
   rescue CIGates::Invalid, KeyError, Psych::Exception => e
     warn "ci_gates: #{e.message}"
     exit 1

@@ -1,0 +1,89 @@
+// Captured SIMD values, nested payloads and container buffers must retain
+// their alignment through allocation, growth and copies between regions.
+type packet = { bytes: u8x16, floats: f64x2, singles: f32x4 };
+type chain = End | Link of packet * chain;
+view pixel[R] of u8x16 { lanes: u8x16 };
+let make = fn b ->
+  let lanes = u8x16_from_bytes b in fn () -> u8x16_extract lanes 0;
+let captured = make (bytes_of_str "0123456789abcdef");
+let _ = print_int (captured ()); // 48
+let packet_of = fn n -> packet {
+  bytes = u8x16_splat n,
+  floats = f64x2_make (float_of_int n) 2.0,
+  singles = f32x4_make 1.0 2.0 3.0 4.0
+};
+let score = fn (p: packet) -> u8x16_extract p.bytes 0
+  + int_of_float (f64x2_reduce_add p.floats)
+  + int_of_float (f32x4_reduce_add p.singles);
+let seed = bytes_of_str "0123456789abcdef";
+let copied = region R {
+  let pad = bytes_of_str "0123456789abcdef" in
+  let p = packet_of (bytes_get pad 0 + bytes_get seed 0 - 48) in
+  fn () -> score p
+};
+let _ = print_int (copied ()); // 108
+let fs = vec_new ();
+let _ = region R {
+  let p = packet_of 3 in
+  vec_push fs (fn () -> score p)
+};
+let _ = print_int ((vec_get fs 0) ()); // 18
+let values = vec_new ();
+let rec fill = fn i -> if i == 200 then () else
+  let pad = bytes_of_str "0123456789abcdef" in
+  let _ = vec_push values (packet_of (i + bytes_len pad - 16)) in fill (i + 1);
+let _ = fill 0;
+let _ = print_int (score (vec_get values 199)); // 410
+let _ = vec_compact values;
+let _ = print_int (score (vec_get values 199)); // 410
+let _ = vec_recycle values;
+let _ = vec_push values (packet_of 5);
+let _ = print_int (score (vec_get values 0)); // 22
+let m = map_new ();
+let rec put = fn i -> if i == 41 then () else
+  let _ = map_set m i (packet_of i) in put (i + 1);
+let _ = put 0;
+let _ = print_int (score (map_get m 40)); // 92
+let _ = map_compact m;
+let _ = print_int (score (map_get m 40)); // 92
+let _ = map_clear m;
+let _ = map_recycle m;
+let _ = map_set m 1 (packet_of 7);
+let _ = print_int (score (map_get m 1)); // 26
+let xs = region R {
+  // The short buffer and builder leave the first node needing padding.
+  let pad = bytes_of_str "0" in
+  let b = lb_new () in
+  let _ = lb_push b (packet_of (bytes_get pad 0)) in
+  let _ = lb_push b (packet_of 2) in
+  lb_to_list b
+};
+let _ = print_int (list_fold xs 0 (fn acc -> fn p -> acc + score p)); // 124
+let tree = region R {
+  let pad = bytes_of_str "0123456789abcdef" in
+  Link (packet_of (bytes_len pad - 8), Link (packet_of 9, End))
+};
+let rec sum = fn t -> match t with End -> 0 | Link (p, rest) -> score p + sum rest;
+let _ = print_int (sum tree); // 58
+let _ = region R {
+  let pad = bytes_of_str "0123456789abcdef" in
+  let p = pixel { lanes = u8x16_splat (bytes_get pad 0) } in
+  print_int (u8x16_extract p.lanes 0) // 48
+};
+let out = vec_new ();
+let root = coro_root ();
+let c = region R {
+  let p = packet_of 11 in
+  coro_new (fn _me -> fn (_u: unit) -> coro_exit (
+    let _ = vec_push out (score p) in root) ())
+};
+let _ = coro_switch c;
+let _ = print_int (vec_get out 0); // 34
+let make_body = fn n ->
+  let p = packet_of n in
+  fn (_me: Coro[unit]) -> fn (_u: unit) -> coro_exit (
+    let _ = vec_push out (score p) in root) ();
+let body = region R { make_body 13 };
+let c2 = coro_new body;
+let _ = coro_switch c2;
+print_int (vec_get out 1) // 38

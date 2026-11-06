@@ -20,19 +20,28 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      OPAMRETRIES: "2"
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Set up OCaml
+        timeout-minutes: 30
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: "5.1"
 
       - name: Install dependencies
-        run: opam install . --deps-only
+        timeout-minutes: 15
+        run: sh scripts/retry.sh opam install . --deps-only
 
       - name: Install wabt (wat2wasm)
-        run: sudo apt-get update && sudo apt-get install -y wabt
+        timeout-minutes: 10
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends wabt
 
       # binaryen as well, because build_full.sh runs wasm-opt -Oz: without it
       # the DEPLOYED site would ship modules a third larger than the ones CI
@@ -41,22 +50,26 @@ jobs:
       # at all, and an unpinned optimizer would make the deployed bytes drift
       # away from the recorded ones without anything saying so.
       - name: Install binaryen (wasm-opt), pinned as in ci.yml
+        timeout-minutes: 10
         run: |
           set -e
           BINARYEN=132
           mkdir -p "$HOME/.local/bin"
-          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
+          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
             | tar -xz -C /tmp
           install "/tmp/binaryen-version_${BINARYEN}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Build mere
+        timeout-minutes: 10
         run: opam exec -- dune build
 
       - name: Build docs site (mere SSG + wat2wasm)
+        timeout-minutes: 20
         run: opam exec -- sh contrib/site/build_full.sh docs _site
 
       - name: Upload Pages artifact
+        timeout-minutes: 5
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -64,10 +77,12 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
+        timeout-minutes: 5
         id: deployment
         uses: actions/deploy-pages@v4

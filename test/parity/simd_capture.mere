@@ -1,0 +1,17 @@
+// Capturing each SIMD type requires the C closure environment to preserve
+// its natural alignment. The captured values remain live across calls.
+let make_bytes = fn b ->
+  let lanes = u8x16_from_bytes b in fn () -> u8x16_extract lanes 0;
+let bytes = make_bytes (bytes_of_str "0123456789abcdef");
+let _ = print_int (bytes ()); // 48
+let make_doubles = fn n ->
+  let lanes = f64x2_make n 2.0 in fn () -> f64x2_reduce_add lanes;
+let doubles = make_doubles 3.0;
+let _ = print_int (int_of_float (doubles ())); // 5
+let make_singles = fn n ->
+  let lanes = f32x4_make n 2.0 3.0 4.0 in fn () -> f32x4_reduce_add lanes;
+let singles = make_singles 1.0;
+let _ = print_int (int_of_float (singles ())); // 10
+let _ = print_int (bytes ()); // 48
+let _ = print_int (int_of_float (doubles ())); // 5
+print_int (int_of_float (singles ())) // 10

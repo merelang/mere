@@ -2115,7 +2115,7 @@ let rec emit_expr (e : Ast.expr) : string =
                   semicolons are fine. Even with 0 captures, if store_caps is
                   the empty string we just get an extra ` ` gap — still syntactically OK. *)
                Printf.sprintf
-                 "({ %s* __env_local = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env_local->__r = __lang_current_region; __env_local->__copy = __mcopy_env_%s; %s(%s){.env = __env_local, .fn = %s}; })"
+                 "({ %s* __env_local = (%s*)__lang_region_alloc_type(__lang_current_region, %s); __env_local->__r = __lang_current_region; __env_local->__copy = __mcopy_env_%s; %s(%s){.env = __env_local, .fn = %s}; })"
                  env_struct_name env_struct_name env_struct_name env_struct_name store_caps closure_struct adapter_name
              | _ ->
                unsupported e.loc
@@ -2821,11 +2821,11 @@ let rec emit_expr (e : Ast.expr) : string =
                 (emit_expr { Ast.loc = e.loc; ty = Some t; node = Ast.Var n })) captures)
         in
         Printf.sprintf
-          "({ %s* __env = (%s*)__lang_env_alloc(&__lang_coro_env_owner, sizeof(%s)); __env->__r = &__lang_coro_env_owner; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
+          "({ %s* __env = (%s*)__lang_env_alloc_type(&__lang_coro_env_owner, %s); __env->__r = &__lang_coro_env_owner; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
           env_name env_name env_name env_name owned_inits cstruct adapter_name fn2_init
       else
       Printf.sprintf
-        "({ %s* __env = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); __env->__r = __lang_current_region; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
+        "({ %s* __env = (%s*)__lang_region_alloc_type(__lang_current_region, %s); __env->__r = __lang_current_region; __env->__copy = __mcopy_env_%s; %s (%s){.env = __env, .fn = %s%s}; })"
         env_name env_name env_name env_name inits cstruct adapter_name fn2_init
   | Ast.App _ when builtin_wants_sequencing e ->
     c_tail_pos := __in_tail;
@@ -4299,7 +4299,7 @@ let rec emit_expr (e : Ast.expr) : string =
           if (__b->frozen) __lang_fail_impl(\"lb_push: the builder was already turned into a list by lb_to_list\"); \
           __LANG_OWNED(__b, \"ListBuf\", \"lb_push\"); \
           if (__lang_region_live(__b->region) != __lang_current_region) __lang_fail_impl(\"lb_push: the builder belongs to a region that is not current\"); \
-          %s_node* __n = (%s_node*)__lang_region_alloc(__b->region, sizeof(%s_node)); \
+          %s_node* __n = (%s_node*)__lang_region_alloc_type(__b->region, %s_node); \
           __n->payload.Cons.f0 = __x; __n->payload.Cons.f1 = %s__mk(%d, &%s); \
           %s __nv = %s__mk(%d, __n); \
           if (__b->tail) ((%s_node*)__b->tail)->payload.Cons.f1 = __nv; else __b->head = (void*)__nv; \
@@ -4581,7 +4581,7 @@ let rec emit_expr (e : Ast.expr) : string =
          "({ __auto_type __v = %s; __LANG_READ(__v); \
           %s __acc = %s__mk(%d, &%s); \
           for (int __i = __v->len - 1; __i >= 0; __i--) { \
-            %s_node* __new_node = (%s_node*)__lang_region_alloc(__lang_current_region, sizeof(%s_node)); \
+            %s_node* __new_node = (%s_node*)__lang_region_alloc_type(__lang_current_region, %s_node); \
             __new_node->payload.Cons.f0 = mere_vec_%s_get(__v, __i); \
             __new_node->payload.Cons.f1 = __acc; \
             __acc = %s__mk(%d, __new_node); \
@@ -4913,7 +4913,7 @@ let rec emit_expr (e : Ast.expr) : string =
           (shared_nullary_sym actual_type_name tag)
       | Some arg_c ->
         Printf.sprintf
-          "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); \
+          "({ %s* __p = (%s*)__lang_region_alloc_type(__lang_current_region, %s); \
            __p->payload.%s = %s; %s__mk(%d, __p); })"
           node node node name arg_c actual_type_name tag
     else
@@ -5216,7 +5216,7 @@ let rec emit_expr (e : Ast.expr) : string =
     Printf.sprintf
       "({ __auto_type __ref_v = (%s); \
        typeof(__ref_v)* __ref_p = (typeof(__ref_v)*) \
-         __lang_region_alloc(%s, sizeof(__ref_v)); \
+         __lang_region_alloc_type(%s, __typeof__(__ref_v)); \
        *__ref_p = __ref_v; __ref_p; })"
       (emit_expr inner) region_var
   | Ast.Record_lit (name, fields) ->
@@ -5238,7 +5238,7 @@ let rec emit_expr (e : Ast.expr) : string =
         | None -> unsupported e.loc "view literal missing type info"
       in
       Printf.sprintf
-        "({ %s* __view_p = (%s*) __lang_region_alloc(__region_%s, sizeof(%s)); \
+        "({ %s* __view_p = (%s*) __lang_region_alloc_type(__region_%s, %s); \
          *__view_p = (%s){%s}; __view_p; })"
         name name region name name (String.concat ", " parts)
     end
@@ -6039,7 +6039,7 @@ let emit_closure_env_copy_fn (env_name : string) (fields : (string * Ast.ty) lis
     "static void* __mcopy_env_%s(__lang_region* r, void* __p) {\n\
     \  %s* __s = (%s*)__p;\n\
     \  if (__s->__r == r) return __p;\n\
-    \  %s* __d = (%s*)__lang_env_alloc(r, sizeof(%s));\n\
+    \  %s* __d = (%s*)__lang_env_alloc_type(r, %s);\n\
     \  *__d = *__s;\n  __d->__r = r;\n  __d->__copy = __s->__copy;\n  r = __LANG_ENV_PAYLOAD(r);\n%s\n  return (void*)__d;\n}"
     env_name env_name env_name env_name env_name env_name steps
 
@@ -6546,7 +6546,7 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
     if is_ptr then
       let node = cty ^ "_node" in
       Printf.sprintf
-        "({ %s* __p = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s)); %s%s__mk(%d, __p); })"
+        "({ %s* __p = (%s*)__lang_region_alloc_type(__lang_current_region, %s); %s%s__mk(%d, __p); })"
         node node node
         (match arg_c_opt with None -> "" | Some a -> "__p->payload." ^ cname ^ " = " ^ a ^ "; ")
         cty tag_n
@@ -6579,7 +6579,7 @@ let emit_of_json_fn (tag : string) (t : Ast.ty) : string =
         "  if (j->kind != MJ_ARR) __mj_die(\"expected a JSON array\");\n  \
          %s __acc = %s__mk(%d, &%s);\n  \
          for (int __i = j->len - 1; __i >= 0; __i--) {\n    \
-           %s* __n = (%s*)__lang_region_alloc(__lang_current_region, sizeof(%s));\n    \
+           %s* __n = (%s*)__lang_region_alloc_type(__lang_current_region, %s);\n    \
            __n->payload.Cons.f0 = __ojnode_%s(j->items[__i]);\n    \
            __n->payload.Cons.f1 = __acc;\n    \
            __acc = %s__mk(%d, __n);\n  }\n  return __acc;"
@@ -6842,7 +6842,7 @@ let emit_recursive_variant_copy (fam : string) (header : string) (cty : string)
                    tag_n cname fam (ty_tag ty) cname))) variants in
   Printf.sprintf
     "%s {\n  %s __head; %s* __slot = &__head;\n  for (;;) {\n    int __t = %s__tag(v);\n%s\n    \
-     %s_node* p = (%s_node*)__lang_region_alloc(r, sizeof(%s_node));\n    *p = *%s__node(v);\n%s\n    \
+     %s_node* p = (%s_node*)__lang_region_alloc_type(r, %s_node);\n    *p = *%s__node(v);\n%s\n    \
      *__slot = %s__mk(__t, p);\n    return __head;\n  }\n}"
     header cty cty cty (String.concat "\n" nullary) cty cty cty cty (String.concat "\n" payload) cty
 
@@ -10603,7 +10603,7 @@ let region_runtime_helpers =
       "  struct __lang_region_s* owner;   /* whose chain it is on: its bump block ends at owner->top */";
       "  struct __lang_region_block* gprev;";
       "  struct __lang_region_block* gnext;";
-      "} __lang_region_block;";
+      "} __attribute__((aligned(16))) __lang_region_block;";
       "/* bumped by every coroutine switch (see __lang_region_pinned): a block";
       "   allocated after a coroutine last stopped cannot be pointed into by it */";
       "static _Thread_local unsigned long __lang_region_epoch = 1;";
@@ -11064,13 +11064,19 @@ let region_runtime_helpers =
       "   default region. */";
       "static _Thread_local __lang_region* __lang_current_region = &__lang_default_region;";
       "";
-      "static void* __lang_region_alloc(__lang_region* r, size_t n) {";
-      "  if (r && r->fwd) { __lang_dsite_charge(r, (n + 7) & ~((size_t)7)); r = __lang_region_live(r); }";
+      "static void* __lang_region_alloc_aligned(__lang_region* r, size_t n, size_t alignment) {";
+      "  if (alignment < 8) alignment = 8;";
+      "  if (alignment > 16 || (alignment & (alignment - 1))) __lang_fail_impl(\"unsupported allocation alignment\");";
+      "  if (n > (size_t)-1 - 7) __lang_fail_impl(\"out of memory\");";
+      "  __lang_region* r0 = r;";
+      "  r = __lang_region_live(r);";
       "  int shared = (r == &__lang_default_region);";
       "  if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
       "  size_t aligned = (n + 7) & ~((size_t)7);";
-      "  r->alloc_total += aligned;";
-      "  if (r->top + aligned > r->base + r->cap) {";
+      "  if (aligned > (size_t)-1 - sizeof(__lang_region_block)) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
+      "  size_t padding = (-(uintptr_t)r->top) & (alignment - 1);";
+      "  size_t available = r->cap - (size_t)(r->top - r->base);";
+      "  if (padding > available || aligned > available - padding) {";
       (* v0.1.307: an allocation bigger than a quarter of the current block
          gets its own exact-size block, chained in BEHIND the bump block --
          it is freed with the region like any other block, but it neither
@@ -11092,10 +11098,11 @@ let region_runtime_helpers =
       "      big->prev = r->blocks->prev;";
       "      r->blocks->prev = big;";
       "      void* bp = (void*)(big + 1);";
+      "      r->alloc_total += aligned; __lang_dsite_charge(r0, aligned);";
       "      if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "      return bp;";
       "    }";
-      "    size_t ncap = r->cap * 2;";
+      "    size_t ncap = r->cap > (size_t)-1 / 2 ? aligned : r->cap * 2;";
       (* doubling toward a request bigger than half the address space wraps to
          zero, and a wrapped capacity buys a block far too small for the
          allocation that asked for it *)
@@ -11103,16 +11110,22 @@ let region_runtime_helpers =
       "      if (ncap > (size_t)-1 / 2) { ncap = aligned; break; }";
       "      ncap *= 2;";
       "    }";
+      "    if (ncap > (size_t)-1 - sizeof(__lang_region_block)) ncap = aligned;";
       (* a fail while the lock is held leaves it held, and the next
          allocation waits on itself: unlock first *)
       "    if (shared && !__lang_region_add_block_try(r, ncap)) { pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "    else if (!shared) __lang_region_add_block(r, ncap);";
+      "    padding = 0;  /* every block's payload begins on a 16-byte boundary */";
       "  }";
-      "  void* p = r->top;";
-      "  r->top += aligned;";
+      "  void* p = r->top + padding;";
+      "  r->top += padding + aligned;";
+      "  r->alloc_total += padding + aligned; __lang_dsite_charge(r0, padding + aligned);";
       "  if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "  return p;";
       "}";
+      "static void* __lang_region_alloc(__lang_region* r, size_t n) { return __lang_region_alloc_aligned(r, n, 8); }";
+      "#define __lang_region_alloc_type(r, T) __lang_region_alloc_aligned((r), sizeof(T), __alignof__(T))";
+      "#define __lang_region_alloc_array(r, T, n) __lang_region_alloc_aligned((r), sizeof(T) * (n), __alignof__(T))";
       "";
       (* v0.1.414: grow the most recent allocation in place. A container that
          doubles its buffer in a bump arena leaves every previous buffer behind
@@ -11128,7 +11141,10 @@ let region_runtime_helpers =
          capacity in bytes), which is what decides whether it ends at top.
          Contract: `old` must be reachable ONLY through the caller (a
          container's private buffer) -- the realloc path below may move it. *)
-      "static void* __lang_region_grow(__lang_region* r, void* old, size_t old_n, size_t new_n) {";
+      "static void* __lang_region_grow_aligned(__lang_region* r, void* old, size_t old_n, size_t new_n, size_t alignment) {";
+      "  if (alignment < 8) alignment = 8;";
+      "  if (alignment > 16 || (alignment & (alignment - 1))) __lang_fail_impl(\"unsupported allocation alignment\");";
+      "  if (new_n > (size_t)-1 - 7) __lang_fail_impl(\"out of memory\");";
       "  __lang_region* r0 = r;   /* a --region-sites stub is charged for what grows through it */";
       "  r = __lang_region_live(r);";
       "  int shared = (r == &__lang_default_region);";
@@ -11136,7 +11152,7 @@ let region_runtime_helpers =
       "    size_t old_al = (old_n + 7) & ~((size_t)7);";
       "    size_t new_al = (new_n + 7) & ~((size_t)7);";
       "    if (shared) pthread_mutex_lock(&__lang_default_region_lock);";
-      "    if ((char*)old + old_al == r->top && (char*)old + new_al <= r->base + r->cap) {";
+      "    if (!((uintptr_t)old & (alignment - 1)) && (char*)old + old_al == r->top && new_al <= (size_t)(r->base + r->cap - (char*)old)) {";
       "      r->top = (char*)old + new_al;";
       "      r->alloc_total += new_al - old_al; __lang_dsite_charge(r0, new_al - old_al);";
       "      if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
@@ -11179,10 +11195,11 @@ let region_runtime_helpers =
       "    }";
       "    if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
       "  }";
-      "  void* p = __lang_region_alloc(r0, new_n);";
+      "  void* p = __lang_region_alloc_aligned(r0, new_n, alignment);";
       "  if (old && old_n) memcpy(p, old, old_n < new_n ? old_n : new_n);";
       "  return p;";
       "}";
+      "static void* __lang_region_grow(__lang_region* r, void* old, size_t old_n, size_t new_n) { return __lang_region_grow_aligned(r, old, old_n, new_n, 8); }";
       "";
       "/* v0.1.299: total capacity of a region's block chain. Capacity, not";
       "   bump-used: within 2x of used (blocks double), free of hot-path cost,";
@@ -11767,12 +11784,12 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "";
       (* new *)
       Printf.sprintf "static %s* %s_new(__lang_region* r) {" struct_name struct_name;
-      Printf.sprintf "  %s* m = (%s*)__lang_region_alloc(r, sizeof(%s));"
+      Printf.sprintf "  %s* m = (%s*)__lang_region_alloc_type(r, %s);"
         struct_name struct_name struct_name;
       "  m->cap = 4;";
       "  m->len = 0;";
-      Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_k c_k;
-      Printf.sprintf "  m->values = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_v c_v;
+      Printf.sprintf "  m->keys = (%s*)__lang_region_alloc_array(r, %s, 4);" c_k c_k;
+      Printf.sprintf "  m->values = (%s*)__lang_region_alloc_array(r, %s, 4);" c_v c_v;
       "  m->dead = (unsigned char*)__lang_region_alloc(r, 4);";
       "  for (int i = 0; i < 4; i++) m->dead[i] = 0;";
       "  m->live = 0;";
@@ -11892,8 +11909,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "    m->region = fresh;";
       "    m->owns_region = 1;";
       "  }";
-      Printf.sprintf "  m->keys = (%s*)__lang_region_alloc(m->region, sizeof(%s) * 4);" c_k c_k;
-      Printf.sprintf "  m->values = (%s*)__lang_region_alloc(m->region, sizeof(%s) * 4);" c_v c_v;
+      Printf.sprintf "  m->keys = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_k c_k;
+      Printf.sprintf "  m->values = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_v c_v;
       "  m->dead = (unsigned char*)__lang_region_alloc(m->region, 4);";
       "  for (int i = 0; i < 4; i++) m->dead[i] = 0;";
       "  m->cap = 4;";
@@ -11983,8 +12000,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          move what it exists to drop. `dead` moves too: it lives in the arena
          about to be freed. *)
       "  int ncap = m->live < 4 ? 4 : m->live;";
-      Printf.sprintf "  %s* nk = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_k c_k c_k;
-      Printf.sprintf "  %s* nv = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_v c_v c_v;
+      Printf.sprintf "  %s* nk = (%s*)__lang_region_alloc_array(fresh, %s, ncap);" c_k c_k c_k;
+      Printf.sprintf "  %s* nv = (%s*)__lang_region_alloc_array(fresh, %s, ncap);" c_v c_v c_v;
       "  unsigned char* nd = (unsigned char*)__lang_region_alloc(fresh, (size_t)ncap);";
       "  int w = 0;";
       "  for (int i = 0; i < m->len; i++) {";
@@ -12061,8 +12078,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  }";
       "  if (m->len == m->cap) {";
       "    int new_cap = m->cap * 2;";
-      Printf.sprintf "    %s* __mnk = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_k c_k c_k;
-      Printf.sprintf "    %s* __mnv = (%s*)__lang_region_alloc(m->region, sizeof(%s) * new_cap);" c_v c_v c_v;
+      Printf.sprintf "    %s* __mnk = (%s*)__lang_region_alloc_array(m->region, %s, new_cap);" c_k c_k c_k;
+      Printf.sprintf "    %s* __mnv = (%s*)__lang_region_alloc_array(m->region, %s, new_cap);" c_v c_v c_v;
       "    unsigned char* __mnd = (unsigned char*)__lang_region_alloc(m->region, (size_t)new_cap);";
       "    for (int i = 0; i < m->len; i++) {";
       "      __mnk[i] = m->keys[i];";
@@ -13586,14 +13603,16 @@ let env_header_runtime =
          fields point to in the default region as before (a captured string can
          be kept by something else; the struct's own address never leaves). *)
       "static __lang_region __lang_coro_env_owner;   /* a marker, never allocated from */";
-      "static void* __lang_env_alloc(__lang_region* r, size_t n) {";
+      "static void* __lang_env_alloc(__lang_region* r, size_t n, size_t alignment) {";
+      "  if (alignment > 16) __lang_fail_impl(\"unsupported closure alignment\");";
       "  if (r == &__lang_coro_env_owner) {";
       "    void* p = malloc(n);";
       "    if (!p) __lang_fail_impl(\"out of memory\");";
       "    return p;";
       "  }";
-      "  return __lang_region_alloc(r, n);";
+      "  return __lang_region_alloc_aligned(r, n, alignment);";
       "}";
+      "#define __lang_env_alloc_type(r, T) __lang_env_alloc((r), sizeof(T), __alignof__(T))";
       "#define __LANG_ENV_PAYLOAD(r) ((r) == &__lang_coro_env_owner ? &__lang_default_region : (r))" ]
 
 let logger_runtime =
@@ -14008,11 +14027,11 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "} %s;" struct_name;
       "";
       Printf.sprintf "static %s* %s_new(__lang_region* r) {" struct_name struct_name;
-      Printf.sprintf "  %s* v = (%s*)__lang_region_alloc(r, sizeof(%s));"
+      Printf.sprintf "  %s* v = (%s*)__lang_region_alloc_type(r, %s);"
         struct_name struct_name struct_name;
       "  v->cap = 4;";
       "  v->len = 0;";
-      Printf.sprintf "  v->data = (%s*)__lang_region_alloc(r, sizeof(%s) * 4);" c_elem c_elem;
+      Printf.sprintf "  v->data = (%s*)__lang_region_alloc_array(r, %s, 4);" c_elem c_elem;
       "  v->region = r;";
       "  v->home = r;";
       "  v->owner = __LANG_OWNER_NOW();";
@@ -14029,7 +14048,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "    int new_cap = v->cap * 2;";
       (* v0.1.414: in place when this buffer is the region's most recent
          allocation; a copy into a fresh buffer otherwise (see region_grow). *)
-      Printf.sprintf "    v->data = (%s*)__lang_region_grow(v->region, v->data, sizeof(%s) * (size_t)v->cap, sizeof(%s) * (size_t)new_cap);"
+      Printf.sprintf "    v->data = (%s*)__lang_region_grow_aligned(v->region, v->data, sizeof(%s) * (size_t)v->cap, sizeof(%s) * (size_t)new_cap, __alignof__(*v->data));"
         c_elem c_elem c_elem;
       "    v->cap = new_cap;";
       "  }";
@@ -14054,7 +14073,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  int owned = v->owns_region;";
       "  v->region = fresh;";
       "  int ncap = v->len < 4 ? 4 : v->len;";
-      Printf.sprintf "  %s* nd = (%s*)__lang_region_alloc(fresh, sizeof(%s) * ncap);" c_elem c_elem c_elem;
+      Printf.sprintf "  %s* nd = (%s*)__lang_region_alloc_array(fresh, %s, ncap);" c_elem c_elem c_elem;
       Printf.sprintf "  for (int i = 0; i < v->len; i++) nd[i] = __mcopy_%s(fresh, v->data[i]);" tag;
       "  v->data = nd;";
       "  v->cap = ncap;";
@@ -14104,7 +14123,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "    v->region = fresh;";
       "    v->owns_region = 1;";
       "  }";
-      Printf.sprintf "  v->data = (%s*)__lang_region_alloc(v->region, sizeof(%s) * 4);" c_elem c_elem;
+      Printf.sprintf "  v->data = (%s*)__lang_region_alloc_array(v->region, %s, 4);" c_elem c_elem;
       "  v->cap = 4;";
       "  v->len = 0;";
       "  return 0;";

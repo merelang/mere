@@ -4697,7 +4697,7 @@ let () =
     "__lang_region_block_release(__region_R)";
   assert_c "codegen: Ref allocates in region and copies"
     (codegen "region R { let x = &R 5 in 42 }")
-    "__lang_region_alloc(__region_R";
+    "__lang_region_alloc_type(__region_R";
   assert_c "codegen: Ref uses typeof for inner type"
     (codegen "region R { let x = &R 5 in 42 }")
     "typeof(__ref_v)*";
@@ -4733,7 +4733,7 @@ let () =
     (codegen_with_decls
       "view CgCell2[R] of int { v: int };\n\
        region R { let c = CgCell2 { v = 7 } in c.v }")
-    "__lang_region_alloc(__region_R, sizeof(CgCell2))";
+    "__lang_region_alloc_type(__region_R, CgCell2)";
   assert_c "codegen: view field access uses -> "
     (codegen_with_decls
       "view CgCell3[R] of int { v: int };\n\
@@ -4775,7 +4775,7 @@ let () =
   assert_c "codegen: an env follows the current region"
     (codegen_with_decls
       "let add = fn n -> fn x -> n + x in (add 3) 4")
-    "__lang_region_alloc(__lang_current_region, sizeof(__anon";
+    "__lang_region_alloc_type(__lang_current_region, __anon";
   assert_c "codegen: the arrow copy reads the env's header"
     (codegen_with_decls
       "let f = region R { let s = \"a\" ++ \"b\" in fn x -> str_len s + x } in f 1")
@@ -5053,7 +5053,7 @@ let () =
          | CgNil3 -> 0\n\
          | CgCons3 (h, t) -> h + sum t\n\
        in sum (CgCons3 (1, CgNil3))")
-    "__lang_region_alloc(__lang_current_region, sizeof(CgList3_node))";
+    "__lang_region_alloc_type(__lang_current_region, CgList3_node)";
   assert_c "codegen: match on recursive variant uses -> access"
     (codegen_with_decls
       "type CgList4 = CgNil4 | CgCons4 of int * CgList4;\n\

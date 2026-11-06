@@ -325,7 +325,7 @@ if [ "$MODE" = "--poison" ]; then
   # v0.1.558: the env is the coroutine's own -- malloc'd where the lambda is
   # written, or copied into the coroutine by coro_new. Left in the block means
   # both undone: allocated in the current region, and not copied out.
-  poison c "C 5 (env left in the block)" 's/__lang_env_alloc(\&__lang_coro_env_owner, /__lang_region_alloc(__lang_current_region, /; s/__env->__r = \&__lang_coro_env_owner;/__env->__r = __lang_current_region;/; s/^    if (h->__copy) { env = h->__copy(\&__lang_coro_env_owner, env); owned = 1; }$/    ;/' env
+  poison c "C 5 (env left in the block)" 's/__lang_env_alloc_type(\&__lang_coro_env_owner, /__lang_region_alloc_type(__lang_current_region, /; s/__env->__r = \&__lang_coro_env_owner;/__env->__r = __lang_current_region;/; s/^    if (h->__copy) { env = h->__copy(\&__lang_coro_env_owner, env); owned = 1; }$/    ;/' env
   # v0.1.558: a reaped coroutine is known by its handle's generation
   poison c "C 6 (no finished check)" '/^  if (!to) __lang_fail_impl/d; /^  if (to->state == 3) __lang_fail_impl/d' finished
   # v0.1.590: since v0.1.589 a pinned map is not compacted at all, and the retire
