@@ -13,8 +13,10 @@ permissions:
 jobs:
   create-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 5
       # A tag is a claim about which compiler this is. Nothing checked it, and
       # scripts/install.sh once served a binary 260 versions old while every
       # gate in the repo was green -- because no gate looked at the artifact a
@@ -22,6 +24,7 @@ jobs:
       # tag against the source, the built binary against the tag, and the
       # UPLOADED binary against the tag once it has been fetched back.
       - name: The tag must be the version in the source
+        timeout-minutes: 1
         run: |
           tag="${GITHUB_REF_NAME#v}"
           tag="${tag%%-*}"            # v0.1.0-rc1 -> 0.1.0
@@ -38,6 +41,7 @@ jobs:
           echo "tag ${GITHUB_REF_NAME} matches lib/version.ml ($src)"
 
       - name: Create (or reuse) the release
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -75,10 +79,13 @@ jobs:
   checksums:
     needs: binaries
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Publish checksums of the verified release assets
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

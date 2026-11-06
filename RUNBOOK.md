@@ -217,6 +217,12 @@ and WABT (`wat2wasm`) includes the Wasm execution checks; a source build
 without them runs fewer tests and reports the omitted checks. Use the full
 CI environment when validating the README's test count.
 
+The C compiler bundle also runs SIMD allocation fixtures and a generated-runtime
+probe under full UBSan on Clang and GCC 14/15. Its three negative controls must
+detect lost type alignment, block payload alignment and buffer-growth alignment.
+Run `sh scripts/c_compiler_check.sh --emit <directory>` followed by
+`CC=clang sh scripts/c_compiler_check.sh --check <directory>` to reproduce it.
+
 CI (`.github/workflows/ci.yml`) runs the suite on ubuntu + macOS ×
 OCaml 5.1 / 5.4 (4-matrix). Integration checks use the validated Ubuntu 24.04
 image and run in nine parallel groups:
@@ -237,6 +243,16 @@ native-only checks. Only the downstream group writes the compile cache.
 Run `ruby scripts/ci_gate_check.rb --self-test` to validate assignments and
 failure propagation after editing the workflow. Both `ci.yml` and `pages.yml`
 must be green before a release.
+
+The build matrix, integration groups, Pages and shared distribution build
+allow up to 30 minutes for compiler setup and 15 minutes for dependencies.
+Build, Pages and distribution jobs have a 60-minute limit; integration groups
+retain their 90-minute limit.
+Dependency installation uses `scripts/retry.sh`: one retry after five seconds,
+with the second attempt's exit status preserved. Opam downloads have two
+attempts. Cancellation and command lookup failures stop immediately.
+Pages tool downloads and release transfers have individual limits;
+the setup validator and its controls run in the gate-assignment job.
 
 ## Binary releases
 

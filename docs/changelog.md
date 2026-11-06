@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.709 — 2026-11-06
+
+_C allocations honor the alignment of captured SIMD values and typed payloads._
+
+The C backend now requests each allocated type's alignment for closure
+environments, boxed variants and lists, references, views, and Map/Vec buffers.
+Region block payloads begin on a 16-byte boundary. Scalar allocations retain
+8-byte rounding; SIMD allocations charge any extra alignment padding to the
+region and its allocation site. Buffer growth preserves alignment when it
+extends in place, moves to another block or resizes a dedicated block.
+Closure copies and coroutine environments carry the same requirement.
+
+The [allocation audit](allocation-alignment.md) describes the covered paths.
+Compiler checks exercise captured and nested SIMD values, region copies,
+container growth and reuse, and coroutines under full UBSan. A runtime probe
+checks block boundaries, growth, forwarded allocation sites and concurrent
+default-region allocation. Three deliberate alignment faults must fail.
+
+CI retains all 187 gates across nine groups. The build matrix, Pages and
+shared release build now bound compiler setup and dependency installation;
+idempotent dependency installation retries once and preserves the final
+failure status. Compiler setup allows 30 minutes for cold runners, with a
+60-minute job limit. Pages downloads and release transfers have separate
+timeouts. Workflow checks reject missing bounds, skipped setup and lost retry
+controls, and exercise the retry helper's success and failure paths.
+
 ## v0.1.708 — 2026-11-06
 
 _Byte ranges are checked without overflowing; CI installs its RISC-V oracles

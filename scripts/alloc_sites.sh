@@ -97,19 +97,19 @@ i = b.find(key)
 if i < 0:
     sys.exit("alloc_sites: could not find the region allocator in the generated C")
 b = b[:i] + p + b[i:]
-sig = b"static void* __lang_region_alloc(__lang_region* r, size_t n) {"
+sig = b"static void* __lang_region_alloc_aligned(__lang_region* r, size_t n, size_t alignment) {"
 if sig not in b:
     sys.exit("alloc_sites: the allocator's signature has changed; update this script")
 # out of line, so the return address names the caller
-b = b.replace(sig, b"static void* __attribute__((noinline)) __lang_region_alloc(__lang_region* r, size_t n) {", 1)
-anchor = b"size_t aligned = (n + 7) & ~((size_t)7);"
-i = b.find(anchor)
-if i < 0:
-    sys.exit("alloc_sites: the allocator's rounding line has changed; update this script")
-j = b.index(b"\n", i)
+b = b.replace(sig, sig.replace(b"static void*", b"static void* __attribute__((noinline))"), 1)
 cond = b"if (shared) " if default_only else b""
-b = b[:j] + b"\n  " + cond + (b"__as_note(__builtin_return_address(0),"
-             b" __builtin_return_address(1), __builtin_return_address(2), aligned);") + b[j:]
+for amount in (b"aligned", b"padding + aligned"):
+    anchor = b"r->alloc_total += " + amount + b"; __lang_dsite_charge(r0, " + amount + b");"
+    if b.count(anchor) != 1:
+        sys.exit("alloc_sites: the allocator's charging line has changed; update this script")
+    note = cond + (b"__as_note(__builtin_return_address(0),"
+                   b" __builtin_return_address(1), __builtin_return_address(2), " + amount + b"); ")
+    b = b.replace(anchor, note + anchor, 1)
 open(dst, "wb").write(b)
 PYEOF
 [ $? -eq 0 ] || exit 1

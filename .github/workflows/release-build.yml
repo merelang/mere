@@ -16,12 +16,14 @@ on:
 jobs:
   binary:
     runs-on: ${{ inputs.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
+      OPAMRETRIES: "2"
       ASSET_NAME: ${{ inputs.asset }}
       PUBLISH_DRAFT: ${{ inputs.publish-draft }}
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Require the distribution build platform
         run: |
@@ -47,17 +49,21 @@ jobs:
           echo "MERE_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Set up OCaml
+        timeout-minutes: 30
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: "5.1"
 
       - name: Install dependencies
-        run: opam install . --deps-only
+        timeout-minutes: 15
+        run: sh scripts/retry.sh opam install . --deps-only
 
       - name: Build release binary
+        timeout-minutes: 10
         run: opam exec -- dune build --release bin/mere.exe
 
       - name: Stage binary
+        timeout-minutes: 5
         run: |
           mkdir -p dist
           cp _build/default/bin/mere.exe "dist/$ASSET_NAME"
@@ -70,17 +76,20 @@ jobs:
           fi
 
       - name: Check the asset before uploading
+        timeout-minutes: 5
         run: |
           python3 scripts/release_asset_check.py --self-test
           python3 scripts/release_asset_check.py "dist/$ASSET_NAME"
 
       - name: Check the distribution binary on its runtime platforms
+        timeout-minutes: 10
         run: |
           mode=--native
           [ "$RUNNER_OS" != Linux ] || mode=--linux
           sh scripts/release_runtime_check.sh "$mode" "dist/$ASSET_NAME" "$MERE_RELEASE_VERSION"
 
       - name: Keep the checked binary for inspection
+        timeout-minutes: 5
         if: ${{ !inputs.publish-draft }}
         uses: actions/upload-artifact@v4
         with:
@@ -90,6 +99,7 @@ jobs:
           retention-days: 7
 
       - name: Upload to draft release and verify the served bytes
+        timeout-minutes: 15
         if: ${{ inputs.publish-draft }}
         env:
           GH_TOKEN: ${{ github.token }}
