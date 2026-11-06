@@ -48,10 +48,16 @@ jobs:
           fi
           echo "MERE_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
+      - name: Configure Ubuntu package downloads
+        if: ${{ runner.os == 'Linux' }}
+        timeout-minutes: 1
+        run: sudo python3 scripts/ci_apt_setup.py /etc/apt
+
       - name: Set up OCaml
         timeout-minutes: 30
         uses: ocaml/setup-ocaml@v3
         with:
+          cache: true
           ocaml-compiler: "5.1"
 
       - name: Install dependencies

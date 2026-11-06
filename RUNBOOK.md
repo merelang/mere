@@ -254,6 +254,15 @@ attempts. Cancellation and command lookup failures stop immediately.
 Pages tool downloads and release transfers have individual limits;
 the setup validator and its controls run in the gate-assignment job.
 
+Linux jobs configure APT before OCaml setup, including the package downloads
+made inside the setup action. The Azure Ubuntu archive alias is replaced by
+the official HTTPS archive, with two retries and 30-second HTTP/HTTPS timeouts.
+Repository suites, components, signing keys and other mirrors are preserved.
+The setup action's opam cache remains enabled. Compare actual setup step
+durations and cache-hit messages when measuring changes: a cache hit does not
+avoid the action's system-package installation. All 187 gates and all four
+build configurations remain required.
+
 ## Binary releases
 
 `release-build.yml` is shared by the distribution CI jobs and tagged

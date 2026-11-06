@@ -81,7 +81,7 @@ let _ = coro_switch c;
 let _ = print_int (vec_get out 0); // 34
 let make_body = fn n ->
   let p = packet_of n in
-  fn (_me: Coro[unit]) -> fn (_u: unit) -> coro_exit (
+  fn _me -> fn (_u: unit) -> coro_exit (
     let _ = vec_push out (score p) in root) ();
 let body = region R { make_body 13 };
 let c2 = coro_new body;

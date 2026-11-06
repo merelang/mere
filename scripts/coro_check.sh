@@ -76,6 +76,8 @@ finished_keeps|icl|kept|0
 first_block|icl|4000|0
 region_chain_grow|icl|206509500|0
 region_loop_chain|ic|22700|0
+factory|icl|13 13 17 17;2|0
+factory_region|ic|13 13 17 17;2|0
 builtins_as_values|icl|42;7|0
 release_walk|ic|2250|0
 retire_moved|ic|300|0
@@ -197,6 +199,7 @@ let _ = coro_transfer c 1 root;
 let _ = coro_transfer c true root;
 0' 'expected `int`, got `bool`'
 refuse "Wasm names it" -w 'coro_switch (coro_root ())' 'is not available on Wasm'
+refuse "LLVM names a region-returned body" -ll "$(cat "$FX/factory_region.mere")" 'a region block cannot return a function on this backend'
 # v0.1.623: RISC-V has coroutines (the section below). As a VALUE a builtin was
 # refused there until v0.1.665; now it is a closure over the applied form, as
 # any builtin passed as a value is, and builtins_as_values runs it (exit, switch
