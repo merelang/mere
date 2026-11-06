@@ -68,7 +68,7 @@ echo "  ok    the window's line is named, and the output and the default total a
 if [ "$MODE" = --poison ]; then
   pfail=0
   # program | what it undoes | sed
-  for p in 'a line is not charged for what it allocates|s/if (r \&\& r->fwd) { __lang_dsite_charge(r, (n + 7) \& ~((size_t)7)); r = __lang_region_live(r); }/if (r \&\& r->fwd) { r = __lang_region_live(r); }/' \
+  for p in 'a line is not charged for what it allocates|s/__lang_dsite_charge(r0, [^;]*);/(void)0;/g' \
            'a line keeps its own memory|s/st->site = s->name; st->fwd = \&__lang_default_region;/st->site = s->name; st->fwd = NULL;/'; do
     what=${p%%|*}; expr=${p#*|}
     got=$(judge "$expr")
