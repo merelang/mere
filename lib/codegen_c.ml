@@ -11662,6 +11662,41 @@ let map_hash_helpers =
       "  return h;";
       "}" ]
 
+(* v0.1.709: the constructor a recursive variant continues through -- List's
+   Cons, whose payload's last field is the list again -- as (tag, constructor,
+   field), so map_set can see that a new value is a SUFFIX of the one it
+   replaces. Those cells are the map's already, and copying them again is what
+   made `map_set m k (tail of map_get m k)` (mere-ruby's Hash#shift) copy the
+   whole rest of the list each time. None for any other type. *)
+let recursive_tail_of (t : Ast.ty) : (int * string * int) option =
+  if not (is_recursive_variant (c_type_of t)) then None
+  else
+    match Ast.walk t with
+    | Ast.TyCon (name, args) ->
+      let variants =
+        if Hashtbl.mem polymorphic_variants name then
+          let (params, vs) = Hashtbl.find polymorphic_variants name in
+          subst_variants params args vs
+        else
+          Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+            if info.type_name = name && Ast.canonical_ctor cname = cname
+            then (cname, info.arg) :: acc else acc)
+            Typer.constructors []
+      in
+      let tag = ty_tag t in
+      let hits =
+        List.filter_map (fun (cname, arg_opt) ->
+          match arg_opt with
+          | Some ty ->
+            (match Ast.walk ty with
+             | Ast.TyTuple ts when ts <> [] && ty_tag (List.nth ts (List.length ts - 1)) = tag ->
+               Some ((try Hashtbl.find variant_tags cname with Not_found -> 0), cname, List.length ts - 1)
+             | _ -> None)
+          | None -> None) variants
+      in
+      (match hits with [h] -> Some h | _ -> None)
+    | _ -> None
+
 let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let k_tag = ty_tag k_ty in
   let v_tag = ty_tag v_ty in
@@ -11990,7 +12025,14 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  }";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
-      "  __lang_region_init(fresh, 4096);";
+      (* v0.1.709: the fresh arena's first block sized to what moves into it,
+         512 bytes to the 4 KB it always was. A compacted map of a few
+         entries -- mere-ruby's frame that a closure keeps -- held a 4 KB
+         block for a few hundred bytes, 5.6 KB a map with the rest; it grows
+         by doubling like any other when it needs to. *)
+      "  size_t __seed = 512;";
+      "  while (__seed < 4096 && __seed < (size_t)m->live * 64 + 256) __seed <<= 1;";
+      "  __lang_region_init(fresh, __seed);";
       "  __lang_region_dep_link(m->home, fresh);";
       "  __lang_region* old = m->region;";
       "  int owned = m->owns_region;";
@@ -12058,8 +12100,16 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
       "    if (i < 0) { if (reuse < 0) reuse = s; }";
-      Printf.sprintf "    else if (%s) { m->values[i] = __mcopy_%s(m->region, __mv); return 0; }"
-        (key_eq_expr "m->keys[i]" "__mk") v_tag;
+      (match recursive_tail_of v_ty with
+       | Some (tn, cname, last) ->
+         (* (a few cells along the old value is the whole question: a tail
+            dropped off the front is one step, and anything further is a new
+            list that is copied as before) *)
+         Printf.sprintf "    else if (%s) { %s __o = m->values[i]; for (int __k = 0; __k < 4; __k++) { if (__o == __mv) { m->values[i] = __mv; return 0; } if (%s__tag(__o) != %d) break; __o = %s__node(__o)->payload.%s.f%d; } m->values[i] = __mcopy_%s(m->region, __mv); return 0; }"
+           (key_eq_expr "m->keys[i]" "__mk") c_v c_v tn c_v cname last v_tag
+       | None ->
+         Printf.sprintf "    else if (%s) { m->values[i] = __mcopy_%s(m->region, __mv); return 0; }"
+           (key_eq_expr "m->keys[i]" "__mk") v_tag);
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       Printf.sprintf "  __mk = __mcopy_%s(m->region, __mk);" k_tag;

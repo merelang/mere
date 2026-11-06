@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.711 — 2026-11-07
+
+_A map keeps a value that is the tail of the one it replaces; a compacted
+map's first block is sized to it._
+
+`map_set` copies the value it stores into the map's arena. When the new value
+of a key is a few cells down the old one -- `map_set m k (tail of map_get m
+k)`, a queue taken off the front -- those cells are the map's already, and on
+the C backend they are now kept instead of copied again. Copying them made
+every step cost the rest of the list: mere-ruby's `Hash#shift` emptied 20,000
+entries in 7.4 s, and takes 0.1 s with this (40,000-cell lists in a Mere loop:
+10.9 s to 0.5 s). The check walks at most four cells of the old value, so a
+store that shares nothing costs what it did. The values the program sees are
+unchanged on every backend.
+
+`map_compact` started the fresh arena with a 4 KB block whatever moved into
+it. It is now sized to the live entries, 512 bytes to 4 KB, and grows by
+doubling as before. A compacted map of a few entries -- mere-ruby keeps one
+per closure it creates -- held 5.6 KB, and holds about 1 KB; 100,000 of them
+went from 562 MB to 101 MB.
+
+test/parity/map_set_suffix covers the interpreter, C, LLVM and Wasm: tails
+one, two and three cells down, the same value stored again, a new head over
+the old tail, and string keys.
+
 ## v0.1.710 — 2026-11-06
 
 _Returned closures retain their inferred argument types through aliases._
