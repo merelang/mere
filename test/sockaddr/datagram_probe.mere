@@ -1,0 +1,87 @@
+// Real loopback packets, including two destinations on one bound socket.
+// All ports come from the kernel. No public network or DNS service is used.
+extern fn socket: int -> int -> int -> int;
+extern fn sock_bind: int -> str -> int -> int;
+extern fn sock_local_addr: int -> str;
+extern fn sock_peer_addr: int -> str;
+extern fn sock_sendto: int -> int -> int -> int -> str -> int -> int;
+extern fn sock_recvfrom: int -> int -> int -> int -> str;
+extern fn udp_open: str -> int -> int;
+extern fn udp_send: int -> int -> int -> int;
+extern fn tcp_close: int -> int;
+extern fn tcp_set_timeout: int -> int -> int;
+extern fn io_set_nonblocking: int -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> int;
+extern fn mem_to_str: int -> int -> str;
+
+let check = fn (label: str) -> fn (ok: bool) ->
+  if ok then () else (let _ = print ("FAIL " ++ label) in exit 1);
+let rec nth = fn (xs: str list) -> fn (i: int) ->
+  match xs with Nil -> "" | Cons (v, rest) -> if i == 0 then v else nth rest (i - 1);
+let port = fn (s: str) -> int_of_str (nth (str_split s " ") 1);
+let packet = fn (n: int) -> fn (addr: str) -> str_of_int n ++ " " ++ addr;
+
+let run = fn (family: int) -> fn (host: str) ->
+  let a = socket family 2 0 in
+  let b = socket family 2 0 in
+  let c = socket family 2 0 in
+  let _ = check "open" (a >= 0 && b >= 0 && c >= 0) in
+  let _ = check "bind" (sock_bind a host 0 == 0 && sock_bind b host 0 == 0 && sock_bind c host 0 == 0) in
+  let _ = tcp_set_timeout a 1000 in
+  let _ = tcp_set_timeout b 1000 in
+  let _ = tcp_set_timeout c 1000 in
+  let aa = sock_local_addr a in
+  let ba = sock_local_addr b in
+  let ca = sock_local_addr c in
+  let p = mem_alloc 16 in
+  let q = mem_alloc 16 in
+  let _ = mem_set_u8 p 0 65 in
+  let _ = mem_set_u8 p 1 0 in
+  let _ = mem_set_u8 p 2 255 in
+  let data = mem_to_str p 3 in
+  let _ = check "send binary" (sock_sendto a p 3 0 host (port ba) == 3 && fd_last_errno () == 0) in
+  let _ = check "peek sender" (str_eq (sock_recvfrom b q 16 2) (packet 3 aa)) in
+  let _ = check "peek binary" (str_eq (mem_to_str q 3) data) in
+  let _ = check "receive after peek" (str_eq (sock_recvfrom b q 16 0) (packet 3 aa)) in
+  let _ = check "receive binary" (str_eq (mem_to_str q 3) data && fd_last_errno () == 0) in
+  let _ = check "second destination" (sock_sendto a p 0 0 host (port ca) == 0) in
+  let _ = check "empty packet has sender" (str_eq (sock_recvfrom c q 16 0) (packet 0 aa)) in
+  let _ = check "binding unchanged" (str_eq (sock_local_addr a) aa) in
+  let _ = check "no connected peer" (str_eq (sock_peer_addr a) "" && fd_last_errno () > 0) in
+  let _ = check "send before truncation" (sock_sendto a p 3 0 host (port ba) == 3) in
+  let _ = check "truncate packet" (str_eq (sock_recvfrom b q 1 0) (packet 1 aa)) in
+  let _ = check "truncated byte" (str_eq (mem_to_str q 1) "A") in
+  let _ = check "nonblocking" (io_set_nonblocking b == 0) in
+  let _ = check "packet remainder discarded" (str_eq (sock_recvfrom b q 16 0) "" && fd_last_errno () > 0) in
+  let _ = check "hostname refused without lookup" (sock_sendto a p 1 0 "localhost" (port ba) == 0 - 2 && fd_last_errno () == 0) in
+  let _ = check "bad port" (sock_sendto a p 1 0 host 65536 == 0 - 1 && fd_last_errno () > 0) in
+  let _ = check "negative buffer" (sock_sendto a (0 - 1) 1 0 host (port ba) == 0 - 1 && fd_last_errno () > 0) in
+  let _ = check "oversized buffer" (sock_sendto a p 16777216 0 host (port ba) == 0 - 1 && fd_last_errno () > 0) in
+  let _ = check "negative receive capacity" (str_eq (sock_recvfrom b q (0 - 1) 0) "" && fd_last_errno () > 0) in
+  let _ = check "receive beyond arena" (str_eq (sock_recvfrom b 16777216 1 0) "" && fd_last_errno () > 0) in
+  let d = udp_open host (port ca) in
+  let _ = check "connect" (d >= 0) in
+  let da = sock_local_addr d in
+  let peer = sock_peer_addr d in
+  let sent = sock_sendto d p 3 0 host (port ba) in
+  // Darwin refuses sendto on a connected datagram socket; Linux permits it.
+  let _ = (if str_eq (sys_os ()) "darwin" then
+      check "connected send refused" (sent == 0 - 1 && fd_last_errno () > 0)
+    else (let _ = check "connected send to alternate" (sent == 3) in
+      check "alternate source" (str_eq (sock_recvfrom b q 16 0) (packet 3 da)))) in
+  let _ = check "connected peer unchanged" (str_eq (sock_peer_addr d) peer && str_eq (sock_local_addr d) da) in
+  let _ = check "connected default destination" (udp_send d p 3 == 3) in
+  let _ = check "default source" (str_eq (sock_recvfrom c q 16 0) (packet 3 da)) in
+  let _ = tcp_close d in
+  let _ = tcp_close a in
+  let _ = check "closed send" (sock_sendto a p 1 0 host (port ba) == 0 - 1 && fd_last_errno () > 0) in
+  let _ = check "closed receive" (str_eq (sock_recvfrom a q 16 0) "" && fd_last_errno () > 0) in
+  let _ = tcp_close b in
+  let _ = tcp_close c in
+  ();
+
+let _ = run 2 "127.0.0.1";
+let _ = run (if str_eq (sys_os ()) "darwin" then 30 else 10) "::1";
+print "datagrams: IPv4 and IPv6 passed"

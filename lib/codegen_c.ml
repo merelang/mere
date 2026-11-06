@@ -7228,7 +7228,7 @@ let native_ffi_names =
        length; the option's bytes cross as hex (an int option is 01000000) *)
     "sock_getopt"; "sock_setopt";
     (* v0.1.682: send(2) with its flags (MSG_OOB), the bytes from the arena *)
-    "sock_send";
+    "sock_send"; "sock_sendto"; "sock_recvfrom";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
        setrlimit move the limits through a `struct rlimit *`; getpriority and
@@ -8148,6 +8148,55 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  struct sockaddr_storage ss; socklen_t sl = sizeof ss; memset(&ss, 0, sizeof ss);";
       "  if (getpeername((int)fd, (struct sockaddr*)&ss, &sl) != 0) return __sock_none(errno);";
       "  return __sock_text((struct sockaddr*)&ss, sl);";
+      "}";
+      "#include <limits.h>";
+      "/* Addressed datagrams keep sockaddr layout in the host runtime. Addresses";
+      "   are numeric; name/service resolution belongs to the caller. The descriptor";
+      "   is never replaced or connected, so its binding and peer remain intact. */";
+      "static long long sock_sendto(long long fd, long long p, long long len, long long flags, const char* host, long long port) {";
+      "  if (fd < 0 || fd > INT_MAX) { __fd_errno = EBADF; return -1; }";
+      "  if (p < 0 || p > __MEM_CAP || len < 0 || len > __MEM_CAP - p ||";
+      "      flags < INT_MIN || flags > INT_MAX || port < 0 || port > 65535) {";
+      "    __fd_errno = EINVAL; return -1;";
+      "  }";
+      "  struct sockaddr_storage ss; socklen_t sl = sizeof ss;";
+      "  memset(&ss, 0, sizeof ss);";
+      "  if (getsockname((int)fd, (struct sockaddr*)&ss, &sl) != 0) { __fd_errno = errno; return -1; }";
+      "  struct addrinfo hints, *res; char service[16];";
+      "  memset(&hints, 0, sizeof hints);";
+      "  hints.ai_family = ss.ss_family; hints.ai_socktype = SOCK_DGRAM;";
+      "  hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;";
+      "  snprintf(service, sizeof service, \"%lld\", port);";
+      "  if (!host || !host[0] || getaddrinfo(host, service, &hints, &res) != 0) {";
+      "    __fd_errno = 0; return -2;";
+      "  }";
+      "  ssize_t n = sendto((int)fd, __mem + p, (size_t)len, (int)flags, res->ai_addr, res->ai_addrlen);";
+      "  int err = errno;";
+      "  freeaddrinfo(res);";
+      "  __fd_errno = n < 0 ? err : 0;";
+      "  return n < 0 ? -1 : (long long)n;";
+      "}";
+      "/* Payload goes to the caller's arena. The result is \"count family port host\";";
+      "   an empty string means failure (fd_last_errno). Zero-byte packets still";
+      "   return an address. MSG_TRUNC may report more than cap: only min(count, cap)";
+      "   bytes in the arena are valid. No process-global last-sender slot is used. */";
+      "static char* sock_recvfrom(long long fd, long long p, long long cap, long long flags) {";
+      "  if (fd < 0 || fd > INT_MAX) return __sock_none(EBADF);";
+      "  if (p < 0 || p > __MEM_CAP || cap < 0 || cap > __MEM_CAP - p ||";
+      "      flags < INT_MIN || flags > INT_MAX) return __sock_none(EINVAL);";
+      "  struct sockaddr_storage ss; socklen_t sl = sizeof ss;";
+      "  memset(&ss, 0, sizeof ss);";
+      "  ssize_t n = recvfrom((int)fd, __mem + p, (size_t)cap, (int)flags, (struct sockaddr*)&ss, &sl);";
+      "  if (n < 0) return __sock_none(errno);";
+      "  char* address = __sock_text((struct sockaddr*)&ss, sl);";
+      "  if (!address[0]) return address;";
+      "  char out[1280];";
+      "  int len = snprintf(out, sizeof out, \"%lld %s\", (long long)n, address);";
+      "  if (len < 0 || (size_t)len >= sizeof out) return __sock_none(EOVERFLOW);";
+      "  char* result = __lang_str_alloc(__lang_current_region, (size_t)len);";
+      "  memcpy(result, out, (size_t)len + 1);";
+      "  __fd_errno = 0;";
+      "  return result;";
       "}";
       "/* tcp_accept: the connected client fd, or a coded failure -- the same";
       "   codes tcp_read has used since v0.1.226 (-1 would-block, -2 gone,";
