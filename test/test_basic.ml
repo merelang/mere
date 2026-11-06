@@ -7520,6 +7520,42 @@ let () =
     "\"00ff10\"";
   check "bytes: interp str bridge and slice"
     (Pipeline.process "str_of_bytes (bytes_slice (bytes_of_str \"hello world\") 6 5)") "\"world\"";
+  check "bytes_slice: empty slice at the end"
+    (Pipeline.process "bytes_len (bytes_slice (bytes_of_str \"abc\") 3 0)") "0";
+  check "bytes_slice: empty source and range"
+    (Pipeline.process "bytes_len (bytes_slice (bytes_of_str \"\") 0 0)") "0";
+  List.iter (fun (name, start, len) ->
+    check ("bytes_slice: " ^ name)
+      (Pipeline.process ("try_or (fn () -> bytes_len (bytes_slice (bytes_of_str \"abc\") ("
+        ^ start ^ ") (" ^ len ^ "))) (-1)")) "-1")
+    [ "negative start", "-1", "0";
+      "negative length", "0", "-1";
+      "past-end empty range", "4", "0";
+      "maximum start with zero length", "int_max", "0";
+      "maximum start plus one", "int_max", "1";
+      "near-maximum start plus two", "int_max - 1", "2";
+      "one plus maximum length", "1", "int_max";
+      "maximum start and length", "int_max", "int_max";
+      "minimum start", "int_min", "0";
+      "minimum length", "0", "int_min" ];
+  List.iter (fun index ->
+    let setup = "let v = vec_new () in let _ = vec_push v 1.0 in let _ = vec_push v 2.0 in " in
+    check ("f64x2_load: extreme index " ^ index)
+      (Pipeline.process (setup ^ "try_or (fn () -> let _ = f64x2_load v (" ^ index ^ ") in 0) 7")) "7";
+    check ("f64x2_store: extreme index preserves storage " ^ index)
+      (Pipeline.process (setup ^ "let result = try_or (fn () -> let _ = f64x2_store v (" ^ index
+        ^ ") (f64x2_make 9.0 9.0) in 0) 7 in result == 7 && vec_get v 0 == 1.0 && vec_get v 1 == 2.0")) "true")
+    ["int_max"; "int_max - 1"; "int_min"];
+  check "f64x2_store: short Vec is unchanged"
+    (Pipeline.process "let v = vec_new () in let _ = vec_push v 1.0 in let result = try_or (fn () -> let _ = f64x2_store v 0 (f64x2_make 9.0 9.0) in 0) 7 in result == 7 && vec_get v 0 == 1.0") "true";
+  List.iter (fun index ->
+    check ("u8x16_load: extreme index " ^ index)
+      (Pipeline.process ("let b = bytes_of_str \"0123456789abcdef\" in try_or (fn () -> let _ = u8x16_load b ("
+        ^ index ^ ") in 0) 7")) "7") ["int_max"; "int_max - 15"];
+  check "u8x16_load: short bytes are refused"
+    (Pipeline.process "try_or (fn () -> let _ = u8x16_load (bytes_of_str \"abc\") 0 in 0) 7") "7";
+  check "u8x16_load: final complete span is valid"
+    (Pipeline.process "u8x16_reduce_add (u8x16_load (bytes_of_str \"AAAAAAAAAAAAAAAAA\") 1)") "1040";
   assert_contains "bytes: C backend emits the length-prefixed mere_bytes runtime"
     (let prog = typed_prog
        "let b = bytes_of_hex \"00ff00\" in bytes_len b" in

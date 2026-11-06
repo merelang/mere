@@ -121,6 +121,7 @@ jobs:
   gate_shards:
     name: Gate group (${{ matrix.group }})
     needs: gate_plan
+    timeout-minutes: 90
     # Match the validated oracle environment. Ubuntu 26.04 changes QEMU
     # packaging and the default C compiler's handling of generated C.
     runs-on: ubuntu-24.04
@@ -140,8 +141,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Set up OCaml
+        timeout-minutes: 15
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: "5.4"
@@ -154,6 +157,7 @@ jobs:
       # answers as failures. An unpinned oracle makes the result depend on the
       # machine, which is the thing a differential gate exists to avoid.
       - name: Set up Node (the differential oracle)
+        timeout-minutes: 5
         uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -164,14 +168,17 @@ jobs:
       # only asks where a breakpoint resolves and never runs the process, so
       # none of this touches ptrace.
       - name: Install harness tools
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang wabt lldb
+          set -e
+          apt_ci() {
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
+          }
+          apt_ci update
           # SDL2 for the window capability. window_check.sh skips without it, and
           # a skipped gate is a gate that is not running — so install it here.
-          sudo apt-get install -y libsdl2-dev
           # OpenSSL headers for downstream_cc_check (mere-blog and mbrowse include them)
-          sudo apt-get install -y libssl-dev
+          apt_ci install -y clang wabt lldb libsdl2-dev libssl-dev
 
       # socket_parity builds a Wasm component and compares its socket behaviour
       # against the C build, so it needs the component toolchain: wasm-tools,
@@ -179,6 +186,10 @@ jobs:
       # the versions development runs against, for the reason the node pin
       # exists — a tool that decides a gate's answer is a versioned dependency.
       - name: Install the Wasm component toolchain
+        timeout-minutes: 10
+        env:
+          NPM_CONFIG_FETCH_RETRIES: "2"
+          NPM_CONFIG_FETCH_TIMEOUT: "120000"
         run: |
           set -e
           WASM_TOOLS=1.255.0
@@ -193,13 +204,13 @@ jobs:
           # this image against the same modules built on macOS.
           BINARYEN=132
           mkdir -p "$HOME/.local/bin"
-          curl -sSfL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS}/wasm-tools-${WASM_TOOLS}-x86_64-linux.tar.gz" \
+          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS}/wasm-tools-${WASM_TOOLS}-x86_64-linux.tar.gz" \
             | tar -xz -C /tmp
           install "/tmp/wasm-tools-${WASM_TOOLS}-x86_64-linux/wasm-tools" "$HOME/.local/bin/"
-          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME}/wasmtime-v${WASMTIME}-x86_64-linux.tar.xz" \
+          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME}/wasmtime-v${WASMTIME}-x86_64-linux.tar.xz" \
             | tar -xJ -C /tmp
           install "/tmp/wasmtime-v${WASMTIME}-x86_64-linux/wasmtime" "$HOME/.local/bin/"
-          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
+          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
             | tar -xz -C /tmp
           install "/tmp/binaryen-version_${BINARYEN}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -216,42 +227,42 @@ jobs:
       # pin is so that if one ever does, the diff names a version change instead
       # of looking like a regression in contrib/proto.
       - name: Install protoc (oracle for proto_parity)
+        timeout-minutes: 5
         run: |
           set -e
           PROTOC=27.3
           mkdir -p "$HOME/.local/bin"
-          curl -sSfL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC}/protoc-${PROTOC}-linux-x86_64.zip" \
+          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC}/protoc-${PROTOC}-linux-x86_64.zip" \
             -o /tmp/protoc.zip
           unzip -q -o /tmp/protoc.zip -d /tmp/protoc
           install /tmp/protoc/bin/protoc "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # Best effort: qemu_virt.sh is the differential check against an emulator
-      # nobody here wrote, and it skips cleanly when the binary is absent. It is
-      # installed separately and allowed to fail so that a package rename
-      # degrades this gate to a skip instead of turning the build red.
+      # These oracles are required by RISC-V gates. Other groups do not use
+      # them and must not wait for their packages. Their preflight still fails
+      # the RISC-V group if either oracle is missing.
       - name: Install qemu-system-riscv32 (optional gate)
-        continue-on-error: true
-        run: sudo apt-get install -y qemu-system-misc
+        if: ${{ matrix.group == 'riscv' }}
+        timeout-minutes: 5
+        run: sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends qemu-system-misc
 
-      # Best effort, same argument: rvd_oracle_check.sh holds `mere -rvd` to a
-      # disassembler nobody here wrote, and skips cleanly when it is absent.
-      # The gate exists because the disassembler had none, and fell so far
-      # behind the backend it explains that 41% of a 64-bit listing was
-      # question marks.
+      # rvd_oracle_check.sh uses the distribution's independent disassembler.
+      # Its absence must fail the group before the oracle could silently skip.
       - name: Install binutils-riscv64 (optional gate — oracle for mere -rvd)
-        continue-on-error: true
-        run: sudo apt-get install -y binutils-riscv64-linux-gnu
+        if: ${{ matrix.group == 'riscv' }}
+        timeout-minutes: 5
+        run: sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends binutils-riscv64-linux-gnu
 
       # grpcurl is one of the two clients grpc_parity drives. Pinned, like every
       # other oracle here — and it is an ORACLE in the useful sense: it was
       # written by people who never saw this implementation.
       - name: Install grpcurl (client for grpc_parity)
+        timeout-minutes: 5
         run: |
           set -e
           GRPCURL=1.8.8
           mkdir -p "$HOME/.local/bin"
-          curl -sSfL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL}/grpcurl_${GRPCURL}_linux_x86_64.tar.gz" \
+          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL}/grpcurl_${GRPCURL}_linux_x86_64.tar.gz" \
             | tar -xz -C /tmp grpcurl
           install /tmp/grpcurl "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -260,7 +271,8 @@ jobs:
       # implementation and the frame layer of h2. Pinned for the same reason as
       # node, protoc and graphql-js: the gate's answer comes from it.
       - name: Install hyperframe / hpack (oracles for http2_parity, hpack_parity)
-        run: python3 -m pip install --break-system-packages hyperframe==6.1.0 h2==4.4.1 hpack==4.2.0
+        timeout-minutes: 5
+        run: python3 -m pip install --timeout 30 --retries 2 --break-system-packages hyperframe==6.1.0 h2==4.4.1 hpack==4.2.0
 
       # PostgreSQL as BINARIES, not as a service, the way mere-blog's CI does it:
       # live_soundness_check.sh runs its own throwaway cluster on a port it picks,
@@ -273,12 +285,15 @@ jobs:
       # were on the PATH, reported them absent, and was red from the day it
       # became a required step (v0.1.531) while the gates that use them passed.
       - name: PostgreSQL (oracle for live_soundness, migration, cascade_catalog)
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql postgresql-client
+          set -e
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y postgresql postgresql-client
           echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
 
       - name: Install dependencies
+        timeout-minutes: 10
         run: opam install . --deps-only --with-test
 
       - name: Build
@@ -287,6 +302,7 @@ jobs:
       # Contrib's site library imports declared packages. Prepare them on each
       # runner rather than relying on the site-build gate's earlier side effect.
       - name: Install package dependencies
+        timeout-minutes: 5
         run: opam exec -- _build/default/bin/mere.exe install
 
       # Asserted rather than assumed: a missing tool would otherwise turn into
@@ -363,10 +379,12 @@ jobs:
       # dune absent -- correctly, as it turned out: first_run_check ran without
       # opam and failed on exactly that (v0.1.535).
       - name: tool_preflight (a gate that did not run is not a gate that passed)
+        env:
+          MERE_CI_GROUP: ${{ matrix.group }}
         run: opam exec -- sh scripts/tool_preflight_check.sh --required
 
       - name: tool_preflight poison
-        if: ${{ !cancelled() && matrix.group == 'compiler' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: sh scripts/tool_preflight_check.sh --poison
 
       # The build matrix runs this too, but without wat2wasm and node it skips

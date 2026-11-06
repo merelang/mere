@@ -17,6 +17,18 @@ module CIGates
   CACHE = "Restore the downstream compile cache"
   PACKAGES = "Install package dependencies"
   CHECKOUT_GROUPS = %w[coroutines downstream riscv riscv-ownership].freeze
+  RISCV_TOOLS = ["Install qemu-system-riscv32 (optional gate)",
+                 "Install binutils-riscv64 (optional gate — oracle for mere -rvd)"].freeze
+
+  def self.group_commands(workflow, group)
+    assigned = check(workflow)
+    require!(assigned.key?(group), "unknown gate group: #{group}")
+    workflow.fetch("jobs").fetch("gate_shards").fetch("steps").map do |step|
+      name = step["name"]
+      next unless assigned.fetch(group).include?(name) || (group == "compiler" && name == FULL_TESTS)
+      step["run"]
+    end.compact.join("\n")
+  end
 
   def self.require!(condition, message)
     raise Invalid, message unless condition
@@ -77,7 +89,24 @@ module CIGates
              "declared packages must be installed after building and before preflights")
     require!(steps[packages]["run"] == "opam exec -- _build/default/bin/mere.exe install",
              "package preparation must use the compiler being tested")
-    require!(steps[0..start].all? { |s| !s["if"] }, "setup and required preflights must run in every group")
+    steps[0..start].each do |step|
+      if RISCV_TOOLS.include?(step["name"])
+        require!(step["if"] == "${{ matrix.group == 'riscv' }}", "RISC-V tools belong only to the RISC-V group")
+        require!(!step["continue-on-error"], "required RISC-V oracle installation must fail visibly")
+        require!(step["timeout-minutes"].is_a?(Integer) && (1..5).cover?(step["timeout-minutes"]),
+                 "RISC-V package installation needs a bounded timeout")
+      else
+        require!(!step["if"], "setup and required preflights must run in every group")
+      end
+      if step["name"].to_s.start_with?("Install ", "Set up ") || step["name"].to_s.start_with?("PostgreSQL")
+        require!(step["timeout-minutes"].is_a?(Integer) && (1..15).cover?(step["timeout-minutes"]),
+                 "#{step['name']}: network setup needs a bounded timeout")
+      end
+    end
+    require!(RISCV_TOOLS.all? { |name| steps[0..start].any? { |step| step["name"] == name } },
+             "both independent RISC-V oracles must be installed")
+    require!(steps[start]["env"] == {"MERE_CI_GROUP" => "${{ matrix.group }}"},
+             "required tool preflight must inspect the active group's gates")
     checks = steps[(start + 1)..]
     require!(checks.map { |s| s["name"] }.uniq.length == checks.length, "check names must be unique")
     require!(checks.count { |s| s["name"] == FULL_TESTS } == 1, "the full toolchain unit suite must run once")
@@ -94,6 +123,10 @@ module CIGates
         selected = route(step, groups)
       end
       case name
+      when "tool_preflight poison"
+        require!(selected == ["riscv"] && !step["continue-on-error"],
+                 "global tool preflight controls need the complete RISC-V toolchain")
+        assigned.fetch("riscv") << name
       when CHECKOUT
         require!(selected.sort == CHECKOUT_GROUPS, "downstream and every RISC-V oracle group need checkouts")
         require!(!step["continue-on-error"], "missing required oracle checkouts must fail the group")
@@ -156,6 +189,12 @@ module CIGates
       "missing required preflight" => ->(c) { c[:steps].reject! { |s| s["name"] == PREFLIGHT } },
       "missing package preparation" => ->(c) { c[:steps].reject! { |s| s["name"] == PACKAGES } },
       "skipped setup" => ->(c) { c[:steps].find { |s| s["name"] == "Build" }["if"] = "false" },
+      "unscoped RISC-V install" => ->(c) { c[:steps].find { |s| s["name"] == RISCV_TOOLS.first }.delete("if") },
+      "missing RISC-V install" => ->(c) { c[:steps].reject! { |s| s["name"] == RISCV_TOOLS.first } },
+      "optional RISC-V install" => ->(c) { c[:steps].find { |s| s["name"] == RISCV_TOOLS.first }["continue-on-error"] = true },
+      "unbounded package install" => ->(c) { c[:steps].find { |s| s["name"] == RISCV_TOOLS.first }.delete("timeout-minutes") },
+      "unbounded setup action" => ->(c) { c[:steps].find { |s| s["name"] == "Set up OCaml" }.delete("timeout-minutes") },
+      "global preflight in isolated group" => ->(c) { c[:steps].find { |s| s["name"] == PREFLIGHT }.delete("env") },
       "missing group dependency" => ->(c) { c[:final]["needs"] = ["gate_plan"] },
       "skipped final check" => ->(c) { c[:final].delete("if") },
       "ignored final failure" => ->(c) { c[:final]["continue-on-error"] = true },
@@ -219,10 +258,15 @@ module CIGates
 end
 
 if $PROGRAM_NAME == __FILE__
-  abort "usage: ruby scripts/ci_gate_check.rb [--self-test]" unless (ARGV - ["--self-test"]).empty?
+  group = ARGV[0] == "--group" && ARGV.length == 2 ? ARGV[1] : nil
+  abort "usage: ruby scripts/ci_gate_check.rb [--self-test | --group NAME]" unless group || (ARGV - ["--self-test"]).empty?
   begin
     path = File.expand_path("../.github/workflows/ci.yml", __dir__)
     workflow = YAML.safe_load(File.read(path), aliases: false)
+    if group
+      puts CIGates.group_commands(workflow, group)
+      exit 0
+    end
     assigned = CIGates.check(workflow)
     puts "ci_gates: #{assigned.values.sum(&:length)} checks assigned exactly once across #{assigned.length} groups"
     assigned.each { |group, checks| puts "  #{group}: #{checks.length}" }

@@ -11297,10 +11297,10 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "  %lp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 1";
       "  %len32 = load i32, ptr %lp";
       "  %len = sext i32 %len32 to i64";
-      "  %lt = icmp slt i64 %i, 0";
-      "  %end = add i64 %i, 2";
-      "  %gt = icmp sgt i64 %end, %len";
-      "  %oob = or i1 %lt, %gt";
+      "  %short = icmp ult i64 %len, 2";
+      "  %limit = sub i64 %len, 2";
+      "  %past = icmp ugt i64 %i, %limit";
+      "  %oob = or i1 %short, %past";
       "  br i1 %oob, label %fail, label %ok";
       "fail:";
       "  call void @__lang_fail_idx(ptr @.idxfmt_f64x2load, i64 %i, i64 %len)";
@@ -11326,10 +11326,10 @@ let emit_vec_runtime_for_llvm (elem_ty : Ast.ty) : string =
       "  %lp = getelementptr %mere_vec_float, ptr %v, i32 0, i32 1";
       "  %len32 = load i32, ptr %lp";
       "  %len = sext i32 %len32 to i64";
-      "  %lt = icmp slt i64 %i, 0";
-      "  %end = add i64 %i, 2";
-      "  %gt = icmp sgt i64 %end, %len";
-      "  %oob = or i1 %lt, %gt";
+      "  %short = icmp ult i64 %len, 2";
+      "  %limit = sub i64 %len, 2";
+      "  %past = icmp ugt i64 %i, %limit";
+      "  %oob = or i1 %short, %past";
       "  br i1 %oob, label %fail, label %ok";
       "fail:";
       "  call void @__lang_fail_idx(ptr @.idxfmt_f64x2store, i64 %i, i64 %len)";
@@ -13672,10 +13672,10 @@ let bytes_runtime_llvm =
       "define <16 x i8> @__lang_u8x16_load(ptr %b, i64 %i) {";
       "entry:";
       "  %len = load i64, ptr %b";
-      "  %lt = icmp slt i64 %i, 0";
-      "  %end = add i64 %i, 16";
-      "  %gt = icmp sgt i64 %end, %len";
-      "  %oob = or i1 %lt, %gt";
+      "  %short = icmp ult i64 %len, 16";
+      "  %limit = sub i64 %len, 16";
+      "  %past = icmp ugt i64 %i, %limit";
+      "  %oob = or i1 %short, %past";
       "  br i1 %oob, label %fail, label %ok";
       "fail:";
       "  call void @__lang_fail_idx(ptr @.msg_u8x16_load, i64 %i, i64 %len)";
@@ -13855,12 +13855,10 @@ let bytes_runtime_llvm =
       (* v0.1.278: there was no range check here at all -- it copied from
          wherever the arithmetic pointed *)
       "  %blen = load i64, ptr %b";
-      "  %s_lt0 = icmp slt i64 %start, 0";
-      "  %l_lt0 = icmp slt i64 %len, 0";
-      "  %sum = add i64 %start, %len";
-      "  %over = icmp sgt i64 %sum, %blen";
-      "  %bad1 = or i1 %s_lt0, %l_lt0";
-      "  %bad = or i1 %bad1, %over";
+      "  %past = icmp ugt i64 %start, %blen";
+      "  %remaining = sub i64 %blen, %start";
+      "  %over = icmp ugt i64 %len, %remaining";
+      "  %bad = or i1 %past, %over";
       "  br i1 %bad, label %slicefail, label %sliceok";
       "slicefail:";
       "  call void @__lang_fail_impl(ptr @.bslice_msg)";

@@ -2347,13 +2347,15 @@ let rvf2_extract = fn (x: rvf2) -> fn (i: int) ->
   if i == 0 then x.f2a else if i == 1 then x.f2b
   else fail ("f64x2_extract: lane " ++ str_of_int i ++ " out of range (lanes = 2)");
 let rvf2_load = fn (v: float Vec) -> fn (i: int) ->
-  if i < 0 || i + 2 > vec_len v
-  then fail ("f64x2_load: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
+  let n = vec_len v in
+  if i < 0 || n < 2 || i > n - 2
+  then fail ("f64x2_load: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int n ++ ")")
   else rvf2 { f2a = vec_get v i, f2b = vec_get v (i + 1) };
 let rvf2_store = fn (v: float Vec) -> fn (i: int) -> fn (x: rvf2) ->
   let _ = __rv_vec_write v "f64x2_store" in
-  if i < 0 || i + 2 > vec_len v
-  then fail ("f64x2_store: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int (vec_len v) ++ ")")
+  let n = vec_len v in
+  if i < 0 || n < 2 || i > n - 2
+  then fail ("f64x2_store: lanes [" ++ str_of_int i ++ ", +2) out of bounds (len = " ++ str_of_int n ++ ")")
   else let _ = vec_set v i x.f2a in vec_set v (i + 1) x.f2b;
 let rvf2_show = fn (x: rvf2) -> "f64x2(" ++ str_of_float x.f2a ++ ", " ++ str_of_float x.f2b ++ ")";
 let rvf2_json = fn (x: rvf2) -> "[" ++ str_of_float x.f2a ++ ", " ++ str_of_float x.f2b ++ "]";

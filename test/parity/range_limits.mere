@@ -1,0 +1,63 @@
+// Select the sign bit for RV32, the 63-bit interpreter, or a 64-bit backend.
+// No executed shift exceeds that backend's integer width.
+let low = let s = bit_shl 1 31 in if s < 0 then s else
+  let s = bit_shl 1 62 in if s < 0 then s else bit_shl 1 63;
+let high = bit_not low;
+let b = bytes_of_str ("A" ++ chr 0 ++ "B");
+let slice = fn start -> fn count ->
+  try_or (fn () -> hex_of_bytes (bytes_slice b start count)) "caught";
+let _ = print (slice 0 3);                       // 410042
+let _ = print (slice 3 0);                       // empty
+let _ = print_int (bytes_len (bytes_slice (bytes_of_str "") 0 0)); // 0
+let _ = print (slice (-1) 0);                    // caught
+let _ = print (slice 0 (-1));                    // caught
+let _ = print (slice 4 0);                       // caught
+let _ = print (slice high 0);                    // caught
+let _ = print (slice high 1);                    // caught
+let _ = print (slice (high - 1) 2);              // caught
+let _ = print (slice 1 high);                    // caught
+let _ = print (slice high high);                 // caught
+let _ = print (slice low 0);                     // caught
+let _ = print (slice 0 low);                     // caught
+let _ = print (try_or (fn () -> substring "abc" 0 high) "caught"); // caught
+let _ = print (try_or (fn () -> substring "abc" high high) "caught"); // caught
+let _ = print (try_or (fn () -> substring "abc" low 1) "caught"); // caught
+let _ = print_int (try_or (fn () -> bytes_get b high) (-1)); // -1
+let _ = print_int (try_or (fn () -> bytes_get b low) (-1)); // -1
+let bb = bytebuf_new 1;
+let _ = bytebuf_set bb 0 65;
+let _ = print_int (try_or (fn () -> bytebuf_get bb high) (-1)); // -1
+let _ = print_int (try_or (fn () -> bytebuf_get bb low) (-1)); // -1
+let _ = print (try_or (fn () -> let _ = bytebuf_set bb high 9 in "allowed") "caught"); // caught
+let _ = print (try_or (fn () -> let _ = bytebuf_set bb low 9 in "allowed") "caught"); // caught
+let _ = print_int (bytebuf_get bb 0);             // 65
+let v = vec_new ();
+let _ = vec_push v 7;
+let _ = print_int (try_or (fn () -> vec_get v high) (-1)); // -1
+let _ = print_int (try_or (fn () -> vec_get v low) (-1)); // -1
+let _ = print (try_or (fn () -> let _ = vec_set v high 9 in "allowed") "caught"); // caught
+let _ = print (try_or (fn () -> let _ = vec_set v low 9 in "allowed") "caught"); // caught
+let _ = print_int (vec_get v 0);                  // 7
+let _ = print_int (str_index_from "aba" "a" high); // -1
+let _ = print_int (str_index_from "aba" "a" low); // 0
+let fv = vec_new ();
+let _ = vec_push fv 1.0;
+let _ = vec_push fv 2.0;
+let fload = fn i -> try_or (fn () -> let _ = f64x2_load fv i in "allowed") "caught";
+let fstore = fn i -> try_or (fn () -> let _ = f64x2_store fv i (f64x2_make 9.0 9.0) in "allowed") "caught";
+let _ = print (fload high);                      // caught
+let _ = print (fload (high - 1));                // caught
+let _ = print (fload low);                       // caught
+let _ = print (fstore high);                     // caught
+let _ = print (fstore (high - 1));               // caught
+let _ = print (fstore low);                      // caught
+let _ = print (fstore 1);                        // caught
+let _ = print (if f64x2_reduce_add (f64x2_load fv 0) == 3.0 then "ok" else "bad"); // ok
+let _ = print (if vec_get fv 0 == 1.0 && vec_get fv 1 == 2.0 then "kept" else "bad"); // kept
+let sixteen = bytes_of_str "0123456789abcdef";
+let ul = fn i -> try_or (fn () -> let _ = u8x16_load sixteen i in "allowed") "caught";
+let _ = print (ul high);                         // caught
+let _ = print (ul (high - 15));                  // caught
+let _ = print (ul low);                          // caught
+let _ = print (ul 1);                            // caught
+print_int (u8x16_extract (u8x16_load sixteen 0) 0) // 48

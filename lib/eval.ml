@@ -1955,9 +1955,10 @@ let builtin_f64x2_reduce_add =
   V_builtin ("f64x2_reduce_add", fun v ->
     let (a, b) = f64x2_of "f64x2_reduce_add" v in V_float (a +. b))
 let f64x2_range who (arr : vecbuf) i =
-  if i < 0 || i + 2 > arr.vc_len then
+  if i < 0 || arr.vc_len < 2 || i > arr.vc_len - 2 then
     raise (Eval_error (Loc.dummy,
-      Printf.sprintf "%s: lanes [%d, %d) out of bounds (len = %d)" who i (i + 2) arr.vc_len))
+      Printf.sprintf "%s: lanes [%d, %Ld) out of bounds (len = %d)" who i
+        (Int64.add (Int64.of_int i) 2L) arr.vc_len))
 let builtin_f64x2_load =
   V_builtin ("f64x2_load", fun v ->
     match v with
@@ -2050,9 +2051,10 @@ let builtin_u8x16_first_true =
                    else if Bytes.get b i <> '\000' then i else go (i + 1) in
     V_int (go 0))
 let u8x16_range who len i =
-  if i < 0 || i + 16 > len then
+  if i < 0 || len < 16 || i > len - 16 then
     raise (Eval_error (Loc.dummy,
-      Printf.sprintf "%s: bytes [%d, %d) out of bounds (len = %d)" who i (i + 16) len))
+      Printf.sprintf "%s: bytes [%d, %Ld) out of bounds (len = %d)" who i
+        (Int64.add (Int64.of_int i) 16L) len))
 let builtin_u8x16_from_bytes =
   V_builtin ("u8x16_from_bytes", fun v ->
     match v with
@@ -4086,7 +4088,8 @@ let builtin_bytes_slice =
       V_builtin ("bytes_slice_p2", fun len ->
         match start, len with
         | V_int start, V_int len ->
-          if start < 0 || len < 0 || start + len > String.length s then
+          let size = String.length s in
+          if start < 0 || len < 0 || start > size || len > size - start then
             raise (Eval_error (Loc.dummy, "bytes_slice: range out of bounds"));
           bytes_v (String.sub s start len)
         | _ -> failwith "bytes_slice: expected int start/len")))

@@ -12280,7 +12280,7 @@ let bytes_runtime ~arena =
       "  return b;";
       "}";
       "static mere_bytes* __lang_bytes_slice(mere_bytes* b, long long start, long long len) {";
-      "  if (start < 0 || len < 0 || start + len > b->len) {";
+      "  if (start < 0 || len < 0 || start > b->len || len > b->len - start) {";
       (* v0.1.278: abort() is not a failure the language defines -- try_or
           cannot catch it and the shell reports 134. The interpreter raises a
           catchable failure here, as it does for every other bad index. *)
@@ -12304,7 +12304,7 @@ let bytes_runtime ~arena =
       (* Q-109 (2c): sixteen bytes as one u8x16 *)
       "static mere_u8x16 __lang_u8x16_load_unchecked(mere_bytes* b, long long i) { mere_u8x16 r; memcpy(&r, b->data + i, 16); return r; }";
       "static mere_u8x16 __lang_u8x16_load(mere_bytes* b, long long i) {";
-      "  if (i < 0 || i + 16 > b->len) __lang_fail_idx(\"u8x16_load: bytes [%lld, +16) out of bounds (len = %lld)\", i, b->len);";
+      "  if (i < 0 || b->len < 16 || i > b->len - 16) __lang_fail_idx(\"u8x16_load: bytes [%lld, +16) out of bounds (len = %lld)\", i, b->len);";
       "  return __lang_u8x16_load_unchecked(b, i);";
       "}";
       "static mere_u8x16 __lang_u8x16_from_bytes(mere_bytes* b) {";
@@ -14160,7 +14160,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
          store of doubles cannot touch a `double*` field. *)
       "static mere_f64x2 mere_vec_float_f64x2_load(mere_vec_float* v, long long i) {";
       "  __LANG_READ(v);";
-      "  if (i < 0 || i + 2 > (long long)v->len) __lang_fail_idx(\"f64x2_load: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
+      "  if (i < 0 || v->len < 2 || i > (long long)v->len - 2) __lang_fail_idx(\"f64x2_load: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
       "  const double* p = v->data + i; mere_f64x2 r = { p[0], p[1] }; return r;";
       "}";
       "static mere_f64x2 mere_vec_float_f64x2_load_unchecked(mere_vec_float* v, long long i) {";
@@ -14168,7 +14168,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "}";
       "static int mere_vec_float_f64x2_store(mere_vec_float* v, long long i, mere_f64x2 x) {";
       "  __LANG_OWNED(v, \"Vec\", \"f64x2_store\");";
-      "  if (i < 0 || i + 2 > (long long)v->len) __lang_fail_idx(\"f64x2_store: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
+      "  if (i < 0 || v->len < 2 || i > (long long)v->len - 2) __lang_fail_idx(\"f64x2_store: lanes [%lld, +2) out of bounds (len = %lld)\", i, (long long)v->len);";
       "  double* p = v->data + i; p[0] = x[0]; p[1] = x[1]; return 0;";
       "}";
       "static int mere_vec_float_f64x2_store_unchecked(mere_vec_float* v, long long i, mere_f64x2 x) {";

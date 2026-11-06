@@ -1780,30 +1780,58 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
            let guard (iarg : expr) =
              let conj x y = mk (Logic (And, x, y)) in
              let len_of a = mk (App (var (if a.acc_bytes then "bytes_len" else "vec_len"), var a.acc_container)) in
-             (* an access of width w at e: [e, e + w) must lie in [0, len).
-                the plain index: every visited i is <= N-1, so N - 1 + w <= len
-                (i0 >= 0 is checked once, below) *)
-             let plus_w e w = if w = 1 then e else mk (Bin (Add, e, mk (Int_lit (w - 1)))) in
+             (* An access of width w at e requires len >= w and e <= len - w.
+                Never add w to a user-controlled bound or endpoint: that sum
+                can wrap and incorrectly admit the unchecked copy. The base
+                guard below ensures the plain index and bound are nonnegative. *)
              (* v0.1.579: with a stride above one that lands on the bound exactly
                 (the `landing` conjunct below), the last index visited is N - stride,
                 not N - 1, so the last access ends at N - stride + w. Asking for
                 N - 1 + w refused every stride-2 loop over an exactly-sized Vec:
                 axpy_simd never took its fast copy. *)
              let simple a =
-               if stride > 1 && eq_exit then
-                 mk (Cmp (Le, mk (Bin (Add, rv_clone bound, mk (Int_lit (a.acc_width - stride)))), len_of a))
-               else mk (Cmp (Le, plus_w (rv_clone bound) a.acc_width, len_of a)) in
+               let last = mk (Bin (Sub, rv_clone bound,
+                   mk (Int_lit (if stride > 1 && eq_exit then stride else 1)))) in
+               conj (mk (Cmp (Ge, len_of a, mk (Int_lit a.acc_width))))
+                 (mk (Cmp (Le, last, mk (Bin (Sub, len_of a, mk (Int_lit a.acc_width)))))) in
              (* a monotonic index: both endpoints, each with its width *)
              let endpoint a at =
                let v = rv_subst_index ~idx ~by:at a.acc_index in
-               let v_end = mk (Bin (Add, rv_subst_index ~idx ~by:at a.acc_index, mk (Int_lit a.acc_width))) in
-               conj (mk (Cmp (Ge, v, mk (Int_lit 0)))) (mk (Cmp (Le, v_end, len_of a)))
+               conj (mk (Cmp (Ge, v, mk (Int_lit 0))))
+                 (conj (mk (Cmp (Ge, len_of a, mk (Int_lit a.acc_width))))
+                   (mk (Cmp (Le, rv_subst_index ~idx ~by:at a.acc_index,
+                     mk (Bin (Sub, len_of a, mk (Int_lit a.acc_width)))))))
              in
              let last = mk (Bin (Sub, rv_clone bound, mk (Int_lit 1))) in
+             (* A derived index is affine over mathematical integers, but a
+                multiplication can wrap between two apparently valid endpoints.
+                Prove every intermediate lies in [0, len] before evaluating its
+                parent. This conservative proof keeps ordinary matrix indices
+                fast and sends negative intermediates to the checked loop. *)
+             let rec bounded a (e : expr) =
+               let within () =
+                 conj (mk (Cmp (Ge, rv_clone e, mk (Int_lit 0))))
+                   (mk (Cmp (Le, rv_clone e, len_of a))) in
+               match e.node with
+               | Var _ | Int_lit _
+               | App ({ node = Var ("vec_len" | "bytes_len"); _ }, { node = Var _; _ }) -> within ()
+               | Bin ((Add | Sub | Mul | Div | Mod as op), x, y) ->
+                 let safe = match op with
+                   | Add -> mk (Cmp (Le, rv_clone x, mk (Bin (Sub, len_of a, rv_clone y))))
+                   | Sub -> mk (Cmp (Ge, rv_clone x, rv_clone y))
+                   | Mul -> mk (Logic (Or, mk (Cmp (Eq, rv_clone y, mk (Int_lit 0))),
+                       mk (Cmp (Le, rv_clone x, mk (Bin (Div, len_of a, rv_clone y))))))
+                   | Div | Mod -> mk (Cmp (Gt, rv_clone y, mk (Int_lit 0)))
+                   | _ -> assert false in
+                 conj (bounded a x) (conj (bounded a y) safe)
+               | _ -> mk (Bool_lit false)
+             in
+             let safe_endpoint a at =
+               conj (bounded a (rv_subst_index ~idx ~by:at a.acc_index)) (endpoint a at) in
              let per_access a =
                match a.acc_index.node with
                | Var v when v = idx -> simple a
-               | _ -> conj (endpoint a iarg) (endpoint a last)
+               | _ -> conj (safe_endpoint a iarg) (safe_endpoint a last)
              in
              (* a stride above one with an equality exit: the loop stops only if it
                 lands on the bound exactly; otherwise the ORIGINAL runs past it and
@@ -1826,9 +1854,10 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
                 __LANG_SHARED), and need none: every Vec the fast copy reads has its
                 length read by the guard above (`len_of`), through the checked
                 vec_len, which marks it. scripts/owner_check.sh poisons that. *)
-             List.fold_left conj
-               (conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0)))) (mk (Cmp (Le, rv_clone iarg, rv_clone bound))))
-               (landing @ List.map per_access accs @ owned)
+             conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0))))
+               (conj (bounded (List.hd accs) bound) (List.fold_left conj
+                 (mk (Cmp (Le, rv_clone iarg, rv_clone bound)))
+                 (landing @ List.map per_access accs @ owned)))
            in
            if !range_version_log then prerr_endline ("range-version: " ^ name);
            range_versioned := name :: !range_versioned;
