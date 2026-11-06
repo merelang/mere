@@ -4,7 +4,8 @@
 // that shares the old one's tail behind a new head, and a list written
 // after the old one was replaced. The values stay what they were written as
 // on every backend; on C the tail is kept where it is instead of being
-// copied (v0.1.709).
+// copied (v0.1.711). The list is short: a backend that copies every store
+// (RV32I in 32 MB) pays the square of its length.
 //
 // Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
 
@@ -14,29 +15,29 @@ let rec sum = fn (xs: int list) -> fn (a: int) -> match xs with Nil -> a | Cons 
 let rec len = fn (xs: int list) -> fn (a: int) -> match xs with Nil -> a | Cons (_, t) -> len t (a + 1);
 let show = fn (u: unit) -> print (str_of_int (len (map_get m 1) 0) ++ " " ++ str_of_int (sum (map_get m 1) 0));
 
-let _ = map_set m 1 (mk 2000 Nil);
+let _ = map_set m 1 (mk 200 Nil);
 // one off the front at a time
 let rec take_front = fn (n: int) ->
   if n <= 0 then ()
   else (match map_get m 1 with
         | Cons (_, t) -> let _ = map_set m 1 t in take_front (n - 1)
         | Nil -> ());
-let _ = take_front 1990;
-let _ = show ();                                    // 10 19955
+let _ = take_front 190;
+let _ = show ();                                    // 10 1955
 // two and three cells down, and the same value again
 let _ = (match map_get m 1 with Cons (_, Cons (_, t)) -> map_set m 1 t | _ -> ());
-let _ = show ();                                    // 8 15972
+let _ = show ();                                    // 8 1572
 let _ = (match map_get m 1 with Cons (_, Cons (_, Cons (_, t))) -> map_set m 1 t | _ -> ());
-let _ = show ();                                    // 5 9990
+let _ = show ();                                    // 5 990
 let _ = map_set m 1 (map_get m 1);
-let _ = show ();                                    // 5 9990
+let _ = show ();                                    // 5 990
 // a new head over the old tail, and the old value kept elsewhere
 let old = map_get m 1;
 let _ = map_set m 1 (Cons (7, old));
-let _ = show ();                                    // 6 9997
+let _ = show ();                                    // 6 997
 let _ = map_set m 1 (mk 3 Nil);
 let _ = show ();                                    // 3 6
-let _ = print (str_of_int (sum old 0));             // 9990
+let _ = print (str_of_int (sum old 0));             // 990
 // down to empty, and the key still answers
 let _ = take_front 5;
 let _ = show ();                                    // 0 0

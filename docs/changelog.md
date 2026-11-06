@@ -25,9 +25,11 @@ doubling as before. A compacted map of a few entries -- mere-ruby keeps one
 per closure it creates -- held 5.6 KB, and holds about 1 KB; 100,000 of them
 went from 562 MB to 101 MB.
 
-test/parity/map_set_suffix covers the interpreter, C, LLVM and Wasm: tails
-one, two and three cells down, the same value stored again, a new head over
-the old tail, and string keys.
+test/parity/map_set_suffix covers the interpreter, C, LLVM and Wasm, and
+RV32I and RV64 against C: tails one, two and three cells down, the same
+value stored again, a new head over the old tail, and string keys. Its list
+is 200 cells: RISC-V still copies each store, and 2,000 ran RV32I's 32 MB
+out of memory.
 
 ## v0.1.710 — 2026-11-06
 
