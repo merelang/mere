@@ -1854,9 +1854,10 @@ let rv_plan_binding ~(loop_safe : string list) ~(unsafe_builtins : string list)
                 __LANG_SHARED), and need none: every Vec the fast copy reads has its
                 length read by the guard above (`len_of`), through the checked
                 vec_len, which marks it. scripts/owner_check.sh poisons that. *)
-             conj (bounded (List.hd accs) bound) (List.fold_left conj
-               (conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0)))) (mk (Cmp (Le, rv_clone iarg, rv_clone bound))))
-               (landing @ List.map per_access accs @ owned))
+             conj (mk (Cmp (Ge, rv_clone iarg, mk (Int_lit 0))))
+               (conj (bounded (List.hd accs) bound) (List.fold_left conj
+                 (mk (Cmp (Le, rv_clone iarg, rv_clone bound)))
+                 (landing @ List.map per_access accs @ owned)))
            in
            if !range_version_log then prerr_endline ("range-version: " ^ name);
            range_versioned := name :: !range_versioned;
