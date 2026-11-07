@@ -961,7 +961,7 @@ jobs:
       # versions old while every gate here was green: nothing was pointed
       # outward. This is.
       - name: first_run_check (the README, executed)
-        if: ${{ !cancelled() && matrix.group == 'compiler' }}
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: opam exec -- sh scripts/first_run_check.sh
 
       # Parts of the Wasm runtime are literal WAT text gated behind a flag only

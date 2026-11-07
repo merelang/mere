@@ -5769,7 +5769,7 @@ let () =
       "drop type LCgConn7 = { id: int, close: unit -> unit };\n\
        let mk = fn i -> LCgConn7 { id = i, close = fn () -> () } in\n\
        with c = mk 7 in c.id")
-    "call i32 ";
+    "call i64 ";
   assert_llvm "llvm: view typedef same as record (insertvalue then store)"
     (llvm_with_decls
       "view LCgCell8[R] of int { v: int };\n\

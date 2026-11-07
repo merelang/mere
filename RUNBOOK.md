@@ -265,6 +265,14 @@ durations and cache-hit messages when measuring changes: a cache hit does not
 avoid the action's system-package installation. All 191 gates and all four
 build configurations remain required.
 
+The README execution gate runs in the containers group. It still forces the
+full unit suite to derive the README's test count, executes the transcript,
+and builds a newcomer's program outside the checkout. The separate full
+unit-suite step remains in compiler. Moving the README gate changes where
+these checks run; it does not remove either execution or reuse cached output.
+The assignment validator pins its name, command and destination, and the
+containers preflight requires dune for it.
+
 The hosted RISC-V execution sweep has three required partitions:
 `rv_exec_check.sh --corpus32` in coroutines, `--corpus64` in RISC-V ownership,
 and `--contracts` in RISC-V. The default `--all` still runs both corpora and
