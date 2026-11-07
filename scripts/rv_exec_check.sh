@@ -654,13 +654,15 @@ echo "rv_exec: $wfpass passed, $wffail failed for write_file/read_stdin (both wi
 
 fi
 
-if [ -z "$RVRUN" ]; then
-  echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
-else
-  echo "rv_exec: $pass passed, $fail failed, $known known-different (C backend vs RV32I on the Mere-written CPU)"
-  echo "rv_exec: $echoed of those matched except the program's own final value, which only a compiled-in main prints"
-  echo "rv_exec: $refused of the corpus refused by -rv at compile time (not run here; host_matrix names the reasons):"
-  echo "$refused_names" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/^/rv_exec:   /;s/ $//'
-  echo ""
+if [ "$MODE" != --corpus64 ]; then
+  if [ -z "$RVRUN" ]; then
+    echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
+  else
+    echo "rv_exec: $pass passed, $fail failed, $known known-different (C backend vs RV32I on the Mere-written CPU)"
+    echo "rv_exec: $echoed of those matched except the program's own final value, which only a compiled-in main prints"
+    echo "rv_exec: $refused of the corpus refused by -rv at compile time (not run here; host_matrix names the reasons):"
+    echo "$refused_names" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/^/rv_exec:   /;s/ $//'
+    echo ""
+  fi
 fi
 exit $rc

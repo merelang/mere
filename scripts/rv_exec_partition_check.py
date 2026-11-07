@@ -56,6 +56,10 @@ chmod +x "$out"
             result = subprocess.run(["sh", script, *mode], env=env, capture_output=True, timeout=300)
             if result.returncode not in [0, 1]:
                 raise RuntimeError(result.stderr.decode())
+            if mode == ["--corpus64"]:
+                output = result.stdout.decode()
+                assert "C backend vs RV64 on the Mere-written CPU" in output
+                assert "nothing RAN" not in output and "C backend vs RV32I" not in output
             records = []
             for line in trace.read_text().splitlines():
                 args = tuple(a.replace(str(ROOT) + "/", "") for a in line.rstrip("\t").split("\t"))
