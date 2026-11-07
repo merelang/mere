@@ -27,6 +27,7 @@
 #
 # Usage:
 #   sh scripts/normalize_conformance.sh
+#   NORMALIZE_JOBS=1 sh scripts/normalize_conformance.sh  # serial comparison
 
 # v0.1.501: the probe prints exactly what is compared. Until v0.1.494 every
 # Mere program printed a trailing line for its own value, so probes ended with
@@ -35,8 +36,9 @@
 # rather than re-sentinelled, so nothing depends on a line count.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-MERE="$ROOT/_build/default/bin/mere.exe"
+MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 DATA="$ROOT/test/data/NormalizationTest.txt"
+command -v python3 >/dev/null 2>&1 || { echo "normalize_conformance: python3 is required" >&2; exit 1; }
 
 [ -x "$MERE" ] || { echo "normalize_conformance: $MERE not found — run 'dune build'" >&2; exit 1; }
 [ -f "$DATA" ] || {
@@ -49,7 +51,17 @@ TMP=$(mktemp -d)
 # was stopped left it behind, and it was committed once with this machine's
 # temp path in it; two runs at once would share it.
 PROBE="$ROOT/examples/.nf_conf_tmp_$$.mere"
-trap 'rm -rf "$TMP" "$PROBE" "$PROBE.bak"' EXIT INT TERM
+worker_pid=
+cleanup() {
+  if [ -n "$worker_pid" ]; then
+    kill -TERM "$worker_pid" 2>/dev/null || :
+    wait "$worker_pid" 2>/dev/null || :
+  fi
+  rm -rf "$TMP" "$PROBE"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Three columns out, one line each, so the Mere side reads a flat file and the
 # expected answers are a plain diff away.
@@ -120,11 +132,23 @@ let rec _go = fn (lines: str list) ->
     let _ = if str_len line == 0 then () else print (_check line) in
     _go rest;
 
-let _ = _go (read_lines "CORPUS_PATH");
+let _ = match env_var "NORMALIZE_CORPUS" with
+  | Some path -> let _ = _go (read_lines path) in ()
+  | None -> fail "NORMALIZE_CORPUS is required";
 MERE
-sed -i.bak "s|CORPUS_PATH|$TMP/corpus.txt|" "$PROBE"
-rm -f "$PROBE.bak"
-( ulimit -t 1800; "$MERE" "$PROBE" ) > "$TMP/ours_raw.txt"
+# Every worker runs the same six-assertion interpreter probe on a disjoint,
+# contiguous slice. The runner verifies the input partition and output lengths,
+# waits for every process, and restores the original corpus order before diff.
+python3 "$ROOT/scripts/normalize_workers_test.py"
+python3 "$ROOT/scripts/normalize_workers.py" "$MERE" "$PROBE" "$TMP" "${NORMALIZE_JOBS:-2}" &
+worker_pid=$!
+if wait "$worker_pid"; then
+  worker_pid=
+else
+  status=$?
+  worker_pid=
+  exit "$status"
+fi
 rm -f "$PROBE"
 
 # The expected side is the file's own columns 2 and 3 as decimal code points, which

@@ -283,6 +283,14 @@ a routing check; the three real emulator jobs retain the output comparisons,
 known-difference freshness checks, bounds and named refusals. Compare complete
 job durations when measuring the split; setup time is part of the result.
 
+The Unicode normalization conformance gate uses two interpreter workers over
+contiguous, disjoint slices of the complete vendored corpus. It checks every
+case's six NFC/NFD assertions and compares the reassembled output in original
+order. Input coverage, output counts, worker exit statuses and cancellation
+are checked; orchestration controls run inside the same required gate.
+Use `NORMALIZE_JOBS=1 sh scripts/normalize_conformance.sh` for a serial run
+of the same corpus and assertions. Both modes print the ordered output digest.
+
 ## Binary releases
 
 `release-build.yml` is shared by the distribution CI jobs and tagged
