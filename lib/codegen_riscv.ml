@@ -8689,9 +8689,11 @@ let lower_with (prog : Ast.program) : Ast.program =
     | Ast.With (name, value, body) ->
       let value = rewrite value and body = rewrite body in
       let close_ty = match Option.map Ast.walk value.Ast.ty with
-        | Some (Ast.TyCon (record, _)) ->
+        | Some (Ast.TyCon (record, args)) ->
           (match Hashtbl.find_opt Typer.records record with
-           | Some info -> List.assoc_opt "close" info.Typer.r_fields
+           | Some info ->
+             Option.map (Typer.subst_type_params (List.combine info.Typer.r_params args))
+               (List.assoc_opt "close" info.Typer.r_fields)
            | None -> None)
         | _ -> None
       in
