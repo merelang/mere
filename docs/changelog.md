@@ -4,6 +4,15 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## Unreleased
+
+The Unicode normalization conformance gate runs two interpreter workers over
+all 20,034 cases, retaining all six NFC/NFD assertions per case. It verifies
+partition coverage, reassembles outputs in original order, and fails on worker
+errors or missing output. A serial mode and required orchestration controls
+cover ordering, coverage, failure propagation and worker cancellation. All
+191 gates, nine integration groups and four build configurations remain required.
+
 ## v0.1.713 — 2026-11-07
 
 `with` validates a record's instantiated close field as `unit -> unit`
