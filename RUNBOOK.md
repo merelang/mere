@@ -262,8 +262,18 @@ This covers direct source entries and the runner's `apt-mirrors.txt` or
 Repository suites, components, signing keys and other mirrors are preserved.
 The setup action's opam cache remains enabled. Compare actual setup step
 durations and cache-hit messages when measuring changes: a cache hit does not
-avoid the action's system-package installation. All 188 gates and all four
+avoid the action's system-package installation. All 191 gates and all four
 build configurations remain required.
+
+The hosted RISC-V execution sweep has three required partitions:
+`rv_exec_check.sh --corpus32` in coroutines, `--corpus64` in RISC-V ownership,
+and `--contracts` in RISC-V. The default `--all` still runs both corpora and
+every boundary case. Split modes require their emulator runners. The
+partition audit in the containers group compares compiler invocations with
+all-mode, including a refused C reference and a refused RV32 program. This is
+a routing check; the three real emulator jobs retain the output comparisons,
+known-difference freshness checks, bounds and named refusals. Compare complete
+job durations when measuring the split; setup time is part of the result.
 
 ## Binary releases
 

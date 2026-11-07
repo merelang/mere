@@ -1,0 +1,43 @@
+// Snapshots have their own immutable data, even after explicit reclamation.
+type Item = { label: str, numbers: int list };
+let m = map_new ();
+let _ = map_set m "k" (Item { label = "before", numbers = [1, 2, 3] });
+let _ = map_compact m;
+let saved = snapshot (map_get m "k");
+let _ = map_set m "k" (Item { label = "after", numbers = [4, 5] });
+let _ = map_compact m;
+let _ = map_recycle m;
+let _ = print (saved.label ++ " " ++ str_of_int (list_sum saved.numbers));
+let v = vec_new ();
+let _ = vec_push v (bytes_of_str ("a" ++ chr 0 ++ "b"));
+let _ = vec_compact v;
+let saved_bytes = snapshot (vec_get v 0);
+let _ = vec_recycle v;
+let _ = vec_push v (bytes_of_str (str_repeat "x" 200));
+let _ = vec_push v (bytes_of_str (str_repeat "y" 200));
+let _ = vec_push v (bytes_of_str (str_repeat "z" 200));
+let _ = vec_push v (bytes_of_str (str_repeat "w" 200));
+let _ = print (hex_of_bytes saved_bytes);
+// Argument effects run once in the caller's scope, before copying.
+let count = vec_new ();
+let _ = vec_push count 0;
+let source = fn () ->
+  let _ = vec_set count 0 (vec_get count 0 + 1) in "once";
+let _ = print (snapshot (source ()));
+let _ = print_int (vec_get count 0);
+let builder = lb_new ();
+let built = snapshot (let _ = lb_push builder "outside" in lb_to_list builder);
+let _ = print (str_join "," built);
+let copy = snapshot;
+let _ = print_int (list_sum (copy [10, 20]));
+let _ = print_int (region Outer { list_sum (snapshot [30, 40]) });
+type 'a Box = { value: 'a };
+let boxed = snapshot (Box { value = [20, 30] });
+let _ = print_int (list_sum boxed.value);
+let option = snapshot (Some ("opt", [3, 4]));
+let _ = print (match option with None -> "missing" | Some (label, xs) -> label ++ " " ++ str_of_int (list_sum xs));
+// Ordinary lexical shadowing still applies to the builtin name.
+let f = fn snapshot -> snapshot 41;
+let _ = print_int (f (fn x -> x + 1));
+let snapshot = fn x -> x + 2;
+print_int (snapshot 41)

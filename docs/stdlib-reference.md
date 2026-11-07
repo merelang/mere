@@ -1843,6 +1843,28 @@ protects stopped stacks separately. The
 [suffix fixture](../test/parity/map_set_suffix.mere) checks a copied list
 snapshot across replacement and compaction.
 
+**`snapshot : 'a -> 'a` (unreleased) copies an immutable plain value** into the enclosing
+allocation scope, using the same deep copy as a region result. It supports
+scalars, strings, bytes, SIMD values, tuples, and records/variants/lists whose
+contents are also plain. Containers, functions, borrows and capabilities are
+refused, including when hidden in a record or variant. The argument is
+evaluated once in the caller's scope before copying; ordinary container read
+ownership checks still apply.
+
+```mere
+let saved = snapshot (map_get m key);
+let _ = map_compact m;
+// saved's immutable contents remain usable here
+```
+
+Use it similarly with `vec_get`. Direct calls may snapshot different types.
+A wrapper or alias whose snapshot argument type is unresolved is kept
+monomorphic, so later uses cannot bypass the plain-value bound. Use separate
+wrappers when several argument types are needed. The interpreter keeps its
+immutable GC-managed value; C, LLVM, Wasm and RISC-V use region-result copying.
+The [snapshot fixture](../test/parity/snapshot.mere) checks copies across
+compaction and recycling, nested data, argument effects and lexical shadowing.
+
 **`OwnedVec`**: `owned_vec_get : OwnedVec[T] -> int -> T` joins `owned_vec_new` /
 `push` / `len` / `to_vec`, which are in language-reference.
 

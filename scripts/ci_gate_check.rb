@@ -10,13 +10,18 @@ module CIGates
 
   # Update deliberately when adding or removing checks. A deleted step must
   # not silently reduce the coverage while every remaining group is green.
-  EXPECTED_CHECKS = 188
+  EXPECTED_CHECKS = 191
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   CHECKOUT = "Check out the dogfood repositories"
   CACHE = "Restore the downstream compile cache"
   PACKAGES = "Install package dependencies"
   CHECKOUT_GROUPS = %w[coroutines downstream riscv riscv-ownership].freeze
+  RV_EXEC = {
+    "rv_exec contracts (hosted boundaries at both widths)" => ["riscv", "--contracts"],
+    "rv_exec corpus32 (the full corpus against C)" => ["coroutines", "--corpus32"],
+    "rv_exec corpus64 (the full corpus against C)" => ["riscv-ownership", "--corpus64"]
+  }.freeze
   RISCV_TOOLS = ["Install qemu-system-riscv32 (optional gate)",
                  "Install binutils-riscv64 (optional gate — oracle for mere -rvd)"].freeze
 
@@ -110,6 +115,8 @@ module CIGates
              "required tool preflight must inspect the active group's gates")
     checks = steps[(start + 1)..]
     require!(checks.map { |s| s["name"] }.uniq.length == checks.length, "check names must be unique")
+    require!(RV_EXEC.keys.all? { |n| checks.count { |s| s["name"] == n } == 1 },
+             "all three RISC-V execution partitions must run once")
     require!(checks.count { |s| s["name"] == FULL_TESTS } == 1, "the full toolchain unit suite must run once")
     require!(checks.count { |s| s["name"] == CHECKOUT } == 1, "downstream checkouts must be present")
     require!(checks.count { |s| s["name"] == CACHE } == 1, "the downstream compile cache must be present")
@@ -135,6 +142,13 @@ module CIGates
                  "every RISC-V oracle group must require memu")
       when CACHE
         require!(selected == ["downstream"], "only downstream may write the compile cache")
+      when *RV_EXEC.keys
+        group, mode = RV_EXEC.fetch(name)
+        require!(selected == [group], "#{name}: wrong execution group")
+        require!(!step["continue-on-error"], "#{name}: execution failures must fail the group")
+        require!(step["run"] == "MEMU=\"$RUNNER_TEMP/downstream/memu\" sh scripts/rv_exec_check.sh #{mode}",
+                 "#{name}: the assigned partition must execute")
+        assigned.fetch(group) << name
       else
         require!(selected.length == 1, "#{name}: each check must run in exactly one group")
         require!(!step["continue-on-error"] && !step.fetch("run", "").empty?, "#{name}: check failures must fail the group")
@@ -170,6 +184,11 @@ module CIGates
       "unknown group" => ->(c) { c[:poison]["if"] = "${{ !cancelled() && matrix.group == 'typo' }}" },
       "duplicated check" => ->(c) { c[:poison]["if"] = "${{ !cancelled() && (matrix.group == 'compiler' || matrix.group == 'runtime') }}" },
       "deleted check" => ->(c) { c[:steps].delete(c[:poison]) },
+      "missing RV64 partition" => ->(c) { c[:steps].reject! { |s| s["name"] == RV_EXEC.keys.last } },
+      "duplicate RV32 work" => ->(c) { c[:steps].find { |s| s["name"] == RV_EXEC.keys.last }["run"].sub!("--corpus64", "--corpus32") },
+      "unpartitioned RV work" => ->(c) { c[:steps].find { |s| s["name"] == RV_EXEC.keys.first }["run"].sub!("--contracts", "--all") },
+      "optional RV partition" => ->(c) { c[:steps].find { |s| s["name"] == RV_EXEC.keys.first }["continue-on-error"] = true },
+      "RV corpus in wrong group" => ->(c) { c[:steps].find { |s| s["name"] == RV_EXEC.keys.last }["if"] = "${{ !cancelled() && matrix.group == 'riscv' }}" },
       "duplicate group" => ->(c) { c[:matrix]["group"] << "compiler" },
       "empty group" => ->(c) { c[:matrix]["group"] << "unused" },
       "excluded group" => ->(c) { c[:matrix]["exclude"] = [{"group" => "compiler"}] },

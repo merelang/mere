@@ -4,6 +4,35 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## Unreleased
+
+Wasm now specializes a factory value whose uses settle on one concrete return
+type, including aliases and nested scopes. Native C emits factory adapters
+before the function bodies that reference them, and `with` bindings use the
+same mangled name and lexical type environment as their body references.
+The new factory parity fixture covers Vec, Map and OwnedVec factories.
+
+`snapshot value` obtains an independent immutable plain value through the
+existing region-result copier. Arguments run once before the scratch region
+opens. Nested containers, functions, borrows and capabilities are refused;
+unresolved wrapper types remain monomorphic so their bound cannot be bypassed.
+Parity covers Map/Vec compaction and recycling, nested data, binary bytes,
+argument effects and shadowing. The lifetime gate also checks ASan/UBSan,
+removes a copy to expose use-after-free, and checks plain-value refusals on
+the interpreter, checker and all four compiled targets.
+
+The hosted RISC-V sweep is split into RV32 and RV64 corpora and a shared
+boundary partition. All cases, known-difference freshness checks and refusal
+checks remain in the default all-mode; an invocation audit checks their union
+against the three CI modes. Required CI checks increase from 188 to 191:
+two additional execution partitions and the partition audit. The nine groups,
+four build configurations and existing required-check name are preserved.
+
+The resumed-pinner lifetime negative control now forces reclamation under its
+recorded running pinner. Merely removing the running-pinner guard could leave
+the arena protected by incidental conservative pins and miss the intended
+fault; the revised control tests the reclamation boundary directly.
+
 ## v0.1.711 — 2026-11-07
 
 Native C and LLVM programs gain addressed UDP send and receive through

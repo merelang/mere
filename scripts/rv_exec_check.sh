@@ -23,10 +23,25 @@
 #   sh scripts/rv_exec_check.sh
 #   MEMU=/path/to/memu sh scripts/rv_exec_check.sh
 set -u
+MODE="${1:---all}"
+case "$MODE:$#" in
+  --all:0|--all:1|--corpus32:1|--corpus64:1|--contracts:1) ;;
+  *) echo "usage: rv_exec_check.sh [--all | --corpus32 | --corpus64 | --contracts]" >&2; exit 2 ;;
+esac
+echo "rv_exec: mode $MODE"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MERE="$ROOT/_build/default/bin/mere.exe"
+MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 CC="${CC:-cc}"
 [ -x "$MERE" ] || { echo "rv_exec_check: $MERE not found — run 'dune build'" >&2; exit 1; }
+if [ "$MODE" != --all ]; then
+  for width in 32 64; do
+    [ "$MODE" = --corpus32 ] && [ "$width" = 64 ] && continue
+    [ "$MODE" = --corpus64 ] && [ "$width" = 32 ] && continue
+    [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv${width}i_run.mere" ] || {
+      echo "rv_exec: RV$width runner required" >&2; exit 2;
+    }
+  done
+fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 rc=0; pass=0; fail=0
@@ -81,7 +96,7 @@ KNOWN_DIFF="float_edges region_growth int_width_boundary bytes_file_roundtrip ra
 #   (map_compact sat here until v0.1.614, when a Map got an arena to measure)
 
 RVRUN=""
-if [ -n "${MEMU:-}" ]; then
+if [ "$MODE" != --corpus64 ] && [ -n "${MEMU:-}" ]; then
   [ -f "$MEMU/riscv-runc/rv32i_run.mere" ] || { echo "FAIL rv_exec: no rv32i_run.mere under MEMU=$MEMU"; exit 1; }
   "$MERE" -c "$MEMU/riscv-runc/rv32i_run.mere" > "$TMP/rvrun.c" 2>"$TMP/err" || {
     echo "FAIL rv_exec: the emulator did not compile"; head -5 "$TMP/err"; exit 1; }
@@ -90,6 +105,7 @@ if [ -n "${MEMU:-}" ]; then
 fi
 
 echoed=0; known=0; nocref=0; refused=0; refused_names=""
+if [ "$MODE" = --all ] || [ "$MODE" = --corpus32 ]; then
 for p in "$ROOT"/test/parity/*.mere; do
   name=$(basename "$p" .mere)
   if "$MERE" -c "$p" > "$TMP/ref.c" 2>/dev/null && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
@@ -141,6 +157,9 @@ for p in "$ROOT"/test/parity/*.mere; do
   fi
 done
 
+fi
+
+if [ "$MODE" = --all ] || [ "$MODE" = --contracts ]; then
 # test/rv/ holds programs that cannot sit in the parity corpus because some
 # OTHER backend refuses them. region_map_escape: Wasm refuses a map mutation
 # inside a region at compile time (it rolls the whole block back); this backend
@@ -216,6 +235,8 @@ else
   printf '  FAIL  %s (-rv refused it)\n' "$name"; head -3 "$TMP/rverr"; fail=$((fail+1)); rc=1
 fi
 
+fi
+
 # --- the same corpus, at 64 bits ---------------------------------------------
 # rvrun64 is the RV64IM core; the reference stays the C backend, whose int is
 # also 64 bits -- so the width-related known-differences of the 32-bit column
@@ -240,7 +261,7 @@ case "$(uname -m)" in x86_64|amd64) KNOWN_DIFF64="$KNOWN_DIFF64 float_bits" ;; e
 #                          strbuf is concat-backed: 200k chars = GBs of dead heap.
 #                          The fix is a real byte-buffer strbuf, recorded work.
 RVRUN64=""
-if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
+if [ "$MODE" != --corpus32 ] && [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
   if "$MERE" -c "$MEMU/riscv-runc/rv64i_run.mere" > "$TMP/rvrun64.c" 2>"$TMP/err" \
      && $CC -O2 -w -o "$TMP/rvrun64" "$TMP/rvrun64.c" 2>"$TMP/err"; then
     RVRUN64="$TMP/rvrun64"
@@ -249,7 +270,7 @@ if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
   fi
 fi
 pass64=0; fail64=0; known64=0; refused64=0; refused64_names=""
-if [ -n "$RVRUN64" ]; then
+if { [ "$MODE" = --all ] || [ "$MODE" = --corpus64 ]; } && [ -n "$RVRUN64" ]; then
   for p in "$ROOT"/test/parity/*.mere; do
     name=$(basename "$p" .mere)
     if "$MERE" -c "$p" > "$TMP/ref.c" 2>/dev/null && $CC -O1 -w -o "$TMP/ref" "$TMP/ref.c" 2>/dev/null; then
@@ -290,6 +311,15 @@ if [ -n "$RVRUN64" ]; then
   echo ""
 fi
 
+# Split CI modes require their execution oracle; compile-only success is
+# reserved for the developer's default --all mode.
+case "$MODE" in
+  --corpus32) [ -n "$RVRUN" ] || { echo "rv_exec: RV32 runner required" >&2; exit 2; } ;;
+  --corpus64) [ -n "$RVRUN64" ] || { echo "rv_exec: RV64 runner required" >&2; exit 2; } ;;
+  --contracts) [ -n "$RVRUN" ] && [ -n "$RVRUN64" ] || { echo "rv_exec: both runners required" >&2; exit 2; } ;;
+esac
+
+if [ "$MODE" = --all ] || [ "$MODE" = --contracts ]; then
 # print_bytes and the machine a refusal names, at both widths. Written-out
 # expectations, like extern_catchable: the interpreter has no RV32I/RV64I to
 # name. The NUL is shown as `@` so the comparison is on text.
@@ -622,14 +652,17 @@ else
 fi
 echo "rv_exec: $wfpass passed, $wffail failed for write_file/read_stdin (both widths, and --bare still refuses)"
 
+fi
 
-if [ -z "$RVRUN" ]; then
-  echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
-else
-  echo "rv_exec: $pass passed, $fail failed, $known known-different (C backend vs RV32I on the Mere-written CPU)"
-  echo "rv_exec: $echoed of those matched except the program's own final value, which only a compiled-in main prints"
-  echo "rv_exec: $refused of the corpus refused by -rv at compile time (not run here; host_matrix names the reasons):"
-  echo "$refused_names" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/^/rv_exec:   /;s/ $//'
-  echo ""
+if [ "$MODE" != --corpus64 ]; then
+  if [ -z "$RVRUN" ]; then
+    echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
+  else
+    echo "rv_exec: $pass passed, $fail failed, $known known-different (C backend vs RV32I on the Mere-written CPU)"
+    echo "rv_exec: $echoed of those matched except the program's own final value, which only a compiled-in main prints"
+    echo "rv_exec: $refused of the corpus refused by -rv at compile time (not run here; host_matrix names the reasons):"
+    echo "$refused_names" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/^/rv_exec:   /;s/ $//'
+    echo ""
+  fi
 fi
 exit $rc

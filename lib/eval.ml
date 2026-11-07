@@ -4178,6 +4178,22 @@ let builtin_vec_of_bytes =
 
 let initial_env : env =
   [ ("print", ref builtin_print);
+    ("snapshot", ref (V_builtin ("snapshot", fun value ->
+      (* Plain interpreter values are immutable and GC-managed. Check the
+         runtime shape as well, since declarations can execute before a
+         deferred type obligation is discharged. *)
+      let rec plain = function
+        | [] -> true
+        | (V_int _ | V_float _ | V_bool _ | V_str _ | V_bytes _ | V_unit
+          | V_f64x2 _ | V_f32x4 _ | V_u8x16 _) :: rest -> plain rest
+        | V_constr (_, None) :: rest -> plain rest
+        | V_constr (_, Some v) :: rest -> plain (v :: rest)
+        | V_tuple vs :: rest -> plain (vs @ rest)
+        | V_record (_, fs) :: rest -> plain (List.map snd fs @ rest)
+        | _ -> false
+      in
+      if plain [value] then value
+      else failwith "snapshot cannot copy a container, function, borrow or capability")));
     (* bytes builtins *)
     ("bytes_len", ref builtin_bytes_len);
     ("bytes_get", ref builtin_bytes_get);

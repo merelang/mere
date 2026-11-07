@@ -355,9 +355,16 @@ let env_free_vars env =
    a !Send value cannot be smuggled through a polymorphic wrapper (it would
    either fail the discharge check or fail to unify across two uses). *)
 let pending_send : (Ast.ty * Loc.t) list ref = ref []
-let reset_send_constraints () = pending_send := []
-let pending_send_ids () =
-  List.fold_left (fun acc (ty, _) -> collect_free_vars ty acc) [] !pending_send
+let pending_snapshot : (Ast.ty * Loc.t) list ref = ref []
+let active_snapshot : (Ast.ty * Loc.t) list ref = ref []
+let reset_send_constraints () =
+  pending_send := []; pending_snapshot := []; active_snapshot := []
+let pending_bound_ids () =
+  (* Keep all obligations for final validation, but stop rescanning concrete
+     snapshot types at every later binding. A sequence of N copies stays O(N). *)
+  active_snapshot := List.filter (fun (t, _) -> collect_free_vars t [] <> []) !active_snapshot;
+  List.fold_left (fun acc (ty, _) -> collect_free_vars ty acc) []
+    (!pending_send @ !active_snapshot)
 
 (* A trait obligation recorded during inference. The `Ast.expr` is the exact
    Var node (matched later by physical identity) that must be rewritten by the
@@ -1071,9 +1078,9 @@ let freshen_annot t =
 
 
 let generalize env t =
-  let send_ids = pending_send_ids () in
+  let send_ids = pending_bound_ids () in
   (* A variable is generalizable when it was created inside this binding and is
-     not pinned by a pending Send obligation.
+     not pinned by a pending Send or snapshot obligation.
 
      This used to ask the environment instead: collect every free variable of
      every scheme in scope and quantify what was not among them. That is the
@@ -1856,6 +1863,38 @@ let record_send_bound loc (t : Ast.ty) =
    resolved to a concrete type must be Send. Elements still mentioning type
    variables are left alone (they were kept monomorphic, so a later concrete
    use would either satisfy this or fail to unify). *)
+(* A snapshot has no mutable identity, borrow or hidden closure environment.
+   Look through nominal fields too: hiding a Vec in a record does not copy it.
+   Unresolved variables are pinned by the same generalization rule as Send. *)
+let rec snapshot_refusal visiting t =
+  let first ts = List.find_map (snapshot_refusal visiting) ts in
+  match Ast.walk t with
+  | Ast.TyArrow _ -> Some "function"
+  | Ast.TyRef _ -> Some "borrow"
+  | Ast.TyParam _ -> Some "unresolved type parameter"
+  | Ast.TyTuple ts -> first ts
+  | Ast.TyCon (n, _) when
+      List.mem n region_parameterised_names || n = "OwnedVec"
+      || Hashtbl.mem drop_types n || Hashtbl.mem local_types n
+      || Hashtbl.mem sync_types n -> Some n
+  | Ast.TyCon (n, args) when List.mem n visiting -> first args
+  | Ast.TyCon (n, args) ->
+    (match nominal_contents n args with
+     | Some ts -> List.find_map (snapshot_refusal (n :: visiting)) ts
+     | None -> Some n)
+  | _ -> None
+
+let check_snapshot_bound loc t =
+  match snapshot_refusal [] t with
+  | None -> ()
+  | Some what -> raise (Type_error (loc,
+      "snapshot cannot copy " ^ what ^ ": use an immutable plain value, without containers, functions, borrows or capabilities"))
+
+let record_snapshot_bound loc t =
+  check_snapshot_bound loc t;
+  pending_snapshot := (t, loc) :: !pending_snapshot;
+  active_snapshot := (t, loc) :: !active_snapshot
+
 let discharge_send_constraints () =
   List.iter (fun (t, loc) ->
     if collect_free_vars t [] = [] && not (is_send t) then
@@ -1863,7 +1902,8 @@ let discharge_send_constraints () =
         Printf.sprintf
           "`%s` is not Send — a value of this type cannot cross a thread \
            boundary" (Ast.pp_ty t)))
-  ) !pending_send
+  ) !pending_send;
+  List.iter (fun (t, loc) -> check_snapshot_bound loc t) !pending_snapshot
 
 (* Instantiate a constructor for a single use: pick fresh TyVars for params,
    substitute them into the arg type and result type. *)
@@ -2964,8 +3004,14 @@ let map_iter_scheme =
 
 let () = Hashtbl.replace types "Map" 3
 
+let snapshot_scheme =
+  let a = fresh_var () in
+  let id = match a with Ast.TyVar v -> v.id | _ -> assert false in
+  { constraints = []; quantified = [id]; body = Ast.TyArrow (a, a) }
+
 let initial_env : env =
   [ ("print",       mono (Ast.TyArrow (Ast.TyStr,  Ast.TyUnit)));
+    ("snapshot", snapshot_scheme);
     (* Q-012 step 3a: concurrency primitives *)
     ("spawn",        spawn_scheme);
     ("join",         join_scheme);
@@ -3618,6 +3664,12 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
                 | None -> false) -> Deprecated.note row e.Ast.loc
         | _ -> ());
        let ity, mapping = instantiate_with_map sch in
+       (if name = "snapshot" && sch == snapshot_scheme then begin
+          saw_region_block := true;
+          match Ast.walk ity with
+          | Ast.TyArrow (a, _) -> record_snapshot_bound e.Ast.loc a
+          | _ -> assert false
+        end);
        (* Q-127: this reference is being evaluated HERE, so whatever it allocates is
           allocated here -- see `bind_instantiated_alloc_regions`. *)
        bind_instantiated_alloc_regions mapping;
