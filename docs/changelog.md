@@ -6,6 +6,19 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.711 — 2026-11-07
 
+Native C and LLVM programs gain addressed UDP send and receive through
+`sock_sendto` and `sock_recvfrom`, including numeric IPv4/IPv6 sender metadata,
+binary and empty packets, flags, arena bounds and thread-local errno. A
+zero-capacity receive without sender metadata reports EAGAIN; queued packets
+retain their sender. The loopback gate checks both native backends.
+
+The code-generation guide and tutorial now distinguish implemented backends
+and builtin values from their historical phase summaries. Map storage checks
+bound suffix replacement and small compacted maps, and reject controls that
+restore either previous allocation policy. The suffix parity fixture also
+keeps a copied snapshot across compaction and replacement. The reference
+documents when explicit compaction can invalidate uncopied reads on C.
+
 _A map keeps a value that is the tail of the one it replaces; a compacted
 map's first block is sized to it._
 

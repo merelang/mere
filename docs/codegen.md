@@ -1,6 +1,10 @@
 # Code generation (codegen)
 
-Mere's code-generation strategy, the current state in `mere`, and what's planned. Because the **memory model** and **effect system** at Mere's core only show their real power once codegen is in place, Phase 4 progresses through this in slices.
+Mere's code-generation strategy and backend behavior. C, LLVM IR, Wasm and
+RISC-V are implemented. The phase tables below record how they developed;
+the [standard-library reference](stdlib-reference.md),
+[host support matrix](host-matrix.md) and executable checks describe current
+support for individual operations.
 
 ---
 
@@ -27,8 +31,10 @@ The last stage of a compiler. Mere-ml started as parser → typer → **eval** (
 | Mode | Execution model |
 |---|---|
 | Tree-walking interpreter | Traverses the AST each time, looks up env, boxes/unboxes closure values, runs through OCaml's GC |
-| C codegen (current) | Runs the native binary produced by the C compiler — register allocation, function calls are one `call` instruction |
-| LLVM / Wasm (future) | Adds more optimization (inlining, dead-code elim, loop unrolling) |
+| C (`-c`) | Emits C for a native C compiler |
+| LLVM IR (`-ll`) | Emits LLVM IR for a native LLVM toolchain |
+| Wasm (`-w`) | Emits WAT for a WebAssembly engine and its host imports |
+| RISC-V (`-rv` / `-rv64`) | Emits RV32IM / RV64IM machine code without an external assembler or linker |
 
 ### Distribution
 
@@ -37,51 +43,60 @@ Codegen mode: compile `program.mere` once and you have a self-contained binary.
 
 ### Letting the memory model shine
 
-Mere's **region / view / Trivial[R] / `with` Drop** design ([memory-model.md](memory-model.md)) currently exists as type-level labels; under the hood, OCaml's GC actually manages memory.
-
-```
-// Current (interpreter):
-region R { let n = R.alloc(Node { ... }) in ... }
-// Reality: an ordinary object allocated on OCaml's heap, collected by the GC
-
-// After codegen:
-// region R push/pops a bump allocator and frees everything on scope exit
-// Drop's LIFO execution becomes a mechanical reverse-order walk over a Drop list
-```
-
-As memory-model.md says:
-> Region's real power (bump allocator, bulk free, cache locality) only emerges with **native codegen**.
+The interpreter uses OCaml-managed values. Compiled backends implement region
+allocation and reclamation in their runtimes, and `with` performs scope-bound
+cleanup. Region results and escaped values have backend-specific handling;
+some shapes are refused. See [memory-model.md](memory-model.md) for the
+ownership rules, reclamation mechanisms and executable examples.
 
 ### Becoming a self-contained language
 
-In interpreter mode, "Mere runs on top of OCaml." Once we can emit native binaries via codegen, "Mere is a self-contained language." This is required by the design goal of "both native (LLVM) and Wasm" in the internal design notes.
+The distribution compiler is built with OCaml. Programs compiled to native
+binaries run without the compiler or an OCaml installation. Wasm programs
+need an engine and the imports they use; RISC-V programs need the corresponding
+machine or emulator. See [bare-metal.md](bare-metal.md) for hosted and bare
+RISC-V execution.
 
 ---
 
 ## 3. Mere's codegen strategy
 
-### Multi-stage approach
+### Implemented targets
 
-| Phase | Target | Status | Why |
-|---|---|---|---|
-| 4 (current) | **C** | In progress | The simplest intermediate language; clang/gcc are right there |
-| 5 (future) | **LLVM IR** | Not started | More optimization opportunities; supports both native and JIT |
-| or | **Wasm** | Not started | Browser execution + WASI for self-contained binaries |
+| CLI | Target | Toolchain or host |
+|---|---|---|
+| `-c` | **C** | Clang or GCC |
+| `-ll` | **LLVM IR** | Clang or another LLVM toolchain |
+| `-w` | **Wasm text** | `wat2wasm`, then an engine with the required host imports |
+| `-rv` / `-rv64` | **RISC-V binary** | RV32IM / RV64IM execution; see the bare-metal guide |
 
 ### Why go through C?
 
-- Easier than emitting LLVM / Wasm directly (C is "portable assembly").
-- A C compiler is already on hand (clang/gcc are standard on macOS/Linux).
-- Region runtime and GC helpers can be written in C and FFI-bound.
-- When we later switch to LLVM IR, the C output serves as a "ground truth" for comparison.
+- C output can be inspected and checked with Clang and GCC, including sanitizers.
+- The native C and LLVM paths share C runtime support for facilities such as
+  sockets; LLVM programs using native FFI also link the `--ffi-c` companion.
+- Differential checks compare execution with the interpreter and other backends.
 
 ### Per-AST type annotations (introduced in Phase 4 slice 5)
 
-`Ast.expr` gains a `mutable ty : ty option`; `Typer.infer` records the inferred type on each node. This lets codegen directly read each node's type — tuple shape inference and fn signature inference become clean. The same foundation will be used for LLVM / Wasm migration.
+`Ast.expr` has a `mutable ty : ty option`; `Typer.infer` records the inferred
+type on each node. Code generators use these annotations for concrete tuple
+shapes, function signatures and specialization.
 
 ---
 
-## 4. Current state in mere (as of 2026-06-24, after Phases 4-46)
+## 4. Backend capabilities
+
+The next two phase summaries are historical snapshots from June 2026, not a
+current test count or an exhaustive support list. Current regression examples
+include [builtin values](../test/parity/builtin_as_value.mere),
+[tuple captures](../test/parity/closure_tuple_cap.mere),
+[returned closures and aliases](../test/parity/closure_alias_types.mere),
+[file reads](../test/parity/read_lines.mere) and
+[environment access](../test/parity/dirs_and_env.mere). Run them with
+`sh scripts/parity.sh <file> ...` to compare interpreter, C, LLVM and Wasm.
+
+### Historical overview: June 2026
 
 **Nearly the entire Mere syntax that's expressible in the interpreter** + **Q-010 collections (Vec / OwnedVec / StrBuf / Map)** + **FFI (`extern fn`)** + **float (3 backends)** + **Phase 36's 13 syntactic sugars** is native-compilable and runnable in 3 backends (C / LLVM IR / Wasm). **1573 tests pass**. End-to-end: factorial, fibonacci, linked-list sum, `make_adder` closures, polymorphic variant + record, pattern match (nested / guard / or). Phase 15 added all element types for Vec[R, T] / OwnedVec[T] / StrBuf[R] / Map[R, K, V] (K = int / bool / str / tuple / record / all variants) / higher-order API (vec_set / iter / fold / map / filter) / conversions (vec_to_owned / owned_vec_to_vec / vec_to_list) / `len` ad-hoc polymorphism / with-OwnedVec scope-Drop — all in 3 backends.
 
@@ -150,22 +165,31 @@ In interpreter mode, "Mere runs on top of OCaml." Once we can emit native binari
 | Polymorphic variant monomorphization | `type 'a list = Nil \| Cons of 'a * 'a list` and friends — concrete instantiations are collected from AST + fn signatures and a specialized struct is emitted per instance (`list_int`, `opt_str`, ...). Recursivity is judged on the substituted payload. So `[1, 2, 3]` literals and `'a list`-typed `sum` etc. run natively |
 | Polymorphic record monomorphization | `type 'a Box = { v: 'a }` etc. specialize like variants (`Box_int`, `Box_str`, ...); Record_lit emit reads the mono name from `.ty` and emits e.g. `((Box_int){.v = 42})` |
 | Polymorphic `show` builtin | For each `show` call, the argument type is collected and a specialized `show_T` C fn is auto-generated. Covers int/bool/str/unit/tuple/record/variant (monomorphic + polymorphic instantiations). **`'a list` is special-cased (`[1, 2, 3]` style)**; other recursive variants use `Cons (1, Cons (2, Nil))` style. asprintf-based; heap-allocates |
-| Closure (defunctionalized) | Inner `let n = fn x -> body` is defunctionalized to top level. Free vars are prepended to the C fn's params; call sites are rewritten. Captures are restricted to int/bool/str/unit (tuple/record/function-value captures not yet supported). Multi-level nesting is fine |
+| Closure (lifted) | Inner functions are lifted and captures are passed in their environment. Tuple, record and function-value captures are supported; concrete representation and region escape rules still apply. The parity corpus includes tuple captures and returned closure aliases |
 | First-class fns (Phase A + B) | `T1 -> T2` types become closure structs (`{ void* env; T2 (*fn)(void*, T1); }`). Each top-level fn gets a `_closure_fn` adapter + `_as_value` const; anonymous Fun in expression position is lifted into env struct (heap-alloc) + adapter (`__anon_N_fn`) + closure construction, with captures rewritten to `__env_self->name`. Closure dispatch: `({ __auto_type __c = e; __c.fn(__c.env, x); })`. Direct call (Var head on a known top-level) still takes the fast direct-call path |
 
-### What doesn't work (currently Codegen_error)
+### Support boundaries
 
-- **Phase 35 made nullary factory builtins (vec_new / map_new / strbuf_new etc.) usable as first-class values in all 4 backends** (eta-wrap). But **partial application of multi-arg curried builtins** (`let push_to_v = vec_push v in ...`) is still future work.
-- **Auto scope-bound Drop for OwnedVec** — explicit `with v = ...` already frees at scope end; without it, bulk-freed at main exit (Phase 15.8 / 15.13; DEFERRED §1.3).
-- Inner-lifted fns (`let h = fn ...`) used as VALUES (currently only direct calls; rewriting as an anonymous Fun works).
-- Closure captures of non-primitive types (tuple/record captures; closure-value captures are fine).
-- Nested or-patterns (or inside constructor / tuple / record).
-- **Placing `while cond do body` directly under top-level main** — top-level Let_rec constraint; inside an fn body is fine.
-- **String interpolation with nested string literals** (`"x = {show \"abc\"}"`) — workaround via a let binding.
-- Some stdlib builtins (`read_lines` / `env_var` / `file_exists` etc.) are **interpreter-only**. Phase 34 brought float / libm (sqrt / sin / cos / tan / f_pow / atan2) to the 3 backends. `args` is no longer among them: it reaches all four backends as of v0.1.169 (LLVM stores argc/argv from `main` into globals; Wasm folds the host's `arg_count` / `arg_get`).
-- GC for strings / closure envs / variant nodes (currently a region arena bulk-freed at main exit — suitable for short-lived runs).
-- LLVM / Wasm with payload-mixed variants as Map K (uniform payload only) — C accepts mixed.
-- **`of_json` on LLVM**. `to_json` landed there in v0.1.184 by sharing the `show` emitter — the two differ only in literals — but decoding needs a JSON parser written in the target language, and C and Wasm each have their own hand-written one. `scripts/parity.sh` now reports what each backend did not check, which is where this shows up: six of eighty-three, all but one of them `of_json`.
+Builtin values are supported when the backend implements the operation and
+its use has a concrete callable type. Factory values such as `vec_new` and
+`map_new` are supported when their return type is concrete, as in
+[factory_value.mere](../examples/factory_value.mere). An unconstrained
+`let make = vec_new` may retain a polymorphic return type; annotate it or
+pass the builtin to a concretely typed parameter. Wrapping a call in `fn`
+remains useful when an operation has a backend-specific restriction. See the
+standard-library reference for individual APIs.
+
+Floats, `read_lines`, `env_var`, `file_exists` and `args` are implemented on
+the interpreter, C, LLVM and Wasm paths. Host filesystem and environment
+access depend on the selected host. The generated host support matrix and
+the standard-library reference describe these requirements.
+
+Automatic scope cleanup for an ordinary `OwnedVec` binding is not inferred:
+use `with v = owned_vec_new () in body` for scope-bound cleanup. LLVM JSON
+decoding (`of_json` and its siblings) remains unsupported; `to_json` works
+there. Further restrictions, including region-returned functions on LLVM,
+are documented in the memory-model guide. The parity harness reports clean
+backend refusals separately from compilation failures and output differences.
 
 ### CLI
 
@@ -245,21 +269,11 @@ Detailed change history is in [changelog.md](changelog.md).
 
 ---
 
-## 6. Roadmap
+## 6. LLVM and Wasm implementation history
 
-### Remaining work (see DEFERRED §1.2 / §1.3)
-
-| Feature | What's needed |
-|---|---|
-| First-class value use of builtins | Emit per-T closure wrappers for `let f = vec_new in ...` (DEFERRED §1.2). Multi-slice effort |
-| Auto scope-bound Drop for OwnedVec | NLL + move semantics (DEFERRED §1.3); design first |
-| Nested or-patterns | Expand or inside constructors |
-| Inner-lifted fn as value | Generate a closure form alongside `let h = fn ...` when `h` is used as a value (currently rewrite as anonymous Fun) |
-| Complex closure captures | Tuple / record captures (currently int / bool / str / unit / function value only) |
-| float | `Float_lit` / `f_add` etc. → C `double` + `%g` family |
-| Long-running program support | Currently the arena is bulk-freed only at `main` exit. A sub-arena that can drop transient strings (e.g. `show` output) or a proper GC is needed for long-running processes |
-| Remaining stdlib builtins | About 70 builtins (sqrt, str_replace, ...) ported to 3 backends |
-| Payload-mixed variants as Map K on LLVM / Wasm | Loosen the uniform-payload MVP constraint (a larger change) |
+The tables in this section record completed implementation slices. They are
+kept as history; use the capability and support sections above when choosing
+a backend for a program.
 
 ### Phase 5 (LLVM/Wasm migration)
 

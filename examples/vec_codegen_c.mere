@@ -9,12 +9,10 @@
 // Monomorphization emits a `mere_vec_<tag>` struct + 4 helpers (e.g.
 // `mere_vec_int` / `mere_vec_str` / `mere_vec_tuple_int_int` / `mere_vec_Pt`).
 //
-// Limitations (still):
-//   - Higher-order APIs (vec_iter / vec_map / vec_fold / vec_filter /
-//     vec_to_list / vec_to_owned / vec_set) are out of scope.
-//   - First-class value use of vec_* (`let f = vec_new in ...`) is unsupported.
-//   - OwnedVec / StrBuf / Map are interpreter-only.
-//   - LLVM / Wasm backends still reject all Vec usage.
+// This example dates from the basic Vec implementation. Higher-order APIs,
+// conversions, OwnedVec, StrBuf and Map now also compile on C/LLVM/Wasm.
+// A builtin factory used as a value needs a concrete return type; see
+// examples/factory_value.mere for typed factories on all four backends.
 //
 // Usage:
 //   dune exec ./bin/mere.exe -- -c examples/vec_codegen_c.mere > /tmp/vec.c
