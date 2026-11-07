@@ -47,3 +47,17 @@ let _ = map_set ms "q" (Cons ("a", Cons ("b", Cons ("c", Nil))));
 let _ = (match map_get ms "q" with Cons (_, t) -> map_set ms "q" t | _ -> ());
 let _ = map_set ms "q" (Cons ("z", map_get ms "q"));
 let _ = print (match map_get ms "q" with Cons (x, Cons (y, Cons (w, Nil))) -> x ++ y ++ w | _ -> "?");  // zbc
+// A private arena after compaction: copy an older value out through a region
+// result, store its suffix, compact again, then put the snapshot back.
+// Compaction may reclaim uncopied reads held on the running C stack.
+let _ = map_set m 1 (mk 12 Nil);
+let _ = map_compact m;
+let kept = region Copy { map_get m 1 };
+let _ = take_front 2;
+let _ = print_int (sum (map_get m 1) 0);             // 75
+let _ = map_compact m;
+let _ = print_int (sum kept 0);                      // 78
+let _ = map_set m 1 kept;
+let _ = map_compact m;
+let _ = print_int (sum (map_get m 1) 0);             // 78
+let _ = print_int (sum kept 0);                      // 78

@@ -103,3 +103,7 @@ if [ "$dalloc" -gt 16777216 ]; then
   exit 1
 fi
 echo "PASS region_slack (delete churn): alloc_total=$dalloc"
+
+# Map suffix reuse and compacted-map storage have their own public capacity
+# meter. Restoring each former policy must fail its deterministic bound.
+MERE="$MERE" CC="$CC" python3 "$ROOT/scripts/map_allocation_check.py" || exit 1

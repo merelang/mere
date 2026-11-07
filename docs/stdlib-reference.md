@@ -1832,6 +1832,17 @@ satisfy it and hide the very row it was describing.
 | `map_recycle` | `Map[R, K, V] -> unit` | return the table's storage for reuse |
 | `map_bytes` | `Map[R, K, V] -> int` | bytes this Map currently holds |
 
+**Explicit compaction on C is a reclamation point.** A value read from a
+Map or Vec may still refer to its private arena. Finish using such reads
+before calling `map_compact`, `vec_compact`, `map_recycle` or `vec_recycle`
+on that container: the running stack does not pin those values. To keep an
+immutable snapshot across compaction, copy it out as a region result, for
+example `let saved = region Copy { map_get m key } in ...`. The copy lives
+in the enclosing region. The suspended-coroutine pinning described above
+protects stopped stacks separately. The
+[suffix fixture](../test/parity/map_set_suffix.mere) checks a copied list
+snapshot across replacement and compaction.
+
 **`OwnedVec`**: `owned_vec_get : OwnedVec[T] -> int -> T` joins `owned_vec_new` /
 `push` / `len` / `to_vec`, which are in language-reference.
 

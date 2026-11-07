@@ -649,18 +649,24 @@ mere -ll examples/map_codegen.mere | clang -x ir - -o map && ./map   # → 640
 
 # Wasm codegen (requires wabt / Node.js)
 mere -w examples/vec_codegen_wasm_typed.mere > v.wat
-wat2wasm v.wat -o v.wasm
-node -e 'WebAssembly.instantiate(require("fs").readFileSync("v.wasm"),
-  { env: { puts: () => 0 } }).then(r => console.log(r.instance.exports.main()))'
+wat2wasm --enable-tail-call --enable-threads v.wat -o v.wasm
+node scripts/run_wasm.js v.wasm
 # → 252
 ```
 
-Remaining work (see DEFERRED §1.2 / §1.3):
+Builtin factories can also be used as values on interpreter, C, LLVM and
+Wasm when the factory has a concrete return type, for example
+`let make = (vec_new : unit -> Vec[__heap, int]) in ...`.
+An unconstrained `let make = vec_new` can retain a polymorphic return type
+and be refused by codegen; use an annotation or pass it to a concretely typed
+parameter, as in [factory_value.mere](../examples/factory_value.mere).
+Other builtin values follow the operation's backend support;
+[builtin_as_value.mere](../test/parity/builtin_as_value.mere) is an executable example.
 
-- **First-class value use of builtins** (`let f = vec_new in ...`) is not yet codegen-supported — interpreter only. Workaround: write a wrapper like `fn v -> vec_push v x`.
-- **Auto scope-bound Drop for OwnedVec** is not supported — explicit `with v = owned_vec_new () in body` frees at scope end; without it, bulk-freed at main exit.
-- **The borrow checker doesn't track Vec internals at element granularity** — the mode at the point of borrowing the Vec is machine-checked; details like borrowing a `vec_get` result come later.
-- **Payload-mixed variants as Map K on LLVM / Wasm** are restricted to uniform-payload (MVP); C allows mixed.
+For scope-bound `OwnedVec` cleanup, use
+`with v = owned_vec_new () in body`; an ordinary binding does not infer a
+scope-end drop. See [the memory model](memory-model.md) for borrowing,
+container ownership and reclamation rules.
 
 For the full Q-010 design see the internal design notes.
 
@@ -926,11 +932,20 @@ For details see [codegen.md](codegen.md).
 
 Interpreter mode (`mere file.mere`) and codegen output match for the same program (including formatting like `[1, 2, 3]`). At **4-backend feature parity**, int / functions / strings / tuples / records / variants / closures / polymorphism / recursive variants / complex patterns / show / region / view / `with` Drop / list pretty-printing / Q-010 collections (Vec / OwnedVec / StrBuf / Map) + higher-order API + conversions + len + with-Drop / signature spread / Result helpers / try_or / inner-fn lifting / top-level value-binding globalization / str_compare / FFI (extern fn) all work (reached incrementally through Phases 15-32).
 
-The **feature-parity gap** between interpreter and the 3 codegen backends is now nearly zero; remaining items:
-- **First-class value use of builtins** (`let f = vec_new in ...`) is interpreter-only (future work).
-- **Auto scope-bound Drop for OwnedVec** isn't supported (explicit `with` or main-exit bulk free only; NLL / linear types are future work).
-- `float` / `'a list`-typed builtins (`read_lines` / `args` / `env_var` / `file_exists` etc.) are **interpreter-only** (codegen comes in a separate phase).
-- LLVM / Wasm accept only **uniform payload for Map K with payload variants** (C allows mixed).
+Backend support depends on the operation and its value's shape. Floats,
+builtin factory values, `read_lines`, `args`, `env_var` and `file_exists`
+are implemented on interpreter, C, LLVM and Wasm. Filesystem and environment
+operations use the selected host's facilities. See the
+[standard-library reference](stdlib-reference.md) and
+[host support matrix](host-matrix.md) for individual APIs and host requirements.
+
+Some boundaries remain: `OwnedVec` needs explicit `with` for scope-bound
+cleanup, LLVM does not implement `of_json` decoding, and LLVM refuses a
+function returned from a region block. The [codegen guide](codegen.md) and
+[memory model](memory-model.md) describe these restrictions. Run
+`sh scripts/parity.sh <file> ...` to check a concrete program across the four
+backends; it distinguishes a named refusal from a compilation failure or
+different output.
 
 ## 14. Formatting source (`mere fmt`)
 
