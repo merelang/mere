@@ -180,6 +180,7 @@ fi
 
 if [ "$MODE" != --rv-only ]; then
   MERE="$MERE" python3 "$ROOT/scripts/snapshot_check.py" || exit 1
+  MERE="$MERE" python3 "$ROOT/scripts/with_close_check.py" || exit 1
 fi
 if [ "$fail" != 0 ]; then echo "region_uaf: FAILED"; exit 1; fi
 if [ "$MODE" = --poison ]; then echo "region_uaf --poison: ok (the gate can go red)$rvnote"; else echo "region_uaf: ok$rvnote"; fi

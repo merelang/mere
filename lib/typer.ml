@@ -3907,6 +3907,24 @@ and infer_node (env : env) (e : Ast.expr) : Ast.ty =
           "`with` binding `%s` requires a Drop type (use `let` for Trivial values); \
            got `%s`"
           name (Ast.pp_ty tv)));
+    (* Substitute before constraining and generalizing, so wrappers retain
+       the same close contract as a direct with-expression. *)
+    (match Ast.walk tv with
+     | Ast.TyCon (record, args) ->
+       (match Hashtbl.find_opt records record with
+        | Some info ->
+          (match List.assoc_opt "close" info.r_fields with
+           | Some close ->
+             let close = subst_type_params (List.combine info.r_params args) close in
+             let actual = Ast.pp_ty close in
+             (try unify e.loc close (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit))
+              with Type_error _ ->
+                raise (Type_error (e.loc, Printf.sprintf
+                  "`with` binding `%s`: close must have type unit -> unit; got `%s`"
+                  name actual)))
+           | None -> ())
+        | None -> ())
+     | _ -> ());
     let sch = generalize env tv in
     infer ((name, sch) :: env) body
   | Ast.Region_block (name, body) ->

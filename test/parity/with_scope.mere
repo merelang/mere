@@ -41,6 +41,10 @@ let _ = print_int (try_or (fn () ->
 // A parameterized record with close in the first field uses the same layout.
 drop type 'a Box = { close: unit -> unit, value: 'a };
 let _ = print_int (with boxed = Box { close = fn () -> vec_push events 12, value = [2, 3] } in list_sum boxed.value);
+// The with-expression constrains a generic close field through this wrapper.
+drop type 'a Closing = { close: 'a };
+let use = fn (r: 'a Closing) -> with cap = r in 42;
+let _ = print_int (use (Closing { close = fn () -> vec_push events 13 }));
 // Enough nested resources to spill bindings beyond callee-saved registers.
 let many = fn () ->
   with r0 = acquire 20,

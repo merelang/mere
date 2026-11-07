@@ -3769,6 +3769,27 @@ let () =
        c1.id + c2.id")
     "3";
 
+  List.iter (fun (label, source) ->
+    check_raises_containing ("with rejects " ^ label)
+      "close must have type unit -> unit"
+      (fun () -> Pipeline.process source)
+  ) [
+    "non-function close", "drop type C = { close: int }; with r = C { close = 1 } in 42";
+    "non-unit argument", "drop type C = { close: int -> unit }; with r = C { close = print_int } in 42";
+    "non-unit result", "drop type C = { close: unit -> int }; with r = C { close = fn () -> 1 } in 42";
+    "extra argument", "drop type C = { close: unit -> unit -> unit }; with r = C { close = fn () -> fn () -> () } in 42";
+    "generic field", "drop type 'a C = { close: 'a }; with r = C { close = 1 } in 42";
+    "generic argument", "drop type 'a C = { close: 'a -> unit }; with r = C { close = print_int } in 42";
+    "generic result", "drop type 'a C = { close: unit -> 'a }; with r = C { close = fn () -> 1 } in 42";
+  ];
+  check "with constrains an unresolved generic close field"
+    (Pipeline.process
+      "drop type 'a C = { close: 'a }; let use = fn (r: 'a C) -> with x = r in 42; use (C { close = fn () -> () })")
+    "42";
+  check_raises "with wrapper cannot generalize the close constraint away"
+    (fun () -> Pipeline.process
+      "drop type 'a C = { close: 'a }; let use = fn (r: 'a C) -> with x = r in 42; use (C { close = 1 })");
+
   (* --- C codegen (Phase 4) ---
      Content-fragment checks: assert key substrings appear (or don't).
      Full snapshot would be brittle across header changes. *)

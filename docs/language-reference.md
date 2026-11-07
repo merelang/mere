@@ -278,9 +278,10 @@ if cond then print "msg"            // side-effect-only; body must be unit-typed
 
 `with c = v in body` is for **resources with Drop** (DB connections / file handles / mutexes etc.). The bound value's type must be a `drop type ...`-declared Drop type (use `let` for Trivial values). At scope end, the value's `close: unit -> unit` field is invoked (no-op if absent). Multiple bindings close in **LIFO order**.
 
-On unreleased main, RV32 and RV64 also support `with`. The value is acquired
+Since v0.1.713, RV32 and RV64 also support `with`. The value is acquired
 once, nested bindings close in LIFO order, and cleanup preserves the body's
-result. A record without `close` has no close call. On RISC-V and Wasm,
+result. A present `close` field must have type `unit -> unit`; this is checked
+after substituting record type arguments. A record without `close` has no close call. On RISC-V and Wasm,
 OwnedVec storage retains the target's existing arena lifetime; `with` does
 not add early arena reclamation.
 

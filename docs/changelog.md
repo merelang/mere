@@ -4,7 +4,12 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
-## Unreleased
+## v0.1.713 — 2026-11-07
+
+`with` validates a record's instantiated close field as `unit -> unit`
+before generalizing its binding. Invalid fields are refused during type
+checking, including parameterized resources and wrappers, instead of failing
+at runtime or emitting an invalid call.
 
 RV32 and RV64 support scope-bound `with` resources. Lowering happens before
 reachability, closure capture and frame sizing, so acquisition runs once and
