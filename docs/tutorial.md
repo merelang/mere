@@ -657,7 +657,7 @@ node scripts/run_wasm.js v.wasm
 Builtin factories can also be used as values on interpreter, C, LLVM and
 Wasm when the factory has a concrete return type, for example
 `let make = (vec_new : unit -> Vec[__heap, int]) in ...`.
-On unreleased main, `let make = vec_new` also works when all uses settle on one concrete return
+Since v0.1.712, `let make = vec_new` also works when all uses settle on one concrete return
 type, including aliases. An annotation or a concretely typed parameter remains
 useful when the return type would otherwise stay unresolved, as in
 [factory_value.mere](../examples/factory_value.mere). The

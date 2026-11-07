@@ -1843,7 +1843,7 @@ protects stopped stacks separately. The
 [suffix fixture](../test/parity/map_set_suffix.mere) checks a copied list
 snapshot across replacement and compaction.
 
-**`snapshot : 'a -> 'a` (unreleased) copies an immutable plain value** into the enclosing
+**`snapshot : 'a -> 'a` (v0.1.712) copies an immutable plain value** into the enclosing
 allocation scope, using the same deep copy as a region result. It supports
 scalars, strings, bytes, SIMD values, tuples, and records/variants/lists whose
 contents are also plain. Containers, functions, borrows and capabilities are

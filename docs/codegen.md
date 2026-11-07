@@ -174,7 +174,7 @@ Builtin values are supported when the backend implements the operation and
 its use has a concrete callable type. Factory values such as `vec_new` and
 `map_new` are supported when their return type is concrete, as in
 [factory_value.mere](../examples/factory_value.mere). An unconstrained
-`let make = vec_new` is specialized on unreleased main when it has one concrete use type,
+`let make = vec_new` is specialized since v0.1.712 when it has one concrete use type,
 including through aliases; unresolved uses still need an annotation or a
 concretely typed parameter. Wrapping a call in `fn`
 remains useful when an operation has a backend-specific restriction. See the
