@@ -4,7 +4,7 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
-## Unreleased
+## v0.1.712 — 2026-11-07
 
 Wasm now specializes a factory value whose uses settle on one concrete return
 type, including aliases and nested scopes. Native C emits factory adapters
