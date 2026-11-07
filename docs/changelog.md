@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## Unreleased
+
+RV32 and RV64 support scope-bound `with` resources. Lowering happens before
+reachability, closure capture and frame sizing, so acquisition runs once and
+close continuations preserve the body's result, including after a call in the
+body's final position. Existing normal-return and failure propagation rules
+are preserved. The complete factory fixture now also runs on both widths.
+The hosted boundary gate requires the factory and scope fixtures to compile,
+exit successfully and match explicit output oracles at both widths; these
+cases cannot disappear into the corpus's named compile refusals.
+
+Wasm `with` now loads a record's close field using the current eight-byte
+value layout, wraps pointers for memory access and supplies i64 closure
+arguments. The scope fixture exposed the old four-byte access sequence,
+which emitted WAT that did not validate for a resource with a close field.
+LLVM close extraction now uses the instantiated record aggregate and the
+current i64 unit calling convention, including parameterized Drop records.
+
+The README execution gate moves from compiler to containers. It retains the
+full unit-suite rerun used to verify the README count, every transcript
+command and the external-directory program. All 191 gates, nine groups and
+four build configurations remain required. Routing controls pin the README
+gate and the containers preflight checks dune explicitly.
+
 ## v0.1.712 — 2026-11-07
 
 Wasm now specializes a factory value whose uses settle on one concrete return

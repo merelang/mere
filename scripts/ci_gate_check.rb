@@ -13,6 +13,7 @@ module CIGates
   EXPECTED_CHECKS = 191
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
+  FIRST_RUN = "first_run_check (the README, executed)"
   CHECKOUT = "Check out the dogfood repositories"
   CACHE = "Restore the downstream compile cache"
   PACKAGES = "Install package dependencies"
@@ -117,6 +118,7 @@ module CIGates
     require!(checks.map { |s| s["name"] }.uniq.length == checks.length, "check names must be unique")
     require!(RV_EXEC.keys.all? { |n| checks.count { |s| s["name"] == n } == 1 },
              "all three RISC-V execution partitions must run once")
+    require!(checks.count { |s| s["name"] == FIRST_RUN } == 1, "the README execution gate must run once")
     require!(checks.count { |s| s["name"] == FULL_TESTS } == 1, "the full toolchain unit suite must run once")
     require!(checks.count { |s| s["name"] == CHECKOUT } == 1, "downstream checkouts must be present")
     require!(checks.count { |s| s["name"] == CACHE } == 1, "the downstream compile cache must be present")
@@ -135,6 +137,11 @@ module CIGates
         require!(selected == ["riscv"] && !step["continue-on-error"],
                  "global tool preflight controls need the complete RISC-V toolchain")
         assigned.fetch("riscv") << name
+      when FIRST_RUN
+        require!(selected == ["containers"], "the README gate belongs to containers")
+        require!(step["run"] == "opam exec -- sh scripts/first_run_check.sh",
+                 "the README gate must retain the executed transcript and full test-count check")
+        assigned.fetch("containers") << name
       when CHECKOUT
         require!(selected.sort == CHECKOUT_GROUPS, "downstream and every RISC-V oracle group need checkouts")
         require!(!step["continue-on-error"], "missing required oracle checkouts must fail the group")
@@ -204,6 +211,10 @@ module CIGates
       "optional oracle checkout" => ->(c) { c[:checkout]["continue-on-error"] = true },
       "optional memu" => ->(c) { c[:checkout]["env"]["MERE_REQUIRE_MEMU"] = "false" },
       "shared writable cache" => ->(c) { c[:cache]["if"] = "${{ !cancelled() && (matrix.group == 'compiler' || matrix.group == 'downstream') }}" },
+      "missing README gate" => ->(c) { c[:steps].reject! { |s| s["name"] == FIRST_RUN } },
+      "renamed README gate" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["name"] = "README renamed" },
+      "README in wrong group" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" },
+      "empty README gate" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["run"] = "true" },
       "missing full suite" => ->(c) { c[:steps].delete(c[:full]) },
       "empty full suite" => ->(c) { c[:full]["run"] = "true" },
       "missing required preflight" => ->(c) { c[:steps].reject! { |s| s["name"] == PREFLIGHT } },

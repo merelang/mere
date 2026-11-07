@@ -5416,12 +5416,16 @@ and emit_expr (e : Ast.expr) : unit =
        emit_instr (Printf.sprintf "local.set %d" result_slot);
        let cl_slot = fresh_local () in
        emit_instr (Printf.sprintf "local.get %d" v_slot);
-       emit_instr (Printf.sprintf "i32.load offset=%d" (4 * idx));
+       emit_instr "i32.wrap_i64";
+       emit_instr (Printf.sprintf "i64.load offset=%d" (8 * idx));
        emit_instr (Printf.sprintf "local.set %d" cl_slot);
        emit_instr (Printf.sprintf "local.get %d" cl_slot);
+       emit_instr "i32.wrap_i64";
        emit_instr "i32.load offset=0";  (* env *)
-       emit_instr "i32.const 0";        (* unit arg *)
+       emit_instr "i64.extend_i32_u";
+       emit_instr "i64.const 0";        (* unit arg *)
        emit_instr (Printf.sprintf "local.get %d" cl_slot);
+       emit_instr "i32.wrap_i64";
        emit_instr "i32.load offset=4";  (* fn_idx *)
        emit_instr "call_indirect (type $cl)";
        emit_instr "drop";               (* discard close's return *)

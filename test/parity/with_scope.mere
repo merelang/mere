@@ -1,0 +1,65 @@
+// Scope-bound resources: acquisition, captured closes, LIFO and result values.
+drop type Resource = { id: int, close: unit -> unit };
+drop type Plain = { id: int };
+let events = vec_new ();
+let acquisitions = vec_new ();
+let _ = vec_push acquisitions 0;
+let acquire = fn id ->
+  let _ = vec_set acquisitions 0 (vec_get acquisitions 0 + 1) in
+  Resource { id = id, close = fn () -> vec_push events id };
+// This name would collide with the first generated result binder.
+let collision = fn () ->
+  with __rv_with_result_0 = acquire 1 in __rv_with_result_0.id + 10;
+let _ = print_int (collision ());
+let nested = fn () ->
+  with outer = acquire 2, inner = acquire 3 in
+  let _ = vec_push events 0 in
+  (outer.id + inner.id, "body");
+let (total, label) = nested ();
+let _ = print (str_of_int total ++ " " ++ label);
+let _ = print_int (with p = Plain { id = 7 } in p.id + 1);
+let resource = 99;
+let shadow = fn resource ->
+  with resource = acquire resource in resource.id + 1;
+let _ = print_int (shadow 4);
+let _ = print_int resource;
+let captured = fn n ->
+  with r = acquire n in
+  let inner = fn x -> r.id + x in inner 5;
+let _ = print_int (captured 6);
+let target = fn n -> n + 1;
+let tail = fn n -> with r = acquire n in target r.id;
+let _ = print_int (tail 7);
+// A failure caught inside the body returns normally and closes the resource.
+let _ = print_int (with r = acquire 8 in try_or (fn () -> fail "caught") 55);
+// Existing with semantics do not unwind closes when failure leaves the body.
+let _ = print_int (try_or (fn () -> with r = acquire 9 in fail "escaping") 66);
+// Failure in close propagates; outer closes are not exception finalizers.
+let _ = print_int (try_or (fn () ->
+  with outer = acquire 10,
+       inner = Resource { id = 11, close = fn () -> fail "close" } in 0) 77);
+// A parameterized record with close in the first field uses the same layout.
+drop type 'a Box = { close: unit -> unit, value: 'a };
+let _ = print_int (with boxed = Box { close = fn () -> vec_push events 12, value = [2, 3] } in list_sum boxed.value);
+// Enough nested resources to spill bindings beyond callee-saved registers.
+let many = fn () ->
+  with r0 = acquire 20,
+       r1 = acquire 21,
+       r2 = acquire 22,
+       r3 = acquire 23,
+       r4 = acquire 24,
+       r5 = acquire 25,
+       r6 = acquire 26,
+       r7 = acquire 27,
+       r8 = acquire 28,
+       r9 = acquire 29,
+       r10 = acquire 30,
+       r11 = acquire 31,
+       r12 = acquire 32,
+       r13 = acquire 33,
+       r14 = acquire 34,
+       r15 = acquire 35 in
+  list_sum [r0.id, r1.id, r2.id, r3.id, r4.id, r5.id, r6.id, r7.id, r8.id, r9.id, r10.id, r11.id, r12.id, r13.id, r14.id, r15.id];
+let _ = print_int (many ());
+let _ = print_int (vec_get acquisitions 0);
+print (str_join "," (list_map (vec_to_list events) str_of_int))

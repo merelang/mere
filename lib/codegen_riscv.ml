@@ -2740,7 +2740,7 @@ and compile_node (env : env) (e : Ast.expr) : unit =
     li t0 hi; emit_word (enc_s (0 * wsz ()) t0 t1 (stf3 ()) 0x23);          (* sw hi, 0(t1) *)
     li t0 lo; emit_word (enc_s (wsz ()) t0 t1 (stf3 ()) 0x23);          (* sw lo, 4(t1) *)
     emit_word (enc_i 0 t1 0 a0 0x13)                     (* mv a0, t1 *)
-  | Ast.With _ -> err e.loc "RV32I: `with` expressions are not supported yet"
+  | Ast.With _ -> err e.loc "RV32I internal: with-expression was not lowered"
   | Ast.Ref _ -> err e.loc "RV32I: `&` references are not supported yet"
   | Ast.Record_update (base, updates) ->
     let recname =
@@ -8668,7 +8668,58 @@ let prepare_main (prog : Ast.program) : Ast.expr =
   | Monomorph.Unsupported (loc, what) -> err loc ("RV: " ^ what)
   | Monomorph.Error (loc, msg) -> err loc msg
 
+(* Lower scope-bound resources before reachability, closure capture and frame
+   sizing. Ordinary lets keep acquisition single-shot, preserve the body's
+   result, and prevent a tail call from bypassing the close continuation.
+   Like the other backends, close runs after a normally returning body; this
+   does not add exception unwinding. OwnedVec storage follows the target's
+   existing arena lifetime, as on Wasm. *)
+let lower_with (prog : Ast.program) : Ast.program =
+  let serial = ref 0 in
+  let fresh_result resource =
+    let rec next () =
+      let name = "__rv_with_result_" ^ string_of_int !serial in
+      incr serial;
+      if name = resource then next () else name
+    in next ()
+  in
+  let rec rewrite e = Ast.rv_map_scoped ~shadow:[] replace e
+  and replace _ (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.With (name, value, body) ->
+      let value = rewrite value and body = rewrite body in
+      let close_ty = match Option.map Ast.walk value.Ast.ty with
+        | Some (Ast.TyCon (record, _)) ->
+          (match Hashtbl.find_opt Typer.records record with
+           | Some info -> List.assoc_opt "close" info.Typer.r_fields
+           | None -> None)
+        | _ -> None
+      in
+      let continuation = match close_ty with
+        | None -> body
+        | Some close_ty ->
+          let result = fresh_result name in
+          let resource = { value with Ast.node = Ast.Var name } in
+          let close = { e with Ast.node = Ast.Field_get (resource, "close"); ty = Some close_ty } in
+          let unit = { e with Ast.node = Ast.Unit_lit; ty = Some Ast.TyUnit } in
+          let call = { e with Ast.node = Ast.App (close, unit); ty = Some Ast.TyUnit } in
+          let saved = { e with Ast.node = Ast.Var result } in
+          let after = { e with Ast.node = Ast.Let ({ Ast.ploc = e.loc; pnode = Ast.P_wild }, call, saved) } in
+          (* Only synthetic reads occur inside this result binder. The source
+             body is its RHS; excluding the resource name keeps close hygienic. *)
+          { e with Ast.node = Ast.Let ({ Ast.ploc = e.loc; pnode = Ast.P_var result }, body, after) }
+      in
+      Some { e with Ast.node = Ast.Let ({ Ast.ploc = e.loc; pnode = Ast.P_var name }, value, continuation) }
+    | _ -> None
+  in
+  let decls = List.map (function
+    | Ast.Top_let (p, e) -> Ast.Top_let (p, rewrite e)
+    | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, e) -> n, l, rewrite e) bs)
+    | d -> d) prog.decls in
+  { Ast.decls; main = rewrite prog.main }
+
 let build_items_sized (prog : Ast.program) : item list =
+  let prog = lower_with prog in
   let prog = Ast.lower_snapshots prog in
   let full = prepare_main prog in
   code_span := 0x200000;

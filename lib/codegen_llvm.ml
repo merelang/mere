@@ -8812,12 +8812,11 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     in
     (* Discover record type name + struct + close field index (if any). *)
     let close_info =
-      match value_ty with
-      | Ast.TyCon (n, _) when Hashtbl.mem Typer.records n ->
-        let fields = record_fields n in
+      match record_fields_of value_ty with
+      | Some (struct_name, fields) ->
         let rec find_close i = function
           | [] -> None
-          | (fname, fty) :: _ when fname = "close" -> Some (i, fty, n)
+          | (fname, fty) :: _ when fname = "close" -> Some (i, fty, struct_name)
           | _ :: rest -> find_close (i + 1) rest
         in
         find_close 0 fields
@@ -8842,7 +8841,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
        emit_instr (Printf.sprintf "  %s = extractvalue %s %s, 1"
                      fn_r cname close_cl);
        let _ = fresh_reg () in
-       emit_instr (Printf.sprintf "  call i32 %s(ptr %s, i32 0)" fn_r env_r));
+       emit_instr (Printf.sprintf "  call i64 %s(ptr %s, i64 0)" fn_r env_r));
     (* Phase 15.13: scope-bound Drop for OwnedVec. Free the data buffer
        and zero out the struct's data pointer so the registry's
        free_all sweep at main-end won't double-free (free(NULL) is a

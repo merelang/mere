@@ -652,9 +652,36 @@ else
 fi
 echo "rv_exec: $wfpass passed, $wffail failed for write_file/read_stdin (both widths, and --bare still refuses)"
 
+# Scope cleanup is a required contract, not an allowed corpus refusal. These
+# oracles are hand-written rather than derived from another backend.
+for name in factory_inference with_scope; do
+  for width in 32 64; do
+    if [ "$width" = 32 ]; then runner="$RVRUN"; flag=-rv
+    else runner="$RVRUN64"; flag=-rv64; fi
+    [ -n "$runner" ] || continue
+    if ! "$MERE" "$flag" --ram 32 "$ROOT/test/parity/$name.mere" > "$TMP/prog.bin" 2>"$TMP/rverr"; then
+      printf '  FAIL  %s:%s did not build\n' "$name" "$width"
+      head -3 "$TMP/rverr"; fail=$((fail+1)); rc=1; continue
+    fi
+    ( cd "$TMP" && perl -e 'alarm 60; exec @ARGV' "$runner" 32 ) > "$TMP/r.raw" 2>&1
+    status=$?
+    grep -a -v '^rvrun' "$TMP/r.raw" > "$TMP/r.out"
+    if [ "$status" -eq 0 ] && cmp -s "$ROOT/test/parity/$name.expected" "$TMP/r.out"; then
+      printf '  ok    %s:%s (scope cleanup and body result match the explicit oracle)\n' "$name" "$width"
+      pass=$((pass+1))
+    else
+      printf '  FAIL  %s:%s (exit %s or wrong output)\n' "$name" "$width" "$status"
+      diff -a "$ROOT/test/parity/$name.expected" "$TMP/r.out" | head -8
+      fail=$((fail+1)); rc=1
+    fi
+  done
+done
+
 fi
 
-if [ "$MODE" != --corpus64 ]; then
+if [ "$MODE" = --contracts ]; then
+  echo "rv_exec: $pass passed, $fail failed in additional boundary checks (both widths)"
+elif [ "$MODE" != --corpus64 ]; then
   if [ -z "$RVRUN" ]; then
     echo "rv_exec: $pass built, $fail failed — nothing RAN; set MEMU=<memu checkout> for that half"
   else

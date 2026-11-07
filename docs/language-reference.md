@@ -277,6 +277,19 @@ if cond then print "msg"            // side-effect-only; body must be unit-typed
 ### with (scope-bound resources with Drop, Phase 3.1)
 
 `with c = v in body` is for **resources with Drop** (DB connections / file handles / mutexes etc.). The bound value's type must be a `drop type ...`-declared Drop type (use `let` for Trivial values). At scope end, the value's `close: unit -> unit` field is invoked (no-op if absent). Multiple bindings close in **LIFO order**.
+
+On unreleased main, RV32 and RV64 also support `with`. The value is acquired
+once, nested bindings close in LIFO order, and cleanup preserves the body's
+result. A record without `close` has no close call. On RISC-V and Wasm,
+OwnedVec storage retains the target's existing arena lifetime; `with` does
+not add early arena reclamation.
+
+A scope closes after its body returns normally. A failure caught inside the
+body still permits cleanup. A failure that leaves the body skips its close;
+a failing close propagates and skips outer closes. `with` is not an exception
+finalizer. The [scope fixture](../test/parity/with_scope.mere) checks this order,
+shadowing, captured closes and preserved results across the backends.
+
 ```
 drop type Conn = { id: int, close: unit -> unit };
 let mk_conn = fn id ->
@@ -329,7 +342,7 @@ region R {
 }
 ```
 
-**`Trivial[R]` constraint (Phase 2.6)**: only types **without Drop semantics** (Trivial) can be placed in a region. Drop types are declared with `drop type Name = ...`; including such a type in a region (`&R v` / `R.alloc(v)` / view fields) is a type error. This is "a constraint that allows bulk region freeing"; caps that need Drop (DB connections / file handles etc.) are separately managed by a future `with` expression.
+**`Trivial[R]` constraint (Phase 2.6)**: only types **without Drop semantics** (Trivial) can be placed in a region. Drop types are declared with `drop type Name = ...`; including such a type in a region (`&R v` / `R.alloc(v)` / view fields) is a type error. This is "a constraint that allows bulk region freeing"; caps that need Drop (DB connections / file handles etc.) are separately managed by `with` expressions.
 ```
 drop type Conn = { id: int };
 
