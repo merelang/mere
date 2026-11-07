@@ -77,6 +77,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 cat > "$TMP/overrides" <<'CASES'
 print_bytes|let _ = print_bytes (bytes_of_str "x"); 0
+snapshot|snapshot 42
 read_file|let s = read_file "/dev/null"; str_len s
 write_file|let _ = write_file "/dev/null" "x"; 0
 read_file_bytes|let v = read_file_bytes "/dev/null"; vec_len v

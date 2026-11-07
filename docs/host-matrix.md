@@ -199,6 +199,7 @@ machine rather than a host.
 | `sign` | yes | yes | yes | yes |
 | `sin` | yes | yes | yes | yes |
 | `sleep_ms` | yes | yes | yes | yes |
+| `snapshot` | yes | yes | yes | yes |
 | `spawn` | yes | yes | yes | yes |
 | `sqrt` | yes | yes | yes | yes |
 | `square` | yes | yes | yes | yes |

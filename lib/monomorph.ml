@@ -723,7 +723,7 @@ let has_unresolved_use_of (name : string) (exprs : Ast.expr list) : bool =
   in
   List.iter go exprs; !found
 
-let specialize_single_use_local_fns (root : Ast.expr) : unit =
+let specialize_single_use_local_fns ?(functions = true) (root : Ast.expr) : unit =
   let changed = ref true in
   let specialize vty t =
     try
@@ -735,7 +735,7 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
     (match e.Ast.node with
      | Ast.Let ({ Ast.pnode = Ast.P_var n; _ },
                 ({ Ast.node = Ast.Fun _; ty = Some vty; _ } as value), body)
-       when not (ty_is_concrete (Ast.walk vty)) ->
+       when functions && not (ty_is_concrete (Ast.walk vty)) ->
        (match find_all_concrete_arrows_in ~scope_lets:true n [body] with
         | [arrow] when not (has_unresolved_use_of n [body]) ->
           specialize vty arrow
@@ -754,7 +754,7 @@ let specialize_single_use_local_fns (root : Ast.expr) : unit =
         | [t] when not (has_unresolved_use_of n [body]) ->
           specialize vty t
         | _ -> ())
-     | Ast.Let_rec (bindings, body) ->
+     | Ast.Let_rec (bindings, body) when functions ->
        (* Single-use specialization for a local `let rec` group, RESTRICTED to
           trait-constrained members (a dictionary-taking fn produced by
           trait_elab, whose first parameter is a `<Trait>__dict` record). This

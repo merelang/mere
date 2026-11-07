@@ -80,6 +80,10 @@ run_bin() { perl -e 'alarm 20; exec @ARGV' "$1" 2>&1; }
 # allocator prints about it is not the program's.
 run_poisoned() { env MallocScribble=1 MALLOC_PERTURB_=85 perl -e 'alarm 20; exec @ARGV' "$1" 2>&1 | grep -v 'malloc: enabling scribbling'; }
 
+# The resumed-pinner control forces reclamation when a recorded pinner is
+# running. Removing just its keep flag could leave an incidental conservative
+# pin on another stack, hiding the fault despite identical emitted code.
+
 build() {  # $1 = program, $2 = c|ll, [$3 = sed expression] -> $T/bin, or prints why not
   "$MERE" "-$2" "$FX/$1.mere" > "$T/g.$2" 2>"$T/emit.err" || { echo "EMITFAIL $(head -1 "$T/emit.err")"; return 1; }
   if [ -n "${3:-}" ]; then
@@ -160,7 +164,7 @@ channel_from_block|ll|the message is sent as the pointer|s/= call ptr @__mcopy_s
 recycled_escape|c|only the moved storage is kept, not where the struct lives|s/ __lang_region_keep(v->home, r); / /
 recycle_dedicated|c|a recycle claims 4 KB on the block it kept|s/^    r->cap = b->pad;$/    r->cap = 4096;/
 coro_pin_reach|c|the pin reads the stack and not what it points at|s/^  __lang_pin_reach(c);$//
-coro_pin_resumed|c|a retired arena is tried while its pinner runs|s/if (o.by\[j\] == curh) keep = 1;//
+coro_pin_resumed|c|a retired arena is freed while its pinner runs|perl:s/if \(o.by\[j\] == curh\) keep = 1;/if (o.by[j] == curh) keep = 2;/; s/if \(keep\) __lang_retired\[w\+\+\] = o;/if (keep == 2) { free(o.by); __lang_region_free(o.r); free(o.r); } else if (keep) __lang_retired[w++] = o;/
 vec_recycle_pin|c|vec_recycle asks the pin about the growth only, as map_recycle does|s/__lang_region_pinned(v->region, 0)) {/__lang_region_pinned(v->region, 1) \&\& v->region->blocks->prev) {/
 channel_xthread|c|a message region goes on the list of the thread that made it|s/__lang_region_init_x(mr, 256, 1)/__lang_region_init_x(mr, 256, 0)/'
   printf '%s\n' "$POISONS" | while IFS='|' read -r f be what expr; do
@@ -174,5 +178,8 @@ channel_xthread|c|a message region goes on the list of the thread that made it|s
   [ -f "$T/pfailed" ] && { echo "region_uaf --poison: FAILED"; exit 1; }
 fi
 
+if [ "$MODE" != --rv-only ]; then
+  MERE="$MERE" python3 "$ROOT/scripts/snapshot_check.py" || exit 1
+fi
 if [ "$fail" != 0 ]; then echo "region_uaf: FAILED"; exit 1; fi
 if [ "$MODE" = --poison ]; then echo "region_uaf --poison: ok (the gate can go red)$rvnote"; else echo "region_uaf: ok$rvnote"; fi

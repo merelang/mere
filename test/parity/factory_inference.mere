@@ -1,0 +1,24 @@
+// Unannotated factory values acquire one concrete return type from their
+// uses, including through aliases and a nested scope with the same name.
+let make = vec_new;
+let alias = make;
+let v = alias ();
+let _ = vec_push v 42;
+let again = make ();
+let _ = vec_push again 43;
+let _ = print_int (vec_get v 0);
+let _ = print_int (vec_get again 0);
+let make_map = map_new;
+let m = make_map ();
+let _ = map_set m "answer" "forty-four";
+let _ = print (map_get m "answer");
+let nested = fn () ->
+  let make = vec_new in
+  let v = make () in
+  let _ = vec_push v "forty-five" in
+  vec_get v 0;
+let _ = print (nested ());
+let make_owned = owned_vec_new;
+with owned = make_owned () in
+let _ = owned_vec_push owned 46 in
+print_int (owned_vec_get owned 0)

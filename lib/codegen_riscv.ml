@@ -2724,7 +2724,10 @@ and compile_node (env : env) (e : Ast.expr) : unit =
     emit (LoadAddr (a0, label))                                     (* a0 = &block *)
   (* v0.1.658: see compile_region *)
   | Ast.Region_loop (_, x, body) -> compile_region env e body (Some x)
-  | Ast.Region_block (_, body) -> compile_region env e body None
+  | Ast.Region_block (name, body) ->
+    if name = Ast.snapshot_region_name then
+      Option.iter (Typer.check_snapshot_bound e.Ast.loc) e.Ast.ty;
+    compile_region env e body None
   | Ast.Float_lit f ->
     let b = Int64.bits_of_float f in
     (* v0.1.656: on RV64 the halves are stored as the arithmetic stores them
@@ -8666,6 +8669,7 @@ let prepare_main (prog : Ast.program) : Ast.expr =
   | Monomorph.Error (loc, msg) -> err loc msg
 
 let build_items_sized (prog : Ast.program) : item list =
+  let prog = Ast.lower_snapshots prog in
   let full = prepare_main prog in
   code_span := 0x200000;
   let rec settle round items =

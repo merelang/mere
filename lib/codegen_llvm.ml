@@ -8721,6 +8721,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
     emit_instr (Printf.sprintf "  call void @__lang_region_block_release(ptr %s)" rv);
     out
   | Ast.Region_block (name, body) ->
+    if name = Ast.snapshot_region_name then
+      Option.iter (Typer.check_snapshot_bound e.Ast.loc) e.Ast.ty;
     (* Allocate a fresh region locally, run body within it, free at exit.
        The region's SSA ptr is pushed onto current_regions so Ref / view
        constructions inside body find it by name. *)
@@ -18574,6 +18576,7 @@ let rewrite_of_json (prog : Ast.program) : Ast.program =
   { Ast.main; decls = decls0 @ List.rev !decls }
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  let prog = Ast.lower_snapshots prog in
   let prog = rewrite_read_lines prog in
   let prog = rewrite_of_json prog in
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.

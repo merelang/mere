@@ -1609,9 +1609,21 @@ jobs:
       # had to pass. When it was finally run on 2026-09-24 it was RED:
       # int_width_boundary, added to the parity suite for a different question,
       # differs by construction on a 32-bit target.
-      - name: rv_exec (the RISC-V backend against the C backend, hosted side)
+      - name: rv_exec_partition (all-mode and CI partition invocations agree)
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
+        run: python3 scripts/rv_exec_partition_check.py
+
+      - name: rv_exec contracts (hosted boundaries at both widths)
         if: ${{ !cancelled() && matrix.group == 'riscv' }}
-        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_exec_check.sh
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_exec_check.sh --contracts
+
+      - name: rv_exec corpus32 (the full corpus against C)
+        if: ${{ !cancelled() && matrix.group == 'coroutines' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_exec_check.sh --corpus32
+
+      - name: rv_exec corpus64 (the full corpus against C)
+        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
+        run: MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/rv_exec_check.sh --corpus64
 
       - name: rv_vec_owner (logical threads own Vecs, RV32 and RV64 against C)
         if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}

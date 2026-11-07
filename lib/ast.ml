@@ -1473,6 +1473,47 @@ let rec rv_map_scoped ~(shadow : string list) (f : string list -> expr -> expr o
     | Field_get (a, fl) -> { e with node = Field_get (g shadow a, fl) }
     | Record_update (a, fs) -> { e with node = Record_update (g shadow a, List.map (fun (fl, x) -> (fl, g shadow x)) fs) }
 
+(* Lower a typed snapshot to the existing region-result copier before backend
+   analysis. Evaluate the argument once, outside the scratch region, so an
+   argument's allocation and mutation effects stay in their original scope.
+   A value-position use becomes an ordinary closure with the same operation. *)
+let snapshot_region_name = "__snapshot_region"
+
+let lower_snapshots (prog : program) : program =
+  let copied loc ty value =
+    let name = "__snapshot_value" in
+    let read = { loc; ty; node = Var name } in
+    let block = { loc; ty; node = Region_block (snapshot_region_name, read) } in
+    { loc; ty; node = Let ({ ploc = loc; pnode = P_var name }, value, block) }
+  in
+  let rec rewrite shadow e = rv_map_scoped ~shadow replace e
+  and replace shadow e =
+    match e.node with
+    | App ({ node = Var "snapshot"; _ }, arg) when not (List.mem "snapshot" shadow) ->
+      Some (copied e.loc e.ty (rewrite shadow arg))
+    | Var "snapshot" when not (List.mem "snapshot" shadow) ->
+      (match Option.map walk e.ty with
+       | Some (TyArrow (a, b)) ->
+         let name = "__snapshot_arg" in
+         let arg = { loc = e.loc; ty = Some a; node = Var name } in
+         Some { e with node = Fun (name, Some a, copied e.loc (Some b) arg) }
+       | _ -> None)
+    | _ -> None
+  in
+  let shadow = ref [] in
+  let decls = List.map (function
+    | Top_let (p, v) ->
+      let v = rewrite !shadow v in
+      shadow := pattern_vars p @ !shadow;
+      Top_let (p, v)
+    | Top_let_rec bs ->
+      shadow := List.map rb_name bs @ !shadow;
+      Top_let_rec (List.map (fun (n, l, v) -> n, l, rewrite !shadow v) bs)
+    | (Top_forward (n, _, _) | Top_extern (n, _)) as d ->
+      shadow := n :: !shadow; d
+    | d -> d) prog.decls in
+  { decls; main = rewrite !shadow prog.main }
+
 (* A structural copy with every `ty` cleared: `expr.ty` is mutable and set by
    the typer, so a subtree the pass places twice (the bound in a guard, an
    atomic argument in both branches of a dispatch) gets its own nodes. *)

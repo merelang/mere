@@ -5103,7 +5103,9 @@ and emit_expr (e : Ast.expr) : unit =
     emit_instr "end";
     emit_instr (Printf.sprintf "local.get %d" res_slot);
     wasm_tail_pos := saved_tail
-  | Ast.Region_block (_, body) ->
+  | Ast.Region_block (name, body) ->
+    if name = Ast.snapshot_region_name then
+      Option.iter (Typer.check_snapshot_bound e.Ast.loc) e.Ast.ty;
     (* v0.1.37: regions RECLAIM again — the safe version of the
        save / restore that Phase 16.4 removed as unsound. Three parts
        make it sound where the old version was not:
@@ -11430,6 +11432,7 @@ let rewrite_read_lines (prog : Ast.program) : Ast.program =
         | other -> other) prog.Ast.decls }
 
 let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program) : string =
+  let prog = Ast.lower_snapshots prog in
   let prog = rewrite_read_lines prog in
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
@@ -11701,6 +11704,12 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
     walk root
   in
   resolve_vec_let_types main_expr;
+  (* A generalized factory value may have one concrete use after its result
+     container is resolved. Propagate that use back to the binding before
+     creating its eta adapter, as the native backends do. *)
+  (* Wasm already handles polymorphic functions; only specialize value
+     bindings here, avoiding a new per-function scope scan. *)
+  Monomorph.specialize_single_use_local_fns ~functions:false main_expr;
   (* Phase 32.4 (C1 FFI): walk prog.decls to register extern fn names. *)
   Hashtbl.reset extern_fn_decls_wasm;
   List.iter (fun decl ->

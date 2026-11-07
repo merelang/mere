@@ -2615,7 +2615,16 @@ let rec emit_expr (e : Ast.expr) : string =
        The close field is a `unit -> unit` closure; dispatch via the
        closure struct's `.fn(.env, 0)`. *)
     let value_c = emit_expr value in
-    let body_c = emit_expr body in
+    let prev_types = !current_var_types in
+    let prev_subst = !current_env_subst in
+    current_var_types := VtMap.add name (Option.value value.Ast.ty ~default:Ast.TyUnit) prev_types;
+    current_env_subst := List.filter (fun (n, _) -> n <> name) prev_subst;
+    let body_c =
+      Fun.protect (fun () -> emit_expr body) ~finally:(fun () ->
+        current_var_types := prev_types;
+        current_env_subst := prev_subst)
+    in
+    let name = c_safe_name name in
     let close_call =
       match value.Ast.ty with
       | Some t ->
@@ -5033,6 +5042,8 @@ let rec emit_expr (e : Ast.expr) : string =
     in
     "((" ^ struct_name ^ "){" ^ String.concat ", " init_fields ^ "})"
   | Ast.Region_block (name, body) ->
+    if name = Ast.snapshot_region_name then
+      Option.iter (Typer.check_snapshot_bound e.Ast.loc) e.Ast.ty;
     (* Allocate a region buffer, evaluate body, free. The region's C
        local name is `__region_<name>` — accessed by Ref/`&R v` when
        emitting `R.alloc(...)` calls inside body. Default cap 1 MB.
@@ -15873,6 +15884,7 @@ let emit_c_header (prog : Ast.program) : string =
   String.concat "\n" lines ^ "\n"
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  let prog = Ast.lower_snapshots prog in
   (* Q-127: SETTLE EVERY UNDECIDED CONTAINER REGION BEFORE ANYTHING READS ONE.
      A slot can hold a variable up to here, so that a call site inside a `region` block
      can decide it; what is left means nobody did, and it becomes `__heap`.
@@ -18007,7 +18019,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if top_global_decls = [] then []
        else "/* Phase 30.2: top-level non-fn let values as file-scope globals */"
             :: top_global_decls @ [""])
-    @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (let eta_lines =
          Hashtbl.fold (fun adapter (builtin, ret_ty) acc ->
            (* Generate static adapter fn + const value for the eta-wrapped
@@ -18052,6 +18063,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
        if eta_lines = [] then []
        else "/* Phase 35.1: nullary factory builtins as first-class values */"
             :: eta_lines @ [""])
+    (* Lifted function bodies can reference a factory value. Its declaration
+       must precede those bodies, just as its runtime helpers precede it. *)
+    @ (if fn_defs = [] then [] else fn_defs @ [""])
     @ (if !lib_mode then lib_boundary_parts else
       let run_lines =
         [ (* the stack bounds are read here, where the program's first frame is

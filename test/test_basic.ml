@@ -4703,20 +4703,20 @@ let () =
     "typeof(__ref_v)*";
 
   (* --- C codegen: `with` Drop execution (Phase 4.18) --- *)
-  assert_c "codegen: with binding emit"
+  assert_c "codegen: with binding uses a C-safe name"
     (codegen_with_decls
       "drop type CgConn = { id: int, close: unit -> unit };\n\
        let mk = fn id ->\n\
          CgConn { id = id, close = fn () -> () } in\n\
        with c = mk 1 in c.id")
-    "__auto_type c =";
+    "__auto_type mu_c =";
   assert_c "codegen: with calls close field at scope end"
     (codegen_with_decls
       "drop type CgConn2 = { id: int, close: unit -> unit };\n\
        let mk = fn id ->\n\
          CgConn2 { id = id, close = fn () -> () } in\n\
        with c = mk 1 in c.id")
-    "c.mu_close.fn(c.mu_close.env, 0)";
+    "mu_c.mu_close.fn(mu_c.mu_close.env, 0)";
   assert_c "codegen: with on Drop type without close field omits call"
     (codegen_with_decls
       "drop type CgRes = { v: int };\n\
