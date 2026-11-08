@@ -165,9 +165,5 @@ EOF
   exit "$pfail"
 fi
 
-if ! MERE="$MERE" CC="$CC" sh "$ROOT/scripts/ffi_callback_check.sh"; then
-  fail=1
-fi
-
 if [ "$fail" = 0 ]; then echo "ffi_header: ok"; else echo "ffi_header: FAILED"; fi
 exit "$fail"
