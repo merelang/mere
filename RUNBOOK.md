@@ -316,6 +316,15 @@ fail the gate, including when several paths agree on the same wrong output.
 The existing compiler-group gate retains this verification; all 191 gates,
 nine groups and four build configurations remain required.
 
+CI, Pages and release builds populate the opam tool cache through the official
+GitHub release API before running the pinned OCaml setup action. Downloads must
+match the release's sizes and SHA-256 digests and pass detached GPG signature
+verification against the setup action's expected primary key. The completion
+marker is written only after verification and an atomic executable replacement.
+The existing assignment gate checks bootstrap ordering and runs signature,
+digest, interrupted-download and cache-publication controls. Compiler caching,
+all 191 gates and all build configurations remain required.
+
 ## Binary releases
 
 `release-build.yml` is shared by the distribution CI jobs and tagged

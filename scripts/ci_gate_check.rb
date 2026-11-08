@@ -275,6 +275,57 @@ module CIGates
     puts "ci_gates: #{mutations.length} negative controls caught; 36 result combinations checked"
   end
 
+  def self.check_opam_setup(workflows)
+    [["ci.yml", "build"], ["ci.yml", "gate_shards"],
+     ["pages.yml", "build"], ["release-build.yml", "binary"]].each do |file, job|
+      steps = workflows.fetch(file).fetch("jobs").fetch(job).fetch("steps")
+      matches = steps.select { |step| step["name"] == "Cache verified opam" }
+      require!(matches.length == 1, "#{file}/#{job}: signed opam bootstrap must run once")
+      cache = matches.first
+      setup = steps.find { |step| step["name"] == "Set up OCaml" }
+      require!(setup && setup["uses"] == "ocaml/setup-ocaml@ff66428f72b64472e749b22e0ad4dded4b2ddca6",
+               "opam bootstrap must match the audited setup-ocaml tool-cache contract")
+      require!(steps.index(cache) < steps.index(setup), "verified opam must precede compiler setup")
+      require!(cache["run"] == "python3 scripts/ci_opam_setup.py" && cache["timeout-minutes"] == 5 &&
+               cache["env"] == {"GH_TOKEN" => "${{ github.token }}"} &&
+               !cache.key?("if") && !cache["continue-on-error"],
+               "signed opam bootstrap must remain bounded and required")
+    end
+  end
+
+  def self.opam_setup_self_test(workflows)
+    checks = 0
+    [["ci.yml", "build"], ["ci.yml", "gate_shards"],
+     ["pages.yml", "build"], ["release-build.yml", "binary"]].each do |file, job|
+      %w[removed skipped optional timeout command token order contract].each do |poison|
+        copy = Marshal.load(Marshal.dump(workflows))
+        steps = copy.fetch(file).fetch("jobs").fetch(job).fetch("steps")
+        cache = steps.find { |step| step["name"] == "Cache verified opam" }
+        setup = steps.find { |step| step["name"] == "Set up OCaml" }
+        case poison
+        when "removed" then steps.delete(cache)
+        when "skipped" then cache["if"] = false
+        when "optional" then cache["continue-on-error"] = true
+        when "timeout" then cache.delete("timeout-minutes")
+        when "command" then cache["run"] = "true"
+        when "token" then cache.delete("env")
+        when "order" then steps.delete(cache); steps << cache
+        when "contract" then setup["uses"] = "ocaml/setup-ocaml@v3"
+        end
+        begin
+          check_opam_setup(copy)
+        rescue Invalid
+          checks += 1
+          next
+        end
+        raise Invalid, "opam bootstrap control was not caught: #{file}/#{job}/#{poison}"
+      end
+    end
+    _, error, status = Open3.capture3("python3", File.join(__dir__, "ci_opam_setup.py"), "--self-test")
+    require!(status.success?, "signed opam bootstrap controls failed: #{error}")
+    puts "ci_gates: #{checks} opam bootstrap routing controls caught; signature/digest/cache controls passed"
+  end
+
   # Setup bounds also cover the matrix and publication workflows. Compiler
   # setup can take 26 minutes on a cold runner, so it has a separate ceiling
   # from the smaller tool downloads in the integration groups.
@@ -529,10 +580,12 @@ if $PROGRAM_NAME == __FILE__
       workflows[name] = YAML.safe_load(File.read(File.join(File.dirname(path), name)), aliases: false)
     end
     CIGates.check_setup(workflows)
+    CIGates.check_opam_setup(workflows)
     puts "ci_gates: #{assigned.values.sum(&:length)} checks assigned exactly once across #{assigned.length} groups"
     assigned.each { |group, checks| puts "  #{group}: #{checks.length}" }
     CIGates.self_test(workflow) if ARGV.include?("--self-test")
     CIGates.setup_self_test(workflows) if ARGV.include?("--self-test")
+    CIGates.opam_setup_self_test(workflows) if ARGV.include?("--self-test")
   rescue CIGates::Invalid, KeyError, Psych::Exception => e
     warn "ci_gates: #{e.message}"
     exit 1

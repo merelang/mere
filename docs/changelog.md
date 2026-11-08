@@ -34,6 +34,12 @@ validation refuses unsupported callback ABIs and incomplete headers before
 emitting output. Separate C compilation checks captured 64-bit values, record
 and byte arguments, curried/unit callbacks and region scopes at O0/O2.
 
+CI, Pages and release jobs obtain opam through the official release API,
+checking asset sizes, SHA-256 digests and detached signatures before populating
+the tool cache. The OCaml setup action is pinned to the implementation whose
+cache layout and signing key are checked. Required failure controls retain
+all 191 gates, nine groups and four build configurations.
+
 Patterns compose on the interpreter, C, LLVM, Wasm, RV32 and RV64.
 Parenthesized or-patterns work inside constructors, tuples, records, lists and
 aliases. Each choice selects its first match before the source arm's guard;
