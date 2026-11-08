@@ -15557,15 +15557,14 @@ let () =
     "let _ = print_int (try_or (fn (u) -> fail \"x\") 7);" "sw t0, 12(t1)";
   rv_contains "rv32i: fail looks for a handler before exiting"
     "let _ = fail \"x\";" "beqz t1, .noCatch";
-  (* Or-patterns: try the first alternative, jump past the second if it matched.
-     Binding is refused by a rule -- both alternatives would have to bind into
-     the same slot, and slots are handed out while the pattern is walked. The
-     behaviour is in test/parity/or_pattern.mere. *)
+  (* Or-patterns share binding homes and skip the second alternative after a
+     match. Full binding, spill and stack behaviour is checked by the explicit
+     oracle in test/parity/or_pattern.mere at both widths. *)
   rv_contains "rv32i: an or-pattern skips the second alternative once matched"
     "let _ = print_int (match 1 with 1 | 2 -> 7 | _ -> 8);" ".orOk";
-  rv_err_contains "rv32i: an or-pattern that binds is refused by name"
+  rv_contains "rv32i: binding alternatives share homes"
     "type T = A of int | B of int;\nlet _ = print_int (match (A 1) with A x | B x -> x);"
-    "binds a variable is not supported yet";
+    ".orOk";
   (* A top-level function used as a VALUE gets a one-word closure whose pointer
      is an adapter, not the function: a closure is called with the closure in a0
      and the argument in a1, and a one-argument top-level function wants the

@@ -474,6 +474,12 @@ match day with
 | _                 -> "invalid"
 ```
 
+On unreleased main, RV32 and RV64 also support variable-binding or-patterns,
+such as `A x | B x -> x`. Both alternatives must bind the same names with
+compatible types. The first matching alternative supplies the bindings; a
+failed guard advances to the next arm. Nested aggregate patterns and aliases
+use the same bindings, including values captured by an escaping closure.
+
 ### Block / side-effect sequencing
 ```
 { }                                 // → unit

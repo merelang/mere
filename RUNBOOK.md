@@ -291,6 +291,13 @@ are checked; orchestration controls run inside the same required gate.
 Use `NORMALIZE_JOBS=1 sh scripts/normalize_conformance.sh` for a serial run
 of the same corpus and assertions. Both modes print the ordered output digest.
 
+The two formatter corpus gates, `fmt_comments_check` and `fmt_roundtrip_check`,
+run in downstream. Each retains both its complete corpus run and poison run.
+The assignment validator pins their names, commands and destination, and the
+downstream preflight requires Perl for comment counts. The full unit suite
+remains in compiler and README execution remains in containers.
+All 191 gates, nine groups and four build configurations remain required.
+
 ## Binary releases
 
 `release-build.yml` is shared by the distribution CI jobs and tagged

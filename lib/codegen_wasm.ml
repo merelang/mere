@@ -4852,14 +4852,25 @@ and emit_expr (e : Ast.expr) : unit =
       | Ast.P_or _ ->
         unsupported pat.Ast.ploc "P_or should have been flattened"
     in
-    (* Pre-flatten or-patterns into multiple arms. *)
-    let rec expand_or (pat, guard, body) =
+    (* Guarded alternatives share a selection flag. Initialize it on each
+       evaluation of the match, including repeated evaluations in a loop. *)
+    let rec expand_or pat =
       match pat.Ast.pnode with
-      | Ast.P_or (a, b) ->
-        expand_or (a, guard, body) @ expand_or (b, guard, body)
-      | _ -> [(pat, guard, body)]
+      | Ast.P_or (a, b) -> expand_or a @ expand_or b
+      | _ -> [pat]
     in
-    let arms = List.concat_map expand_or arms in
+    let arms = List.concat_map (fun (pat, guard, body) ->
+      let alternatives = expand_or pat in
+      let selected = match guard, alternatives with
+        | Some _, _ :: _ :: _ ->
+          let slot = fresh_local_i32 () in
+          emit_instr "i32.const 0";
+          emit_instr (Printf.sprintf "local.set %d" slot);
+          Some slot
+        | _ -> None
+      in
+      List.map (fun pat -> pat, guard, body, selected) alternatives
+    ) arms in
     let rec emit_arms = function
       | [] ->
         (* v0.1.470: the named, catchable failure — not a bare `unreachable`.
@@ -4877,8 +4888,19 @@ and emit_expr (e : Ast.expr) : unit =
         emit_instr (Printf.sprintf "i64.const %d"
                       (intern_show_str "no matching arm in match"));
         emit_instr "call $__lang_fail"
-      | (pat, guard, body) :: rest ->
+      | (pat, guard, body, selected) :: rest ->
         let (cond_slot, bindings) = compile_pat pat scrut_slot scrut_ty in
+        let cond_slot = match selected with
+          | None -> cond_slot
+          | Some slot ->
+            let eligible = fresh_local_i32 () in
+            emit_instr (Printf.sprintf "local.get %d" cond_slot);
+            emit_instr (Printf.sprintf "local.get %d" slot);
+            emit_instr "i32.eqz";
+            emit_instr "i32.and";
+            emit_instr (Printf.sprintf "local.set %d" eligible);
+            eligible
+        in
         (* Guard: evaluate within arm-bindings scope, AND with cond. If
            cond is false, short-circuit (don't even evaluate guard). *)
         let final_cond =
@@ -4888,6 +4910,11 @@ and emit_expr (e : Ast.expr) : unit =
             let g_slot = fresh_local_i32 () in
             emit_instr (Printf.sprintf "local.get %d" cond_slot);
             emit_instr "if (result i32)";
+            (match selected with
+             | Some slot ->
+               emit_instr "i32.const 1";
+               emit_instr (Printf.sprintf "local.set %d" slot)
+             | None -> ());
             let prev = !locals in
             locals := bindings @ prev;
             (* v0.1.699: a guard is never in tail position. The arm before

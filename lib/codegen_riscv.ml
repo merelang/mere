@@ -417,6 +417,14 @@ let rec pat_vars (p : Ast.pattern) : string list =
   | Ast.P_or (a, _) -> pat_vars a
   | Ast.P_record (_, fs) -> List.concat_map (fun (_, q) -> pat_vars q) fs
 
+(* Keep traversal order, with one home per name even across alternatives. *)
+let pattern_names p =
+  let rec unique seen = function
+    | [] -> List.rev seen
+    | x :: xs -> unique (if List.mem x seen then seen else x :: seen) xs
+  in
+  unique [] (pat_vars p)
+
 (* free variables of an expression (respecting binders) — used to decide
    what a lambda must capture *)
 let rec free_vars_of (e : Ast.expr) : string list =
@@ -1397,21 +1405,19 @@ type env = (string * int) list
 
 let slot_off i = i * wsz ()
 
-(* count binding introductions to size a function frame (each named binding
-   gets a distinct slot — P_var lets and each P_var inside a tuple pattern) *)
-let rec pvars_in_pattern p =
+(* Pattern variables have shared homes reserved before matching. Each emitted
+   or-pattern also keeps its scrutinee and stack pointer in separate slots. *)
+let rec pattern_temps p =
   match p.Ast.pnode with
-  | Ast.P_var _ -> 1
-  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit -> 0
-  | Ast.P_tuple pats -> List.fold_left (fun n q -> n + pvars_in_pattern q) 0 pats
-  | Ast.P_constr (_, Some sub) -> pvars_in_pattern sub
+  | Ast.P_var _ | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit -> 0
+  | Ast.P_tuple pats -> List.fold_left (fun n q -> n + pattern_temps q) 0 pats
+  | Ast.P_constr (_, Some sub) -> pattern_temps sub
   | Ast.P_constr (_, None) -> 0
-  | Ast.P_as (inner, _) -> 1 + pvars_in_pattern inner
-  | Ast.P_or (a, b) ->
-    (* +2 for the scrutinee and the stack pointer, which the second alternative
-       needs after the first one has failed part-way through *)
-    pvars_in_pattern a + pvars_in_pattern b + 2
-  | Ast.P_record (_, fields) -> List.fold_left (fun n (_, q) -> n + pvars_in_pattern q) 0 fields
+  | Ast.P_as (inner, _) -> pattern_temps inner
+  | Ast.P_or (a, b) -> 2 + pattern_temps a + pattern_temps b
+  | Ast.P_record (_, fields) -> List.fold_left (fun n (_, q) -> n + pattern_temps q) 0 fields
+
+let pvars_in_pattern p = List.length (pattern_names p) + pattern_temps p
 
 (* v0.1.618: the slots a body needs AT ONCE. A binding's slot is handed back
    when its scope ends (`compile_expr` restores `slot_ctr` on the way out, and a
@@ -2582,7 +2588,7 @@ and compile_node (env : env) (e : Ast.expr) : unit =
     (* aggregate / refutable let: destructure via the general pattern binder.
        A refutable let that fails jumps to __pat_fail (abort). *)
     compile_expr env rhs;
-    let env = bind_pattern env pat "__pat_fail" in
+    let env = compile_pattern_bind env pat "__pat_fail" in
     tail_pos := saved_tail;
     compile_expr env body
   | Ast.Tuple elems ->
@@ -4865,18 +4871,24 @@ and compile_match env scrut arms ~tail =
   emit_abort "no matching arm in match";
   emit (Label l_end)
 
-(* Test the pattern against the value in a0; branch to l_fail on mismatch,
-   bind its variables on match, and return the extended env. Supports the
-   top level plus one level of sub-structure (enough for Option/Result and
-   typical enums); deeper nesting raises Codegen_error. *)
-and compile_pattern_bind env pat l_fail = bind_pattern env pat l_fail
+(* Reserve all homes before walking either alternative. The typer requires
+   matching names and types, but their positions and traversal order may differ. *)
+and compile_pattern_bind env pat l_fail =
+  let homes = List.map (fun name -> name, new_slot ()) (pattern_names pat) in
+  bind_pattern homes pat l_fail;
+  List.rev homes @ env
 
 (* Fully-recursive pattern binder. The value under test is in a0; branches to
-   l_fail on a literal/constructor mismatch, binds variables on match, returns
-   the extended env. For aggregate patterns the container pointer is parked on
+   l_fail on a literal/constructor mismatch and stores matched variables in
+   the reserved homes. For aggregate patterns the container pointer is parked on
    the memory stack so arbitrarily-nested sub-patterns can recurse without
    fighting over scratch registers. *)
-and bind_pattern env pat l_fail =
+and bind_pattern homes pat l_fail =
+  let bind name =
+    match List.assoc_opt name homes with
+    | Some idx -> store_a0_to idx
+    | None -> err pat.Ast.ploc "internal: pattern variable has no reserved home"
+  in
   match pat.Ast.pnode with
   (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not run
      on this path: it is rewritten into a guarded binding before inference, so
@@ -4885,73 +4897,57 @@ and bind_pattern env pat l_fail =
   | Ast.P_str_prefix _ ->
     raise (Codegen_error (pat.Ast.ploc,
       "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
-  | Ast.P_wild | Ast.P_unit -> env
-  | Ast.P_var name ->
-    let idx = new_slot () in store_a0_to idx; (name, idx) :: env
-  | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail)); env
-  | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail)); env
+  | Ast.P_wild | Ast.P_unit -> ()
+  | Ast.P_var name -> bind name
+  | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail))
+  | Ast.P_bool b -> li t0 (if b then 1 else 0); emit (Branch (1, a0, t0, l_fail))
   | Ast.P_str s ->
     (* compare the scrutinee (a0) against the literal; mismatch -> l_fail
        (v0.1.620: inline, see emit_str_eq_lit) *)
     emit_str_eq_lit s;
-    emit (Branch (0, a0, zero, l_fail));            (* beq a0, x0 -> fail *)
-    env
+    emit (Branch (0, a0, zero, l_fail))            (* beq a0, x0 -> fail *)
   | Ast.P_as (inner, name) ->
     (* bind the whole value to `name`, then also match the inner pattern *)
     push a0;
-    let idx = new_slot () in store_a0_to idx;
-    let env = (name, idx) :: env in
+    bind name;
     emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);              (* peek: a0 = the value *)
-    let env = bind_pattern env inner l_fail in
-    pop t0;                                        (* drop saved value *)
-    env
+    bind_pattern homes inner l_fail;
+    pop t0                                         (* drop saved value *)
   | Ast.P_tuple pats ->
     push a0;                                       (* park tuple ptr *)
-    let env = ref env in
     List.iteri (fun i p ->
       emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);            (* peek tuple ptr *)
       emit_word (enc_i ((i) * wsz ()) a0 (ldf3 ()) a0 0x03);      (* a0 = field i *)
-      env := bind_pattern !env p l_fail
+      bind_pattern homes p l_fail
     ) pats;
-    pop t0;
-    !env
+    pop t0
   | Ast.P_record (typename, fpats) ->
     push a0;                                       (* park record ptr *)
-    let env = ref env in
     List.iter (fun (fname, fpat) ->
       let fi = field_index pat.Ast.ploc typename fname in
       emit_word (enc_i (0 * wsz ()) sp (ldf3 ()) a0 0x03);            (* peek record ptr *)
       emit_word (enc_i ((fi) * wsz ()) a0 (ldf3 ()) a0 0x03);     (* a0 = field *)
-      env := bind_pattern !env fpat l_fail
+      bind_pattern homes fpat l_fail
     ) fpats;
-    pop t0;
-    !env
+    pop t0
   | Ast.P_constr (name, sub) ->
     let tag = tag_of pat.Ast.ploc name in
     emit_word (enc_i (0 * wsz ()) a0 (ldf3 ()) t0 0x03);              (* lw t0, 0(a0) — tag *)
     li t1 tag; emit (Branch (1, t0, t1, l_fail));  (* bne t0, t1, fail *)
     (match sub with
-     | None -> env
+     | None -> ()
      | Some subp ->
        emit_word (enc_i (wsz ()) a0 (ldf3 ()) a0 0x03);           (* a0 = payload *)
-       bind_pattern env subp l_fail)
+       bind_pattern homes subp l_fail)
   | Ast.P_or (a, b) ->
     (* Try the first alternative; on mismatch try the second; on both, fail.
-       Neither may bind a variable: a binding would have to land in the SAME slot
-       on both paths, and slots are handed out as the pattern is walked, so the
-       two alternatives would name different ones and the arm body would read
-       whichever the compiler happened to see last. Refusing by that rule is
-       narrow and says which rule.
+       Both alternatives write each name into the same reserved home, including
+       nested alternatives and bindings encountered in a different order.
 
        Both the scrutinee and the stack pointer are kept, because the first
        alternative may be a container pattern that parked its pointer and then
        jumped out from inside -- the same thing compile_match now undoes at an
        arm's fail label, for the same reason. *)
-    if pat_vars a <> [] || pat_vars b <> [] then
-      err pat.Ast.ploc
-        "RV32I: an or-pattern that binds a variable is not supported yet -- the \
-         alternatives would have to bind into the same slot, and slots are \
-         handed out while the pattern is walked";
     let vidx = new_slot () in
     store_a0_to vidx;                              (* keep the scrutinee *)
     let spidx = new_slot () in
@@ -4960,15 +4956,14 @@ and bind_pattern env pat l_fail =
     let l_b = fresh_label ".orAlt" in
     let l_ok = fresh_label ".orOk" in
     load_to_a0 vidx;
-    let _ = bind_pattern env a l_b in
+    bind_pattern homes a l_b;
     emit (Jal (zero, l_ok));
     emit (Label l_b);
     load_to_a0 spidx;
     emit_word (enc_i 0 a0 0 sp 0x13);              (* mv sp, a0 *)
     load_to_a0 vidx;
-    let _ = bind_pattern env b l_fail in
-    emit (Label l_ok);
-    env
+    bind_pattern homes b l_fail;
+    emit (Label l_ok)
 
 (* --- function + runtime emission ----------------------------------------- *)
 

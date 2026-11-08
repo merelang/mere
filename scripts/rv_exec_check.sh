@@ -652,9 +652,9 @@ else
 fi
 echo "rv_exec: $wfpass passed, $wffail failed for write_file/read_stdin (both widths, and --bare still refuses)"
 
-# Scope cleanup is a required contract, not an allowed corpus refusal. These
-# oracles are hand-written rather than derived from another backend.
-for name in factory_inference with_scope; do
+# These fixtures must execute, even when a corpus sweep could count a compile
+# refusal. The oracles are hand-written rather than derived from another backend.
+for name in factory_inference with_scope or_pattern; do
   for width in 32 64; do
     if [ "$width" = 32 ]; then runner="$RVRUN"; flag=-rv
     else runner="$RVRUN64"; flag=-rv64; fi
@@ -667,7 +667,11 @@ for name in factory_inference with_scope; do
     status=$?
     grep -a -v '^rvrun' "$TMP/r.raw" > "$TMP/r.out"
     if [ "$status" -eq 0 ] && cmp -s "$ROOT/test/parity/$name.expected" "$TMP/r.out"; then
-      printf '  ok    %s:%s (scope cleanup and body result match the explicit oracle)\n' "$name" "$width"
+      if [ "$name" = or_pattern ]; then
+        printf '  ok    %s:%s (bindings and stack restoration match the explicit oracle)\n' "$name" "$width"
+      else
+        printf '  ok    %s:%s (scope cleanup and body result match the explicit oracle)\n' "$name" "$width"
+      fi
       pass=$((pass+1))
     else
       printf '  FAIL  %s:%s (exit %s or wrong output)\n' "$name" "$width" "$status"

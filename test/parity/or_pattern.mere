@@ -36,3 +36,80 @@ let _ = print_int (match D with A | B -> 1 | C | D -> 2);
 // a record inside an alternative
 type R = { p: int, q: int };
 let _ = print_int (match (R { p = 1, q = 2 }) with R { p = 1, q = 3 } | R { p = 1, q = 2 } -> 5 | _ -> 6);
+
+// Alternatives bind the same names, including reordered and partial bindings.
+type Value = Left of int | Right of int | Third of int;
+let value = fn (v: Value) -> match v with Left x | Right x | Third x -> x + 1;
+let _ = print_int (value (Left 41));
+let _ = print_int (value (Right 42));
+let _ = print_int (value (Third 43));
+let reorder = fn v -> match v with (x, 0, y) | (y, x, 0) -> x * 10 + y | _ -> 0 - 1;
+let _ = print_int (reorder (6, 0, 9));
+let _ = print_int (reorder (6, 7, 0));
+let _ = print_int (reorder (6, 7, 8));
+type Row = { first: int, last: int, tag: int };
+let row = fn (r: Row) -> match r with
+  Row { first = x, last = y, tag = 0 } | Row { last = x, first = y, tag = 1 } -> x * 10 + y
+  | _ -> 0 - 1;
+let _ = print_int (row (Row { first = 4, last = 8, tag = 0 }));
+let _ = print_int (row (Row { first = 4, last = 8, tag = 1 }));
+let _ = print_int (match (0, 8) with ((x, 0) as whole) | ((0, x) as whole) -> x + fst whole | _ -> 0 - 1);
+// Nested alternatives share homes with the enclosing aggregate and closure.
+let _ = print_int (match ((1, 2), Right 3) with
+  ((x, y), Left z) | ((y, x), Right z) -> x * 100 + y * 10 + z
+  | _ -> 0 - 1);
+let _ = print_int (match [0, 7] with [x] | [0, x] -> x | _ -> 0 - 1);
+let _ = print_int (match ("b", 9) with ("a", x) | ("b", x) -> x | _ -> 0 - 1);
+let make = fn (v: Value) -> match v with Left x | Right x -> fn n -> x + n | Third x -> fn n -> x - n;
+let callback = make (Right 40);
+let _ = print_int (callback 2);
+// A failed guard advances to the next arm; it does not retry an alternative.
+let calls = vec_new ();
+let guarded = fn pair -> match pair with
+  (x, y) | (y, x) | (x, y) when (let _ = vec_push calls x in x > y) -> 99
+  | _ -> 77;
+let _ = print_int (guarded (1, 2));
+let _ = print_int (guarded (3, 2));
+let _ = print_int (vec_len calls);
+let _ = print_int (vec_get calls 0);
+let _ = print_int (vec_get calls 1);
+// More homes than saved registers, captured after the matching frame returns.
+let spill = fn values -> match values with
+  (a, b, c, d, e, f, g, h, i, j, k, l, 0)
+  | (l, k, j, i, h, g, f, e, d, c, b, a, 1) ->
+    fn () -> a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10 + k * 11 + l * 12
+  | _ -> fn () -> 0 - 1;
+let spill_first = spill (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0);
+let spill_second = spill (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1);
+let _ = print_int (spill_first ());
+let _ = print_int (spill_second ());
+// Preserve call arguments across either a successful or failed alternative.
+let rec bound_loop = fn n -> fn acc ->
+  if n == 0 then acc else bound_loop (n - 1) (acc + (match (n, 1) with (x, 0) | (x, 1) -> x | _ -> 0));
+let rec failed_loop = fn n -> fn acc ->
+  if n == 0 then acc else failed_loop (n - 1) (acc + (match (n, 1) with (x, 0) | (x, 2) -> x | _ -> 1));
+let _ = print_int (bound_loop 300 0);
+let _ = print_int (failed_loop 300 0);
+let shadow = fn x -> let result = match Right 7 with Left x | Right x -> x + 1 | Third x -> x + 2 in result + x;
+let _ = print_int (shadow 900);
+// Ordinary aggregate lets still use the same reserved-home path.
+let (let_a, let_b) = (4, 5);
+let _ = print_int (let_a * 10 + let_b);
+// Each source arm has its own selection, reset on every loop evaluation.
+let rounds = vec_new ();
+let index = vec_new ();
+let _ = vec_push index 0;
+let _ = while vec_get index 0 < 3 do
+  let n = vec_get index 0 in
+  let result = match (n, n + 1) with
+    (x, y) | (y, x) when x > y -> 99
+    | (x, y) | (y, x) when x < y -> x
+    | _ -> 0 - 1 in
+  let _ = vec_push rounds result in
+  vec_set index 0 (n + 1);
+let _ = print_int (vec_get rounds 0);
+let _ = print_int (vec_get rounds 1);
+let _ = print_int (vec_get rounds 2);
+let outer = fn x -> match (1, 2) with (x, y) | (y, x) when x + y < 0 -> 99 | _ -> x;
+let _ = print_int (outer 900);
+let _ = print_int (try_or (fn () -> match (1, 2) with (x, y) | (y, x) when fail "guard" -> x + y | _ -> 99) 55);
