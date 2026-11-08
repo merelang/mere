@@ -1240,6 +1240,7 @@ jobs:
         run: |
           sh scripts/ffi_header_check.sh
           sh scripts/ffi_header_check.sh --poison
+          sh scripts/ffi_callback_check.sh
 
       # Q-125. A record declared inside a module could not be named in an
       # annotation -- not even inside the module that declared it -- while
