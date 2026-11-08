@@ -388,6 +388,7 @@ and free_vars_arms = fn (arms: (pattern * expr option * expr) list)
 and pattern_bindings = fn (p: pattern) ->
   match p with
   | PVar n -> Cons (n, Nil)
+  | PStrPrefix (_, n) -> if str_eq n "_" then Nil else Cons (n, Nil)
   | PAs (sub, n) -> Cons (n, pattern_bindings sub)
   | PTuple ps -> pattern_bindings_list ps
   | PConstr (_, payload_opt) ->
@@ -592,29 +593,32 @@ let lookup_or_alloc_field_offset = fn (field: str) -> fn (s: EmitState) ->
 // table. The string is NUL-terminated to play nicely with extern fns
 // that expect C-style buffers (e.g., `puts`).
 
-// Build the `(data (i32.const N) "...")` declaration for a single
-// string. wat syntax accepts `\"`/`\\` for literal `"` and `\` and
-// `\NN` (hex) for arbitrary bytes — for MVP we escape only `"` and
-// `\` and rely on the source string staying ASCII-printable.
-// Newlines / tabs / etc. inside `EStr` source aren't reached by
-// current demos; full escaping lands when needed.
+// Encode every byte outside printable ASCII, so NUL and invalid UTF-8
+// literals remain valid WAT and survive self-compilation byte for byte.
+let hex_nibble = fn (v: int) ->
+  if v < 10 then chr (48 + v) else chr (87 + v);
+
 let wat_escape_str = fn (s: str) ->
-  let s1 = str_replace s "\\" "\\\\" in
-  let s2 = str_replace s1 "\"" "\\\"" in
-  // Phase 54.5: control bytes (newline / CR / tab) would break the
-  // surrounding `"..."` literal in WAT. wat2wasm accepts `\HH` hex
-  // escapes for any byte, so map the common ones explicitly.
-  let s3 = str_replace s2 "\n" "\\0a" in
-  let s4 = str_replace s3 "\r" "\\0d" in
-  let s5 = str_replace s4 "\t" "\\09" in
-  s5;
+  let buf = strbuf_new () in
+  let rec loop = fn (i: int) ->
+    if i >= str_len s then () else
+      let c = char_at s i in
+      let n = ord c in
+      let escaped =
+        if c == "\\" then "\\\\"
+        else if c == "\"" then "\\\""
+        else if n < 32 || n >= 127 then
+          "\\" ++ hex_nibble (n / 16) ++ hex_nibble (n % 16)
+        else c in
+      let _ = strbuf_push buf escaped in
+      loop (i + 1) in
+  let _ = loop 0 in
+  strbuf_to_str buf;
 
 // A literal is laid out like every other str: [i32 len][bytes][NUL],
 // with the VALUE pointing at byte0. The four header bytes are written
 // as hex escapes, little-endian, so `$__lang_strlen` can read the
 // length rather than scan for a terminator.
-let hex_nibble = fn (v: int) ->
-  if v < 10 then chr (48 + v) else chr (87 + v);
 let le32_escape = fn (n: int) ->
   let byte = fn (k: int) ->
     let b = (n / k) % 256 in
@@ -872,7 +876,7 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
     // 53c-1 only handles PVar (one new local) and PWild (no binding).
     // Destructure patterns (PTuple etc.) land in 53d / 53e once we have
     // multi-value layout in linear memory.
-    (match pat with
+    let result = (match pat with
       | PVar name ->
         let s1 = emit_expr value_expr s in
         let s2 = alloc_local name s1 in
@@ -889,16 +893,14 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
         let s2 = push_instr "drop" s1 in
         emit_expr body (set_tail is_tail s2)
       | _ ->
-        // Stage 53d enables destructuring lets via the pattern-bind
-        // helpers. The let-binding is unconditional (the typer has
-        // validated structure), so no `emit_check_pattern` is needed
-        // — we just stash the value into a tmp slot and walk the
-        // pattern with `emit_bind_pattern`.
+        // Evaluate once, select the pattern, and trap on a refutable miss.
         let s1 = emit_expr value_expr s in
         let (val_slot, s2) = alloc_tmp_local s1 in
         let s3 = push_instr ("local.set " ++ show val_slot) s2 in
-        let s4 = emit_bind_pattern pat val_slot s3 in
-        emit_expr body (set_tail is_tail s4))
+        let s4 = emit_pattern_let pat val_slot s3 in
+        emit_expr body (set_tail is_tail s4)) in
+    // A let expression's names never escape into its caller's continuation.
+    ({ result | locals = s.locals } : EmitState)
   | EIf (cond, then_e, else_e) ->
     // (cond) if (result i32) (then_e) else (else_e) end. The condition
     // i32 is consumed; both branches must push exactly one i32 result.
@@ -1652,16 +1654,35 @@ and emit_extern_args = fn (args: expr list) -> fn (s: EmitState) ->
     let s1 = emit_expr a s in
     emit_extern_args rest s1
 
-// Pattern match: `emit_check_pattern p slot s` leaves an i32 0/1 on
-// top of the stack indicating whether the value at `slot` matches
-// `p`. PVar / PWild always push 1 (binding happens in
-// emit_bind_pattern). PInt / PBool compare. PTuple ANDs sub-checks.
-// PConstr checks the variant tag and (if has payload) the sub.
-and emit_check_pattern = fn (p: pattern) -> fn (slot: int)
-                      -> fn (s: EmitState) ->
+// Reserve one home per name before selecting a pattern. Alternatives write
+// the same homes; repeated names overwrite in source traversal order.
+and emit_pattern_let = fn (pat: pattern) -> fn (slot: int) -> fn (s: EmitState) ->
+  let s1 = reserve_pattern_names (union_strs (pattern_bindings pat) Nil) s in
+  let s2 = emit_select_pattern pat slot s1 in
+  let s3 = push_instr "i32.eqz" s2 in
+  let s4 = push_instr "if" s3 in
+  let s5 = push_instr "unreachable" s4 in
+  push_instr "end" s5
+
+and reserve_pattern_names = fn (names: str list) -> fn (s: EmitState) ->
+  match names with
+  | Nil -> s
+  | Cons (name, rest) -> reserve_pattern_names rest (alloc_local name s)
+
+and store_pattern_binding = fn (name: str) -> fn (slot: int) -> fn (s: EmitState) ->
+  match lookup_assoc name s.locals with
+  | None -> fail ("codegen_wasm: missing pattern home " ++ name)
+  | Some home ->
+    let s1 = push_instr ("local.get " ++ show slot) s in
+    push_instr ("local.set " ++ show home) s1
+
+// Leave a success flag and store bindings only along the selected route.
+// Short-circuit before reading payloads, and select an alternative before
+// evaluating the source guard. No Cartesian expansion or body duplication.
+and emit_select_pattern = fn (p: pattern) -> fn (slot: int) -> fn (s: EmitState) ->
   match p with
+  | PVar name -> push_instr "i32.const 1" (store_pattern_binding name slot s)
   | PWild -> push_instr "i32.const 1" s
-  | PVar _ -> push_instr "i32.const 1" s
   | PUnit -> push_instr "i32.const 1" s
   | PInt n ->
     let s1 = push_instr ("local.get " ++ show slot) s in
@@ -1671,141 +1692,79 @@ and emit_check_pattern = fn (p: pattern) -> fn (slot: int)
     let s1 = push_instr ("local.get " ++ show slot) s in
     let s2 = push_instr ("i32.const " ++ (if b then "1" else "0")) s1 in
     push_instr "i32.eq" s2
-  | PTuple ps -> emit_tuple_checks ps 0 slot s
-  | PConstr (name, payload_opt) ->
-    let (tag, s1) = lookup_or_alloc_variant_tag name s in
-    let s2 = push_instr ("local.get " ++ show slot) s1 in
-    let s3 = push_instr "i32.load offset=0" s2 in
-    let s4 = push_instr ("i32.const " ++ show tag) s3 in
-    let s5 = push_instr "i32.eq" s4 in
-    (match payload_opt with
-      | None -> s5
-      | Some sub_p ->
-        // Stage 55g: SHORT-CIRCUIT the payload sub-check. The old eager
-        // `tag_eq AND payload_check` (plain i32.and) dereferenced the
-        // payload even when the tag DIDN'T match — for a differently-
-        // shaped scrutinee (e.g. checking `EConstr (_, None)` against an
-        // EVar whose payload is a string pointer) the sub-checks read
-        // garbage as pointers, and a wild value traps with "memory
-        // access out of bounds". Found by the bootstrap-fixpoint hunt:
-        // the self-compiled compiler trapped inside
-        // rewrite_constrs_expr's nested match. Only run the payload
-        // check when the tag matched:
-        //   tag_eq  if (result i32)  <payload check>  else  0  end
-        let s6 = push_instr "if (result i32)" s5 in
-        let (sub_slot, s7) = alloc_tmp_local s6 in
-        let s8 = push_instr ("local.get " ++ show slot) s7 in
-        let s9 = push_instr "i32.load offset=4" s8 in
-        let s10 = push_instr ("local.set " ++ show sub_slot) s9 in
-        let s11 = emit_check_pattern sub_p sub_slot s10 in
-        let s12 = push_instr "else" s11 in
-        let s13 = push_instr "i32.const 0" s12 in
-        push_instr "end" s13)
-  | PAs (sub, _name) ->
-    // PAs check is just the sub-pattern's check; the name binds in
-    // emit_bind_pattern only.
-    emit_check_pattern sub slot s
-  | PRecord (_name, field_pats) ->
-    // Stage 53h-fix: AND-fold the sub-pattern checks against each
-    // field's load. Same shape as PTuple but uses field name → offset
-    // instead of positional index.
-    emit_record_pat_checks field_pats slot s
   | PStr lit ->
-    // Stage 53j-2: full byte-by-byte compare via `$__lang_streq` so
-    // runtime-constructed strings (e.g., from `++`) match against
-    // pattern literals correctly. Pointer equality from
-    // Stage 53h-fix-2 only worked for interned literals.
     let s0 = note_helper_use "streq" s in
     let (off, s1) = alloc_str_literal lit s0 in
     let s2 = push_instr ("local.get " ++ show slot) s1 in
     let s3 = push_instr ("i32.const " ++ show off) s2 in
     push_instr "call $__lang_streq" s3
-  | POr (p1, p2) ->
-    // Stage 53h-fix-2: `p1 | p2`. Both branches must bind the same
-    // set of names (typer-enforced). Check is `check p1 OR check p2`;
-    // bind from the LEFT branch only (right is structurally
-    // equivalent so bindings are the same names).
-    let s1 = emit_check_pattern p1 slot s in
-    let s2 = emit_check_pattern p2 slot s1 in
-    push_instr "i32.or" s2
-  | _ -> fail "codegen_wasm: stage 53h-fix-2 unsupported pattern in check"
+  | PStrPrefix (lit, name) ->
+    let s0 = note_helper_use "str_starts_with" s in
+    let (off, s1) = alloc_str_literal lit s0 in
+    let s2 = push_instr ("local.get " ++ show slot) s1 in
+    let s3 = push_instr ("i32.const " ++ show off) s2 in
+    let s4 = push_instr "call $str_starts_with" s3 in
+    if str_eq name "_" then s4 else
+      let s5 = push_instr "if (result i32)" s4 in
+      let s6 = note_helper_use "substring" (note_helper_use "strlen" s5) in
+      let (tail_slot, s7) = alloc_tmp_local s6 in
+      let s8 = push_instr ("local.get " ++ show slot) s7 in
+      let s9 = push_instr ("i32.const " ++ show (str_len lit)) s8 in
+      let s10 = push_instr ("local.get " ++ show slot) s9 in
+      let s11 = push_instr "call $__lang_strlen" s10 in
+      let s12 = push_instr "call $substring" s11 in
+      let s13 = push_instr ("local.set " ++ show tail_slot) s12 in
+      let s14 = store_pattern_binding name tail_slot s13 in
+      let s15 = push_instr "i32.const 1" s14 in
+      let s16 = push_instr "else" s15 in
+      let s17 = push_instr "i32.const 0" s16 in
+      push_instr "end" s17
+  | PAs (sub, name) ->
+    emit_select_pattern sub slot (store_pattern_binding name slot s)
+  | POr (left, right) ->
+    let s1 = emit_select_pattern left slot s in
+    let s2 = push_instr "if (result i32)" s1 in
+    let s3 = push_instr "i32.const 1" s2 in
+    let s4 = push_instr "else" s3 in
+    let s5 = emit_select_pattern right slot s4 in
+    push_instr "end" s5
+  | PTuple ps -> emit_tuple_selection ps 0 slot s
+  | PRecord (_, fps) -> emit_record_selection fps slot s
+  | PConstr (name, payload) ->
+    let (tag, s1) = lookup_or_alloc_variant_tag name s in
+    let s2 = push_instr ("local.get " ++ show slot) s1 in
+    let s3 = push_instr "i32.load offset=0" s2 in
+    let s4 = push_instr ("i32.const " ++ show tag) s3 in
+    let s5 = push_instr "i32.eq" s4 in
+    (match payload with
+      | None -> s5
+      | Some sub ->
+        let s6 = push_instr "if (result i32)" s5 in
+        let (sub_slot, s7) = alloc_tmp_local s6 in
+        let s8 = push_instr ("local.get " ++ show slot) s7 in
+        let s9 = push_instr "i32.load offset=4" s8 in
+        let s10 = push_instr ("local.set " ++ show sub_slot) s9 in
+        let s11 = emit_select_pattern sub sub_slot s10 in
+        let s12 = push_instr "else" s11 in
+        let s13 = push_instr "i32.const 0" s12 in
+        push_instr "end" s13)
 
-// AND-fold the checks for tuple components. Each component reads the
-// parent's offset, stashes to a fresh tmp local, recurses. Always
-// pushes an i32 0/1 on top.
-and emit_tuple_checks = fn (ps: pattern list) -> fn (i: int)
-                     -> fn (parent_slot: int) -> fn (s: EmitState) ->
+and emit_tuple_selection = fn (ps: pattern list) -> fn (i: int)
+                         -> fn (slot: int) -> fn (s: EmitState) ->
   match ps with
   | Nil -> push_instr "i32.const 1" s
   | Cons (p, rest) ->
-    let (elem_slot, s1) = alloc_tmp_local s in
-    let s2 = push_instr ("local.get " ++ show parent_slot) s1 in
-    let s3 = push_instr ("i32.load offset=" ++ show (i * 4)) s2 in
-    let s4 = push_instr ("local.set " ++ show elem_slot) s3 in
-    let s5 = emit_check_pattern p elem_slot s4 in
-    let s6 = emit_tuple_checks rest (i + 1) parent_slot s5 in
-    push_instr "i32.and" s6
-
-// After a pattern check succeeds, bind any names it introduces by
-// allocating fresh locals and `local.set`ing them. PVar binds the
-// current slot directly. PTuple recurses with per-element slots
-// (re-loaded from the parent). PConstr binds against the payload
-// pointer. PInt / PBool / PWild / PUnit introduce no bindings.
-and emit_bind_pattern = fn (p: pattern) -> fn (slot: int)
-                     -> fn (s: EmitState) ->
-  match p with
-  | PWild -> s
-  | PInt _ -> s
-  | PBool _ -> s
-  | PUnit -> s
-  | PVar name ->
-    let s1 = alloc_local name s in
-    let idx = s1.local_counter - 1 in
+    let (sub_slot, s1) = alloc_tmp_local s in
     let s2 = push_instr ("local.get " ++ show slot) s1 in
-    push_instr ("local.set " ++ show idx) s2
-  | PTuple ps -> emit_tuple_binds ps 0 slot s
-  | PConstr (_name, payload_opt) ->
-    (match payload_opt with
-      | None -> s
-      | Some sub_p ->
-        let (sub_slot, s1) = alloc_tmp_local s in
-        let s2 = push_instr ("local.get " ++ show slot) s1 in
-        let s3 = push_instr "i32.load offset=4" s2 in
-        let s4 = push_instr ("local.set " ++ show sub_slot) s3 in
-        emit_bind_pattern sub_p sub_slot s4)
-  | PAs (sub, name) ->
-    let s1 = emit_bind_pattern sub slot s in
-    let s2 = alloc_local name s1 in
-    let idx = s2.local_counter - 1 in
-    let s3 = push_instr ("local.get " ++ show slot) s2 in
-    push_instr ("local.set " ++ show idx) s3
-  | PRecord (_name, field_pats) ->
-    emit_record_pat_binds field_pats slot s
-  | PStr _ -> s  // literal pattern, no bindings
-  | POr (p1, _p2) ->
-    // Bind from the LEFT branch only — POr requires both branches to
-    // bind the same names (typer-enforced), so structurally either is
-    // fine. The right branch's variant of the bindings is identical.
-    emit_bind_pattern p1 slot s
-  | _ -> fail "codegen_wasm: stage 53h-fix-2 unsupported pattern in bind"
-
-and emit_tuple_binds = fn (ps: pattern list) -> fn (i: int)
-                    -> fn (parent_slot: int) -> fn (s: EmitState) ->
-  match ps with
-  | Nil -> s
-  | Cons (p, rest) ->
-    let (elem_slot, s1) = alloc_tmp_local s in
-    let s2 = push_instr ("local.get " ++ show parent_slot) s1 in
     let s3 = push_instr ("i32.load offset=" ++ show (i * 4)) s2 in
-    let s4 = push_instr ("local.set " ++ show elem_slot) s3 in
-    let s5 = emit_bind_pattern p elem_slot s4 in
-    emit_tuple_binds rest (i + 1) parent_slot s5
+    let s4 = push_instr ("local.set " ++ show sub_slot) s3 in
+    let s5 = emit_select_pattern p sub_slot s4 in
+    let s6 = push_instr "if (result i32)" s5 in
+    let s7 = emit_tuple_selection rest (i + 1) slot s6 in
+    let s8 = push_instr "else" s7 in
+    let s9 = push_instr "i32.const 0" s8 in
+    push_instr "end" s9
 
-// Walk match arms left-to-right as a chain of nested `if (result i32)
-// ... else ... end` blocks. The terminal `else` traps with
-// `unreachable`. Pattern bindings live only inside their arm's
-// then-branch — outer `locals` is restored before recursing into the
-// next arm so the binding names don't leak.
 and emit_match_arms = fn (is_tail: bool)
                    -> fn (arms: (pattern * expr option * expr) list)
                    -> fn (slot: int) -> fn (s: EmitState) ->
@@ -1813,26 +1772,24 @@ and emit_match_arms = fn (is_tail: bool)
   | Nil -> push_instr "unreachable" s
   | Cons (arm, rest) ->
     let (pat, guard_opt, body) = arm in
-    let s1 = emit_check_pattern pat slot s in
+    let outer_locals = s.locals in
+    let s0 = reserve_pattern_names (union_strs (pattern_bindings pat) Nil) s in
+    let s1 = emit_select_pattern pat slot s0 in
     let s2 = push_instr "if (result i32)" s1 in
-    let outer_locals = s2.locals in
-    let s3 = emit_bind_pattern pat slot s2 in
-    // Stage 55f: an arm body is in tail position when the match is; the
-    // guard and pattern checks are not (they stay tail=false via `s`).
-    let s4 = (match guard_opt with
-      | None -> emit_expr body (set_tail is_tail s3)
-      | Some g ->
-        let sg = emit_expr g s3 in
-        let sg2 = push_instr "if (result i32)" sg in
-        let sg3 = emit_expr body (set_tail is_tail sg2) in
-        let sg4 = push_instr "else" sg3 in
-        let sg5 = ({ sg4 | locals = outer_locals } : EmitState) in
-        let sg6 = emit_match_arms is_tail rest slot sg5 in
-        push_instr "end" sg6) in
-    let s5 = push_instr "else" s4 in
-    let s6 = ({ s5 | locals = outer_locals } : EmitState) in
-    let s7 = emit_match_arms is_tail rest slot s6 in
-    push_instr "end" s7
+    let s3 = (match guard_opt with
+      | None -> push_instr "i32.const 1" s2
+      | Some g -> emit_expr g s2) in
+    let s4 = push_instr "else" s3 in
+    let s5 = push_instr "i32.const 0" s4 in
+    let s6 = push_instr "end" s5 in
+    let s6 = ({ s6 | locals = s0.locals } : EmitState) in
+    let s7 = push_instr "if (result i32)" s6 in
+    let s8 = emit_expr body (set_tail is_tail s7) in
+    let s9 = push_instr "else" s8 in
+    let s10 = ({ s9 | locals = outer_locals } : EmitState) in
+    let s11 = emit_match_arms is_tail rest slot s10 in
+    let s12 = push_instr "end" s11 in
+    ({ s12 | locals = outer_locals } : EmitState)
 
 // === let-rec (Stage 53e-2) =================================================
 //
@@ -2015,38 +1972,24 @@ and emit_copy_record = fn (base_slot: int) -> fn (new_slot: int)
     let s4 = push_instr ("i32.store offset=" ++ show off) s3 in
     emit_copy_record base_slot new_slot rest s4
 
-// === Pattern helpers for records (Stage 53h-fix) ==========================
-
-and emit_record_pat_checks = fn (fps: (str * pattern) list)
-                          -> fn (slot: int)
-                          -> fn (s: EmitState) ->
+// Select record fields in their source pattern order.
+and emit_record_selection = fn (fps: (str * pattern) list)
+                          -> fn (slot: int) -> fn (s: EmitState) ->
   match fps with
   | Nil -> push_instr "i32.const 1" s
-  | Cons (fp, rest) ->
-    let (name, sub_p) = fp in
+  | Cons (entry, rest) ->
+    let (name, sub) = entry in
     let (off, s1) = lookup_or_alloc_field_offset name s in
     let (sub_slot, s2) = alloc_tmp_local s1 in
     let s3 = push_instr ("local.get " ++ show slot) s2 in
     let s4 = push_instr ("i32.load offset=" ++ show off) s3 in
     let s5 = push_instr ("local.set " ++ show sub_slot) s4 in
-    let s6 = emit_check_pattern sub_p sub_slot s5 in
-    let s7 = emit_record_pat_checks rest slot s6 in
-    push_instr "i32.and" s7
-
-and emit_record_pat_binds = fn (fps: (str * pattern) list)
-                         -> fn (slot: int)
-                         -> fn (s: EmitState) ->
-  match fps with
-  | Nil -> s
-  | Cons (fp, rest) ->
-    let (name, sub_p) = fp in
-    let (off, s1) = lookup_or_alloc_field_offset name s in
-    let (sub_slot, s2) = alloc_tmp_local s1 in
-    let s3 = push_instr ("local.get " ++ show slot) s2 in
-    let s4 = push_instr ("i32.load offset=" ++ show off) s3 in
-    let s5 = push_instr ("local.set " ++ show sub_slot) s4 in
-    let s6 = emit_bind_pattern sub_p sub_slot s5 in
-    emit_record_pat_binds rest slot s6
+    let s6 = emit_select_pattern sub sub_slot s5 in
+    let s7 = push_instr "if (result i32)" s6 in
+    let s8 = emit_record_selection rest slot s7 in
+    let s9 = push_instr "else" s8 in
+    let s10 = push_instr "i32.const 0" s9 in
+    push_instr "end" s10
   ;
 
 // === Module wrapper ========================================================
@@ -2481,25 +2424,24 @@ let helper_decl_is_space =
   "        (i32.eq (local.get $b) (i32.const 13)))))\n";
 
 // Phase 54.6: `$str_starts_with a b` — true iff b is a prefix of a.
-// Walks b byte-by-byte; returns 1 when b's NUL is reached, 0 if a byte
-// differs (a's NUL also differs since b's byte at that index is non-NUL).
+// Check stored lengths before comparing every prefix byte, including NUL.
 let helper_decl_str_starts_with =
-  "  (func $str_starts_with (param $a i32) (param $b i32) (result i32)\n" ++
-  "    (local $i i32) (local $ba i32) (local $bb i32)\n" ++
-  "    (local.set $i (i32.const 0))\n" ++
-  "    (loop $lp\n" ++
-  "      (local.set $bb (i32.load8_u (i32.add (local.get $b) (local.get $i))))\n" ++
-  "      (if (i32.eqz (local.get $bb))\n" ++
-  "        (then (return (i32.const 1))))\n" ++
-  "      (local.set $ba (i32.load8_u (i32.add (local.get $a) (local.get $i))))\n" ++
-  "      (if (i32.ne (local.get $ba) (local.get $bb))\n" ++
-  "        (then (return (i32.const 0))))\n" ++
-  "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
-  "      (br $lp))\n" ++
-  "    (i32.const 0))\n";
+  "  (func $str_starts_with (param $s i32) (param $p i32) (result i32)\n" ++
+  "    (local $n i32) (local $i i32)\n" ++
+  "    (local.set $n (i32.load (i32.sub (local.get $p) (i32.const 4))))\n" ++
+  "    (if (i32.gt_u (local.get $n) (i32.load (i32.sub (local.get $s) (i32.const 4))))\n" ++
+  "      (then (return (i32.const 0))))\n" ++
+  "    (block $done\n" ++
+  "      (loop $bytes\n" ++
+  "        (br_if $done (i32.eq (local.get $i) (local.get $n)))\n" ++
+  "        (if (i32.ne (i32.load8_u (i32.add (local.get $s) (local.get $i)))\n" ++
+  "                    (i32.load8_u (i32.add (local.get $p) (local.get $i))))\n" ++
+  "          (then (return (i32.const 0))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $bytes)))\n" ++
+  "    (i32.const 1))\n";
 
-// Phase 54.7: `$str_index_of h n` — first byte-index of n in h, or -1.
-// Empty needle returns 0 (matches OCaml semantics).
+// Phase 54.7: first byte-index of the needle, or -1; an empty needle returns 0.
 let helper_decl_str_index_of =
   "  (func $str_index_of (param $h i32) (param $n i32) (result i32)\n" ++
   "    (local $hl i32) (local $nl i32) (local $i i32) (local $j i32) (local $ok i32)\n" ++
@@ -2756,23 +2698,22 @@ let helper_decl_substring =
   "        (br $lp)))\n" ++
   "    (local.get $r))\n";
 
-// Stage 53j-2: `$__lang_streq a b` — byte-by-byte NUL-terminated
-// string equality. Returns 1 if equal, 0 otherwise. Mirrors the
-// OCaml side's helper line-for-line.
+// Equality and interning must compare lengths and every byte, including NUL.
 let helper_decl_streq =
   "  (func $__lang_streq (param $a i32) (param $b i32) (result i32)\n" ++
-  "    (local $ba i32) (local $bb i32)\n" ++
-  "    (block $not_eq\n" ++
-  "      (loop $lp\n" ++
-  "        (local.set $ba (i32.load8_u (local.get $a)))\n" ++
-  "        (local.set $bb (i32.load8_u (local.get $b)))\n" ++
-  "        (br_if $not_eq (i32.ne (local.get $ba) (local.get $bb)))\n" ++
-  "        (if (i32.eqz (local.get $ba))\n" ++
-  "          (then (return (i32.const 1))))\n" ++
-  "        (local.set $a (i32.add (local.get $a) (i32.const 1)))\n" ++
-  "        (local.set $b (i32.add (local.get $b) (i32.const 1)))\n" ++
-  "        (br $lp)))\n" ++
-  "    (i32.const 0))\n";
+  "    (local $n i32) (local $i i32)\n" ++
+  "    (local.set $n (i32.load (i32.sub (local.get $a) (i32.const 4))))\n" ++
+  "    (if (i32.ne (local.get $n) (i32.load (i32.sub (local.get $b) (i32.const 4))))\n" ++
+  "      (then (return (i32.const 0))))\n" ++
+  "    (block $done\n" ++
+  "      (loop $bytes\n" ++
+  "        (br_if $done (i32.eq (local.get $i) (local.get $n)))\n" ++
+  "        (if (i32.ne (i32.load8_u (i32.add (local.get $a) (local.get $i)))\n" ++
+  "                    (i32.load8_u (i32.add (local.get $b) (local.get $i))))\n" ++
+  "          (then (return (i32.const 0))))\n" ++
+  "        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n" ++
+  "        (br $bytes)))\n" ++
+  "    (i32.const 1))\n";
 
 let helper_decl_str_concat =
   "  (func $__lang_str_concat (param $a i32) (param $b i32) (result i32)\n" ++
@@ -3044,9 +2985,7 @@ let rec list_length = fn (xs: str list) ->
 // through `emit_decls` and into the main emit.
 //
 // `TopLet (PWild, e)` evaluates for side effects, drops the result.
-// `TopLet (other_pat, e)` reuses the 53d destructure path
-// (`emit_bind_pattern` on a tmp slot — no check needed at the top
-// level).
+// `TopLet (other_pat, e)` shares the checked pattern-let selection path.
 //
 // `TopType (_name, _vars, ctors)` pre-registers every constructor
 // name in `variant_tags` via the same lookup_or_alloc helper that
@@ -3094,7 +3033,7 @@ let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
         let s1 = emit_expr value_expr s in
         let (val_slot, s2) = alloc_tmp_local s1 in
         let s3 = push_instr ("local.set " ++ show val_slot) s2 in
-        emit_bind_pattern pat val_slot s3)
+        emit_pattern_let pat val_slot s3)
   | TopLetRec bindings -> emit_letrec_bindings bindings s
   | TopType (_name, _vars, ctors) -> register_ctor_tags ctors s
   | TopRecord (_name, _vars, _fields) -> s

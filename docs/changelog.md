@@ -4,7 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
-## Unreleased
+## v0.1.714 — 2026-11-08
+
+The Mere self-hosted parser, evaluator, typer, formatter and Wasm compiler
+support nested alternatives and string prefix patterns. Selection stores the
+bindings from the first matching alternative before evaluating its guard;
+false guards advance to the next source arm. Duplicate names use the last
+binding in traversal order, including aliases and heterogeneous components.
+The typer validates original alternative name sets before removing bindings
+hidden by later occurrences, then checks only the visible binding types.
+Pattern lets check their selected route and refuse a runtime mismatch. Their
+local bindings stay within the let body, preserving outer names in later
+expressions.
+
+Prefix suffixes preserve exact byte boundaries, including NUL and UTF-8.
+Length-aware equality also keeps distinct binary literals separate during
+self-compilation, and WAT literals escape non-ASCII and control bytes.
+Formatter parentheses preserve nested choices and alias scope. The required
+self-host gate compares 42 handwritten output lines across two required
+fixtures through five execution paths, including the evaluator under both the interpreter and Wasm. The
+bootstrap fixpoint compiles a program using these patterns, compares its
+WAT byte for byte and executes it. Independent choices retain linear output
+growth. The full-toolchain unit suite has 3,070 tests; the ordinary parity
+inventory remains 251 programs.
+
+Generated C FFI headers include borrowed callback closure types, including
+callbacks nested in monomorphic records and curried callbacks. Declaration-wide
+validation refuses unsupported callback ABIs and incomplete headers before
+emitting output. Separate C compilation checks captured 64-bit values, record
+and byte arguments, curried/unit callbacks and region scopes at O0/O2.
+
+CI, Pages and release jobs obtain opam through the official release API,
+checking asset sizes, SHA-256 digests and detached signatures before populating
+the tool cache. The OCaml setup action is pinned to the implementation whose
+cache layout and signing key are checked. Required failure controls retain
+all 191 gates, nine groups and four build configurations.
 
 Patterns compose on the interpreter, C, LLVM, Wasm, RV32 and RV64.
 Parenthesized or-patterns work inside constructors, tuples, records, lists and
@@ -49,6 +83,12 @@ partition coverage, reassembles outputs in original order, and fails on worker
 errors or missing output. A serial mode and required orchestration controls
 cover ordering, coverage, failure propagation and worker cancellation. All
 191 gates, nine integration groups and four build configurations remain required.
+
+Pinned CI oracle archives use the same bounded API transport with size and
+SHA-256 verification before extraction. The installer falls back to the
+official API when public release redirects fail, keeping checksum and binary
+version checks, a program execution check and atomic replacement. No additional
+installer dependencies are required.
 
 ## v0.1.713 — 2026-11-07
 

@@ -113,6 +113,8 @@ let escape_string_for_fmt = fn (s: str) ->
         else if c == "\\" then strbuf_push buf "\\\\"
         else if c == "\n" then strbuf_push buf "\\n"
         else if c == "\t" then strbuf_push buf "\\t"
+        else if c == "\r" then strbuf_push buf "\\r"
+        else if c == "\0" then strbuf_push buf "\\0"
         else if c == "\{" then strbuf_push buf "\\\{"
         else strbuf_push buf c
       in
@@ -192,19 +194,24 @@ let rec fmt_pattern = fn (p: pattern) -> match p with
   | PInt n -> show n
   | PBool b -> if b then "true" else "false"
   | PStr s -> escape_string_for_fmt s
+  | PStrPrefix (s, n) -> escape_string_for_fmt s ++ " <> " ++ n
   | PUnit -> "()"
   | PConstr (c, None) -> c
   | PConstr (c, Some sub) -> c ++ " " ++ fmt_pattern_atom sub
   | PTuple ps ->
-    let parts = list_map ps fmt_pattern in
+    let parts = list_map ps fmt_pattern_component in
     "(" ++ str_join ", " parts ++ ")"
   | PRecord (name, fields) ->
     let parts = list_map fields (fn (entry: str * pattern) ->
-      let (f, sub) = entry in f ++ " = " ++ fmt_pattern sub
+      let (f, sub) = entry in f ++ " = " ++ fmt_pattern_component sub
     ) in
     name ++ " \{ " ++ str_join ", " parts ++ " }"
-  | PAs (inner, name) -> fmt_pattern inner ++ " as " ++ name
+  | PAs (inner, name) -> fmt_pattern_atom inner ++ " as " ++ name
   | POr (a, b) -> fmt_pattern a ++ " | " ++ fmt_pattern b
+
+and fmt_pattern_component = fn (p: pattern) -> match p with
+  | POr _ -> "(" ++ fmt_pattern p ++ ")"
+  | _ -> fmt_pattern p
 
 and fmt_pattern_atom = fn (p: pattern) -> match p with
   | POr _ -> "(" ++ fmt_pattern p ++ ")"
@@ -367,7 +374,7 @@ and fmt_block = fn (ind: int) -> fn (e: expr) -> match e with
         ++ fmt_expr prec_top (ind + 1) value
       else " " ++ fmt_expr prec_top ind value
     in
-    "let " ++ fmt_pattern pat ++ " =" ++ value_s ++ " in\n"
+    "let " ++ fmt_pattern_component pat ++ " =" ++ value_s ++ " in\n"
     ++ indent_str ind ++ fmt_expr prec_top ind body
   | ELetRec (bindings, body) ->
     let parts = list_map bindings (fn (b: str * expr) ->
@@ -456,16 +463,16 @@ let fmt_top_let = fn (pat: pattern) -> fn (value: expr) ->
     | EFun _ ->
       (match pat with
         | PVar _ ->
-          "let " ++ fmt_pattern pat ++ " = " ++ fmt_fun_chain 0 value ++ ";"
+          "let " ++ fmt_pattern_component pat ++ " = " ++ fmt_fun_chain 0 value ++ ";"
         | _ ->
-          "let " ++ fmt_pattern pat ++ " = "
+          "let " ++ fmt_pattern_component pat ++ " = "
           ++ fmt_expr prec_top 0 value ++ ";")
     | _ ->
       if is_block value then
-        "let " ++ fmt_pattern pat ++ " =\n"
+        "let " ++ fmt_pattern_component pat ++ " =\n"
         ++ indent_str 1 ++ fmt_expr prec_top 1 value ++ ";"
       else
-        "let " ++ fmt_pattern pat ++ " = "
+        "let " ++ fmt_pattern_component pat ++ " = "
         ++ fmt_expr prec_top 0 value ++ ";")
   ;
 

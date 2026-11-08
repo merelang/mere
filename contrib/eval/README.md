@@ -1,5 +1,11 @@
 # contrib/eval — Mere self-hosted evaluator (Phase 51 in progress)
 
+Current pattern evaluation supports nested alternatives and exact-byte
+string prefixes. Alternatives select before guards; bindings are installed
+in traversal order, so the last occurrence of a name is visible. `str_len`
+is available to programs inspecting a suffix. The stage tables below record
+the implementation history.
+
 The OCaml `Mere.Eval` (lib/eval.ml, 1986 lines) is the reference
 implementation; this directory holds the in-progress Mere self-host so
 that, paired with `contrib/parser/` and `contrib/fmt/`, the full

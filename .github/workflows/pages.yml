@@ -31,9 +31,15 @@ jobs:
         timeout-minutes: 1
         run: sudo python3 scripts/ci_apt_setup.py /etc/apt
 
+      - name: Cache verified opam
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_opam_setup.py
+
       - name: Set up OCaml
         timeout-minutes: 30
-        uses: ocaml/setup-ocaml@v3
+        uses: ocaml/setup-ocaml@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3
         with:
           cache: true
           ocaml-compiler: "5.1"
@@ -56,12 +62,15 @@ jobs:
       # away from the recorded ones without anything saying so.
       - name: Install binaryen (wasm-opt), pinned as in ci.yml
         timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           BINARYEN=132
           mkdir -p "$HOME/.local/bin"
-          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
-            | tar -xz -C /tmp
+          python3 scripts/ci_release_asset.py --repo WebAssembly/binaryen --tag "version_${BINARYEN}" \
+            --asset "binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" --output /tmp/binaryen.tar.gz
+          tar -xzf /tmp/binaryen.tar.gz -C /tmp
           install "/tmp/binaryen-version_${BINARYEN}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 

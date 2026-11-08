@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real installer with isolated downloads and install targets."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
@@ -17,6 +18,7 @@ ASSETS = ("mere-linux-x86_64", "mere-macos-arm64")
 
 CURL = r'''
 import os
+import json
 from pathlib import Path
 import shutil
 import signal
@@ -29,10 +31,31 @@ with open(os.environ["MERE_TEST_REQUESTS"], "a") as log:
 mode = os.environ.get("MERE_TEST_FAILURE", "")
 base = "https://github.com/merelang/mere/releases"
 if url == base + "/latest":
-    if mode == "resolve":
+    if mode in ("resolve", "api-resolve"):
         sys.exit(22)
     print(os.environ.get("MERE_TEST_RELEASE", base + "/tag/v9.8.7"), end="")
     sys.exit(0)
+api = "https://api.github.com/repos/merelang/mere/releases"
+if url == api + "/latest":
+    if mode != "api-resolve": sys.exit(44)
+    print(os.environ["MERE_TEST_METADATA"])
+    sys.exit(0)
+if url == api + "/tags/v9.8.7":
+    if not mode.startswith("api"):
+        sys.exit(44)
+    output = args[args.index("-o") + 1]
+    Path(output).write_text(os.environ["MERE_TEST_METADATA"])
+    sys.exit(22 if mode == "api-metadata-failed" else 0)
+if url.startswith(api + "/assets/"):
+    if not mode.startswith("api"):
+        sys.exit(44)
+    name = url.rsplit("/", 1)[-1]
+    output = args[args.index("-o") + 1]
+    source = os.environ["MERE_TEST_SUMS" if name == "1" else "MERE_TEST_BINARY"]
+    shutil.copyfile(source, output)
+    sys.exit(22 if mode == "api-download-failed" else 0)
+if mode.startswith("api"):
+    sys.exit(22)
 prefix = base + "/download/v9.8.7/"
 legacy = base + "/latest/download/"
 if url.startswith(legacy):
@@ -91,6 +114,11 @@ class InstallerCheck(unittest.TestCase):
         helper.write_text(CURL)
         self.write_tool("curl", "exec " + shlex.quote(sys.executable) + " "
                         + shlex.quote(str(helper)) + ' "$@"\n')
+        self.metadata = {"tag_name": TAG, "body": '\"name\": \"mere-linux-x86_64\" {}',
+                         "assets": [{"name": name, "id": i,
+                                     "uploader": {"name": "SHA256SUMS", "id": 99}}
+                                    for i, name in enumerate(("SHA256SUMS",) + ASSETS, 1)]}
+        self.env["MERE_TEST_METADATA"] = json.dumps(self.metadata)
         self.make_binary()
 
     def write_tool(self, name, body):
@@ -133,13 +161,60 @@ class InstallerCheck(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), self.binary.read_bytes())
         self.assertEqual(self.target.stat().st_mode & 0o777, 0o755)
         self.assertEqual(list(self.bindir.glob(".mere-install.*")), [])
-        self.assertEqual(self.requests.read_text().splitlines(), [
-            BASE + "/latest", BASE + "/download/" + TAG + "/SHA256SUMS",
-            BASE + "/download/" + TAG + "/" + asset])
+        requests = [BASE + "/latest", BASE + "/download/" + TAG + "/SHA256SUMS",
+                    BASE + "/download/" + TAG + "/" + asset]
+        if self.env.get("MERE_TEST_FAILURE", "").startswith("api"):
+            api = "https://api.github.com/repos/merelang/mere/releases"
+            requests = requests[:2] + [api + "/tags/" + TAG, api + "/assets/1",
+                                      requests[2], api + "/assets/" + ("2" if asset == ASSETS[0] else "3")]
+        if self.env.get("MERE_TEST_FAILURE") == "api-resolve":
+            requests.insert(1, api + "/latest")
+        self.assertEqual(self.requests.read_text().splitlines(), requests)
         calls = self.executions.read_text().splitlines()
         self.assertEqual(calls[0], "--version")
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[1].endswith("/smoke.mere"))
+
+    def test_api_latest_resolution(self):
+        self.env["MERE_TEST_FAILURE"] = "api-resolve"
+        self.assert_success()
+
+    def test_api_fallback_verified_update(self):
+        self.env["MERE_TEST_FAILURE"] = "api"
+        self.assert_success()
+
+    def test_api_fallback_macos_pretty_metadata(self):
+        self.env.update(MERE_TEST_FAILURE="api", MERE_TEST_OS="Darwin", MERE_TEST_ARCH="arm64",
+                        MERE_TEST_METADATA=json.dumps(self.metadata, indent=2))
+        self.assert_success(ASSETS[1])
+
+    def test_api_fallback_refuses_wrong_metadata(self):
+        for mode in ("tag", "missing", "duplicate", "invalid-id", "quoted-id", "truncated"):
+            with self.subTest(mode=mode):
+                metadata = json.loads(json.dumps(self.metadata))
+                if mode == "tag": metadata["tag_name"] = "v9.8.6"
+                if mode == "missing": metadata["assets"] = metadata["assets"][1:]
+                if mode == "duplicate": metadata["assets"] += metadata["assets"]
+                if mode == "invalid-id": metadata["assets"][0]["id"] = -1
+                if mode == "quoted-id": metadata["assets"][0]["id"] = "1"
+                text = json.dumps(metadata)
+                if mode == "truncated": text = text[:-1]
+                self.env.update(MERE_TEST_FAILURE="api", MERE_TEST_METADATA=text)
+                self.assert_failure()
+                self.assertFalse(self.executions.exists())
+
+    def test_api_fallback_failures_preserve_existing_binary(self):
+        for mode in ("api-metadata-failed", "api-download-failed"):
+            with self.subTest(mode=mode):
+                self.env["MERE_TEST_FAILURE"] = mode
+                self.assert_failure()
+                self.assertFalse(self.executions.exists())
+
+    def test_api_fallback_checksums_precede_execution(self):
+        self.env["MERE_TEST_FAILURE"] = "api"
+        self.sums.write_text("0" * 64 + "  " + ASSETS[0] + "\n")
+        self.assert_failure()
+        self.assertFalse(self.executions.exists())
 
     def test_verified_update(self):
         self.assert_success()

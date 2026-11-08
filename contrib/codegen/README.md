@@ -1,5 +1,14 @@
 # contrib/codegen — Mere self-hosted Wasm codegen (Phase 53)
 
+Current pattern selection short-circuits through constructors and aggregate
+components, reserving shared local homes for alternative bindings. Only the
+first matching route supplies the guard and body. Repeated names are stored
+in traversal order, with aliases preceding their inner patterns, so the last
+occurrence is visible. Prefix matching, equality and literal interning compare
+stored lengths and all bytes, including NUL. WAT data escapes control and
+non-ASCII bytes. Pattern lets trap on a structural miss. The stage tables
+below record the implementation history.
+
 The OCaml `Mere.Codegen_wasm` (`lib/codegen_wasm.ml`, 5491 lines) is
 the reference implementation; this directory holds the in-progress
 Mere self-host of the same emitter. §S3 closes once 53a–53g land.

@@ -1,5 +1,11 @@
 # contrib/parser — Mere self-hosted parser (Phase 50 in progress)
 
+The current self-host parser accepts parenthesized alternatives inside
+constructors, tuples, records, lists and aliases, and `"prefix" <> suffix`
+patterns. A bare `|` still separates match alternatives; nested alternatives
+use parentheses. Prefix literals accept `\0`, and suffixes preserve bytes.
+The stage tables below record the implementation history.
+
 The OCaml `Mere.Lexer` (lib/lexer.ml, 391 lines) and `Mere.Parser`
 (lib/parser.ml, 1935 lines) are the reference implementations; this
 directory holds the in-progress Mere self-host so that

@@ -305,6 +305,38 @@ downstream preflight requires Perl for comment counts. The full unit suite
 remains in compiler and README execution remains in containers.
 All 191 gates, nine groups and four build configurations remain required.
 
+## Self-host pattern verification
+
+`scripts/selfhost_check.sh` rebuilds the CLI compiler in an isolated temporary
+directory on every run. Both pattern fixtures' `.expected` companions are
+required. Their combined 42 handwritten lines must match the reference
+interpreter and Wasm, the self-host evaluator under the interpreter and Wasm, and programs emitted by
+the self-host compiler running on Wasm. Emission, assembly and runtime failures
+fail the gate, including when several paths agree on the same wrong output.
+The existing compiler-group gate retains this verification; all 191 gates,
+nine groups and four build configurations remain required.
+
+CI, Pages and release builds populate the opam tool cache through the official
+GitHub release API before running the pinned OCaml setup action. Downloads must
+match the release's sizes and SHA-256 digests and pass detached GPG signature
+verification against the setup action's expected primary key. The completion
+marker is written only after verification and an atomic executable replacement.
+The existing assignment gate checks bootstrap ordering and runs signature,
+digest, interrupted-download and cache-publication controls. Compiler caching,
+all 191 gates and all build configurations remain required.
+
+Pinned Wasm, protobuf and gRPC oracle archives also use the release API. The
+shared downloader checks release identity, size and SHA-256 before atomically
+replacing an archive; older assets without digest metadata require a reviewed
+SHA-256 pin in the workflow. Each API request has a 45-second timeout and at
+most two attempts. The assignment gate checks failed and partial downloads,
+wrong metadata and preservation of a previously verified destination.
+
+The public installer tries official release API endpoints when browser release
+redirects fail, including latest-tag resolution. Both binary and checksums stay
+pinned to that tag. The existing SHA-256, version and program execution checks
+still precede atomic replacement; API failures preserve an existing install.
+
 ## Binary releases
 
 `release-build.yml` is shared by the distribution CI jobs and tagged

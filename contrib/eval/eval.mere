@@ -145,6 +145,14 @@ let rec match_pattern = fn (p: pattern) -> fn (v: value) ->
     (match v with
       | VStr s2 -> if s == s2 then Some Nil else None
       | _ -> None)
+  | PStrPrefix (prefix, name) ->
+    (match v with
+      | VStr text ->
+        if str_starts_with text prefix then
+          if str_eq name "_" then Some Nil
+          else Some (Cons ((name, VStr (substring text (str_len prefix) (str_len text))), Nil))
+        else None
+      | _ -> None)
   | PUnit ->
     (match v with
       | VUnit -> Some Nil
@@ -223,12 +231,11 @@ and concat_bindings = fn (a: (str * value) list) -> fn (b: (str * value) list) -
   | Nil -> b
   | Cons (h, t) -> Cons (h, concat_bindings t b);
 
-// Prepend a list of bindings to an env (left-most binding wins on
-// lookup since `lookup_env` is linear-left-to-right).
+// Bind in traversal order: the last occurrence shadows earlier ones.
 let rec extend_env = fn (bindings: (str * value) list) -> fn (e: env) ->
   match bindings with
   | Nil -> e
-  | Cons (b, rest) -> Cons (b, extend_env rest e);
+  | Cons (b, rest) -> extend_env rest (Cons (b, e));
 
 // === Operator dispatch =====================================================
 //
@@ -470,6 +477,10 @@ and apply_builtin = fn (name: str) -> fn (v: value) ->
     (match v with
       | VStr s -> let _ = print s in VUnit
       | _ -> fail "print: expected str")
+  else if name == "str_len" then
+    (match v with
+      | VStr text -> VInt (str_len text)
+      | _ -> fail "str_len: expected str")
   else if name == "show" then
     VStr (value_to_str v)
   else fail ("unknown builtin: " ++ name)
@@ -484,7 +495,8 @@ and apply_builtin = fn (name: str) -> fn (v: value) ->
 let initial_env =
   (Cons (("print", VBuiltin "print"),
    Cons (("show", VBuiltin "show"),
-   Nil)) : env);
+   Cons (("str_len", VBuiltin "str_len"),
+   Nil))) : env);
 
 // Apply one top-level decl, returning the updated env. Type decls
 // (`TopType` / `TopRecord` / `TopTypeAlias`) carry no runtime

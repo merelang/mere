@@ -171,7 +171,7 @@ let read_digit_run = fn (s: str) -> fn (n: int) -> fn (i: int) ->
 
 // Read a quoted string literal. Assumes `s[i] == '"'`. Returns the
 // decoded string (escapes processed) and the index right after the
-// closing `"`. Supports `\n` `\t` `\"` `\\` `\{`.
+// closing `"`. Supports `\n` `\t` `\r` `\0` `\"` `\\` `\{`.
 let read_string_lit = fn (s: str) -> fn (n: int) -> fn (i: int) ->
   let buf = strbuf_new () in
   let rec loop = fn (j: int) ->
@@ -190,6 +190,7 @@ let read_string_lit = fn (s: str) -> fn (n: int) -> fn (i: int) ->
           // by itself, turning every 'r' in emitted data segments into
           // \0d (found as the LAST diff blocking the bootstrap fixpoint).
           else if esc == "r" then strbuf_push buf "\r"
+          else if esc == "0" then strbuf_push buf "\0"
           else if esc == "\"" then strbuf_push buf "\""
           else if esc == "\\" then strbuf_push buf "\\"
           else if esc == "\{" then strbuf_push buf "\{"

@@ -599,7 +599,101 @@ let cmp_needs_int = fn (op: cmpop) ->
 // rejected by the typer, but pattern bindings are still extracted
 // correctly. Stage 52f tightens this once `TopType` decls flow in.
 
+// Validate original branch names before removing bindings hidden by a later
+// occurrence. Otherwise a hidden name could conceal an invalid alternative.
+let rec pattern_name_member = fn (name: str) -> fn (names: str list) ->
+  match names with
+  | Nil -> false
+  | Cons (n, rest) -> str_eq name n || pattern_name_member name rest;
+
+let rec require_pattern_names = fn (names: str list) -> fn (other: str list) ->
+  match names with
+  | Nil -> ()
+  | Cons (name, rest) ->
+    if pattern_name_member name other then require_pattern_names rest other
+    else fail ("or-pattern alternatives must bind the same names: " ++ name);
+
+let rec validated_pattern_names = fn (p: pattern) ->
+  match p with
+  | PVar n -> Cons (n, Nil)
+  | PStrPrefix (_, n) -> if str_eq n "_" then Nil else Cons (n, Nil)
+  | PAs (sub, n) -> add_unique_str n (validated_pattern_names sub)
+  | POr (a, b) ->
+    let left = validated_pattern_names a in
+    let right = validated_pattern_names b in
+    let _ = require_pattern_names left right in
+    let _ = require_pattern_names right left in
+    left
+  | PTuple ps -> validated_pattern_list_names ps
+  | PRecord (_, fields) -> validated_pattern_field_names fields
+  | PConstr (_, Some sub) -> validated_pattern_names sub
+  | _ -> Nil
+
+and validated_pattern_list_names = fn (ps: pattern list) ->
+  match ps with
+  | Nil -> Nil
+  | Cons (p, rest) -> union_str_names (validated_pattern_names p) (validated_pattern_list_names rest)
+
+and validated_pattern_field_names = fn (fields: (str * pattern) list) ->
+  match fields with
+  | Nil -> Nil
+  | Cons (entry, rest) ->
+    let (_, p) = entry in
+    union_str_names (validated_pattern_names p) (validated_pattern_field_names rest);
+
+// Walk right to left, retaining every structural test while removing hidden
+// bindings before their types can constrain an alternative's visible names.
+let rec visible_pattern = fn (p: pattern) -> fn (seen: str list) ->
+  match p with
+  | PVar n ->
+    if pattern_name_member n seen then (PWild, seen)
+    else (p, Cons (n, seen))
+  | PStrPrefix (lit, n) ->
+    if str_eq n "_" || pattern_name_member n seen then (PStrPrefix (lit, "_"), seen)
+    else (p, Cons (n, seen))
+  | PAs (sub, n) ->
+    let (inner, seen1) = visible_pattern sub seen in
+    if pattern_name_member n seen1 then (inner, seen1)
+    else (PAs (inner, n), Cons (n, seen1))
+  | POr (a, b) ->
+    let (left, seen1) = visible_pattern a seen in
+    let (right, _) = visible_pattern b seen in
+    (POr (left, right), seen1)
+  | PTuple ps ->
+    let (parts, seen1) = visible_pattern_list ps seen in
+    (PTuple parts, seen1)
+  | PRecord (name, fields) ->
+    let (parts, seen1) = visible_pattern_fields fields seen in
+    (PRecord (name, parts), seen1)
+  | PConstr (name, Some sub) ->
+    let (inner, seen1) = visible_pattern sub seen in
+    (PConstr (name, Some inner), seen1)
+  | _ -> (p, seen)
+
+and visible_pattern_list = fn (ps: pattern list) -> fn (seen: str list) ->
+  match ps with
+  | Nil -> (Nil, seen)
+  | Cons (p, rest) ->
+    let (tail, seen1) = visible_pattern_list rest seen in
+    let (head, seen2) = visible_pattern p seen1 in
+    (Cons (head, tail), seen2)
+
+and visible_pattern_fields = fn (fields: (str * pattern) list) -> fn (seen: str list) ->
+  match fields with
+  | Nil -> (Nil, seen)
+  | Cons (entry, rest) ->
+    let (name, p) = entry in
+    let (tail, seen1) = visible_pattern_fields rest seen in
+    let (head, seen2) = visible_pattern p seen1 in
+    (Cons ((name, head), tail), seen2);
+
 let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
+                     -> fn (env: type_env) -> fn (s: infer_state) ->
+  let _ = validated_pattern_names p in
+  let (visible, _) = visible_pattern p Nil in
+  check_visible_pattern visible expected env s
+
+and check_visible_pattern = fn (p: pattern) -> fn (expected: ty)
                      -> fn (env: type_env) -> fn (s: infer_state) ->
   // Phase 55c-2c: env threaded through so PRecord can look up the
   // declared field tys via the same __record_field__ sentinel keys
@@ -611,6 +705,10 @@ let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
   | PInt _ -> (Nil, unify_state s expected TyInt)
   | PBool _ -> (Nil, unify_state s expected TyBool)
   | PStr _ -> (Nil, unify_state s expected TyStr)
+  | PStrPrefix (_, name) ->
+    let s1 = unify_state s expected TyStr in
+    if str_eq name "_" then (Nil, s1)
+    else (Cons ((name, mono TyStr), Nil), s1)
   | PUnit -> (Nil, unify_state s expected TyUnit)
   | PTuple ps ->
     let n = list_len_p ps in
@@ -618,10 +716,14 @@ let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
     let s2 = unify_state s1 expected (TyTuple elem_tys) in
     check_pattern_list ps elem_tys env s2
   | PAs (sub, name) ->
-    let (sub_binds, s1) = check_pattern sub expected env s in
-    (Cons ((name, mono expected), sub_binds), s1)
-  | POr (p1, _p2) ->
-    check_pattern p1 expected env s
+    let (sub_binds, s1) = check_visible_pattern sub expected env s in
+    (merge_pattern_bindings (Cons ((name, mono expected), Nil)) sub_binds, s1)
+  | POr (p1, p2) ->
+    let (left, s1) = check_visible_pattern p1 expected env s in
+    let (right, s2) = check_visible_pattern p2 expected env s1 in
+    let s3 = unify_pattern_bindings left right s2 in
+    let s4 = unify_pattern_bindings right left s3 in
+    (left, s4)
   | PConstr (name, sub_opt) ->
     // Phase 55c-3: if the ctor was registered via TopType, look up
     // its scheme, instantiate (freshening quantified param metas),
@@ -644,21 +746,21 @@ let rec check_pattern = fn (p: pattern) -> fn (expected: ty)
             // declared payload ty so sub-bindings pick up the right
             // ty (e.g. `x: int` in `| Some x -> ...`).
             let s2 = unify_state s1 expected ret_ty in
-            check_pattern sub_p payload_ty env s2
+            check_visible_pattern sub_p payload_ty env s2
           | (_, None) ->
             // Ctor declared with payload but used nullary — permissive
             (Nil, s1)
           | (_, Some sub_p) ->
             // Ctor declared nullary but used with payload — permissive
             let (a, s2) = fresh_meta s1 in
-            check_pattern sub_p a env s2)
+            check_visible_pattern sub_p a env s2)
       | None ->
         // Undeclared ctor — pre-55c-3 permissive path
         (match sub_opt with
           | None -> (Nil, s)
           | Some sub_p ->
             let (a, s1) = fresh_meta s in
-            check_pattern sub_p a env s1))
+            check_visible_pattern sub_p a env s1))
   | PRecord (name, field_pats) ->
     let s1 = unify_state s expected (TyCon (name, Nil)) in
     check_record_field_pats field_pats name env s1
@@ -680,9 +782,9 @@ and check_record_field_pats = fn (fps: (str * pattern) list)
     let (a, s1) = (match lookup_scheme_opt key env with
       | Some sch -> instantiate sch s
       | None -> fresh_meta s) in
-    let (bs1, s2) = check_pattern sub_p a env s1 in
+    let (bs1, s2) = check_visible_pattern sub_p a env s1 in
     let (bs2, s3) = check_record_field_pats rest record_name env s2 in
-    (concat_scheme_bindings bs1 bs2, s3)
+    (merge_pattern_bindings bs1 bs2, s3)
 
 and check_pattern_list = fn (ps: pattern list) -> fn (ts: ty list)
                       -> fn (env: type_env)
@@ -690,10 +792,33 @@ and check_pattern_list = fn (ps: pattern list) -> fn (ts: ty list)
   match (ps, ts) with
   | (Nil, Nil) -> ((Nil, s) : ((str * scheme) list * infer_state))
   | (Cons (p, ps_rest), Cons (t, ts_rest)) ->
-    let (bs1, s1) = check_pattern p t env s in
+    let (bs1, s1) = check_visible_pattern p t env s in
     let (bs2, s2) = check_pattern_list ps_rest ts_rest env s1 in
-    (concat_scheme_bindings bs1 bs2, s2)
+    (merge_pattern_bindings bs1 bs2, s2)
   | _ -> fail "check_pattern_list: pattern/type arity mismatch"
+
+// Keep the last binding's type without constraining hidden occurrences.
+and merge_pattern_bindings = fn (earlier: (str * scheme) list)
+                            -> fn (later: (str * scheme) list) ->
+  match earlier with
+  | Nil -> later
+  | Cons (entry, rest) ->
+    let (name, _) = entry in
+    (match lookup_scheme_opt name later with
+      | Some _ -> merge_pattern_bindings rest later
+      | None -> Cons (entry, merge_pattern_bindings rest later))
+
+and unify_pattern_bindings = fn (left: (str * scheme) list)
+                            -> fn (right: (str * scheme) list)
+                            -> fn (s: infer_state) ->
+  match left with
+  | Nil -> s
+  | Cons (entry, rest) ->
+    let (name, (_, t)) = entry in
+    (match lookup_scheme_opt name right with
+      | None -> fail ("or-pattern alternatives must bind the same names: " ++ name)
+      | Some (_, other) ->
+        unify_pattern_bindings rest right (unify_state s t other))
 
 and concat_scheme_bindings = fn (a: (str * scheme) list)
                           -> fn (b: (str * scheme) list) ->
