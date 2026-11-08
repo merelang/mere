@@ -4,6 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.715 — 2026-11-08
+
+The self-host Wasm compiler short-circuits `&&` and `||`: the left operand
+runs once, and the right operand runs only when needed. Skipped division traps
+and operand side effects now agree with the reference interpreter, Wasm and
+self-host evaluator. Conditional lowering preserves the right operand's tail
+position in both Wasm emitters; both execute 50,000 logical tail calls with
+the default Node stack limit.
+
+The self-host typer records declared field sets, including empty records.
+Literals require every declared field exactly once. Access, updates and patterns
+reject unknown fields while allowing partial patterns and updates. Both
+inference and annotation register the shape metadata, using keys unavailable
+to source identifiers. Existing unregistered-record AST compatibility remains.
+
+Two new runtime fixtures bring the required handwritten oracles to 63 output
+lines across four fixtures and five execution paths. Nine invalid records must
+be refused by the reference typer and interpreted/compiled self-host typer
+with the expected field diagnostic; unrelated failures do not count. A valid
+record must still compile and execute. The full-toolchain suite has 3,112 tests,
+with 251 parity programs and all 191 gates, nine groups and four build
+configurations retained.
+
 ## v0.1.714 — 2026-11-08
 
 The Mere self-hosted parser, evaluator, typer, formatter and Wasm compiler

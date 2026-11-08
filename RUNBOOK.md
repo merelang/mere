@@ -305,16 +305,24 @@ downstream preflight requires Perl for comment counts. The full unit suite
 remains in compiler and README execution remains in containers.
 All 191 gates, nine groups and four build configurations remain required.
 
-## Self-host pattern verification
+## Self-host semantic verification
 
 `scripts/selfhost_check.sh` rebuilds the CLI compiler in an isolated temporary
-directory on every run. Both pattern fixtures' `.expected` companions are
-required. Their combined 42 handwritten lines must match the reference
-interpreter and Wasm, the self-host evaluator under the interpreter and Wasm, and programs emitted by
-the self-host compiler running on Wasm. Emission, assembly and runtime failures
-fail the gate, including when several paths agree on the same wrong output.
-The existing compiler-group gate retains this verification; all 191 gates,
-nine groups and four build configurations remain required.
+directory on every run. The pattern, pattern-visibility, logic and record
+fixtures require their `.expected` companions. Their combined 63 handwritten
+lines must match the reference interpreter and Wasm, the self-host evaluator
+under the interpreter and Wasm, and programs emitted by the self-host compiler
+running on Wasm. Emission, assembly, runtime and missing-oracle failures fail
+the gate, including when several paths agree on the same wrong output.
+
+`scripts/selfhost_record_check.py` requires nine invalid-record cases to fail
+with field diagnostics on the reference typer, interpreted self-host typer
+and compiled self-host typer. A valid reordered record must still compile and
+execute. Unrelated parse errors, successful commands printing an error, signals
+and bare traps cannot satisfy a refusal. Both compiled routes also execute
+50,000 logical tail calls without increasing stack or memory limits. This runs
+inside the existing compiler-group gate; all 191 gates, nine groups and four
+build configurations remain required.
 
 CI, Pages and release builds populate the opam tool cache through the official
 GitHub release API before running the pinned OCaml setup action. Downloads must

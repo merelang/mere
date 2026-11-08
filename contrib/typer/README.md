@@ -6,6 +6,15 @@ keep their structural checks without constraining the visible occurrence's
 type. Prefix suffix bindings have type `str`. The stage tables below record
 the implementation history.
 
+Declared record literals must contain every field exactly once. Field access,
+updates and patterns reject unknown fields; patterns and updates may mention a
+subset, and repeated fields remain allowed in those two forms.
+An empty record has explicit shape metadata too. Shape keys cannot be written
+as source identifiers. Both ordinary inference and annotation register shapes,
+while the existing compatibility path for unregistered, hand-built record ASTs
+remains available. Explicit type parameters in declaration heads and complete
+polymorphic record inference remain outside this slice.
+
 The OCaml `Mere.Typer` (`lib/typer.ml`, 1893 lines) is the reference
 implementation; this directory holds the in-progress Mere self-host of
 the same type inferencer. §S2.B closes once 52a–52g land.

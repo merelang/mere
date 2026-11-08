@@ -1,0 +1,9 @@
+missing	field set mismatch	field set mismatch	type R = { a: int, b: int }; R { a = 1 }
+extra	field set mismatch	has no field	type R = { a: int }; R { a = 1, b = 2 }
+duplicate	field set mismatch	field set mismatch	type R = { a: int }; R { a = 1, a = 2 }
+missing-all	field set mismatch	field set mismatch	type R = { a: int }; R {}
+empty-extra	field set mismatch	has no field	type R = {}; R { a = 1 }
+field-get	has no field	has no field	type R = { a: int }; (R { a = 1 }).b
+update	has no field	has no field	type R = { a: int }; let r = R { a = 1 }; { r | b = 2 }
+pattern	has no field	has no field	type R = { a: int }; match R { a = 1 } with R { b = x } -> x
+nested	field set mismatch	field set mismatch	type R = { a: int, b: int }; type Wrap = { r: R }; Wrap { r = R { a = 1 } }
