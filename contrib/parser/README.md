@@ -15,6 +15,12 @@ instead of hand-coded AST literals.
 Together with `contrib/fmt/`, this directory completes the §S1
 self-host plan.
 
+Type declaration heads accept a single parameter (`type 'a Box = ...`) or
+multiple parameters (`type ('a, 'b) Pair = ...`). Type applications accept
+`int Box` and `(int, bool) Pair`. Module flattening carries type references
+through annotations, aliases, fields and variant payloads. The formatter
+retains declaration parameters and application grouping.
+
 ## Files
 
 | file | scope | lines |

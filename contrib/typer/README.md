@@ -11,9 +11,21 @@ updates and patterns reject unknown fields; patterns and updates may mention a
 subset, and repeated fields remain allowed in those two forms.
 An empty record has explicit shape metadata too. Shape keys cannot be written
 as source identifiers. Both ordinary inference and annotation register shapes,
-while the existing compatibility path for unregistered, hand-built record ASTs
-remains available. Explicit type parameters in declaration heads and complete
-polymorphic record inference remain outside this slice.
+while unregistered, hand-built record literals and patterns retain their
+compatibility path. Field access and updates require a receiver whose type is
+already known to be one of the declared records; annotate lambda parameters when needed.
+
+Declaration heads accept `type 'a Box = ...` and `type ('a, 'b) Pair = ...`.
+Records, variants and aliases preserve those arguments. A record's fields,
+accesses, updates and patterns share the receiver's arguments; separate uses
+instantiate independently. Substitution links are resolved against the entire
+substitution, including newer constraints before an older link.
+
+Aliases expand in annotations, constructor payloads, record fields and extern
+signatures. Expansion captures declaration order: forward or recursive names
+remain nominal, and a use with the wrong arity does not expand. Module
+flattening rewrites type references alongside declarations. Annotation and
+ordinary inference use the same declaration registration path.
 
 The OCaml `Mere.Typer` (`lib/typer.ml`, 1893 lines) is the reference
 implementation; this directory holds the in-progress Mere self-host of

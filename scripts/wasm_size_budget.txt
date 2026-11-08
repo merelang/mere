@@ -69,8 +69,15 @@ hello.wasm                     1757     2148
 raytrace.wasm                  5496     6718
 rvconsole.wasm                 5448     6659
 selfhost-compile.wasm        152044   185831
-selfhost-fmt.wasm             85611   104636
-selfhost-repl.wasm           101928   124579
+# v0.1.716: parameterized type heads/applications and module type-reference
+# rewriting grow fmt 102306 -> 110229 B and repl 120701 -> 129146 B with
+# wasm-opt 132. The optimized formatter preserves six fixtures (85 oracle
+# lines) through idempotent round trips; the optimized REPL executes all seven
+# fixtures (89 lines), and the optimized typer accepts five positive cases and
+# refuses all 28 malformed programs. Recenter these two bands only, retaining
+# the -10% / +10% policy; the other 13 bands stay unchanged.
+selfhost-fmt.wasm             99206   121252
+selfhost-repl.wasm           116231   142061
 # v0.1.715: declared-record field-set validation and logical tail propagation
 # grow the optimized type checker from 135314 to 142203 B (wasm-opt 132).
 # Recenter only this module with the same -10% / +10% policy. The actual

@@ -1,0 +1,19 @@
+integer-get	field access on non-record	field access on non-record	let x = 1; x.a
+integer-update	record update base must be a record	record update base must be a record	let x = 1; { x | a = 2 }
+unknown-get	field access on non-record	field access on non-record	type R = { a: int }; let get = fn r -> r.a; get (R { a = 1 })
+unknown-update	record update base must be a record	record update base must be a record	type R = { a: int }; let set = fn r -> { r | a = 2 }; set (R { a = 1 })
+variant-get	field access on non-record	field access on non-record	type T = C of int; (C 1).a
+variant-update	record update base must be a record	record update base must be a record	type T = C of int; let x = C 1; { x | a = 2 }
+opaque-get	field access on non-record	field access on non-record	extern type Handle; extern fn get: unit -> Handle; (get ()).a
+list-get	field access on non-record	field access on non-record	[1].a
+shared-fields	type error:	type mismatch	type 'a R = { a: 'a, b: 'a }; R { a = 1, b = true }
+wrong-get-result	type error:	type mismatch	type 'a R = { a: 'a }; ((R { a = 1 }).a : bool)
+wrong-update	type error:	type mismatch	type 'a R = { a: 'a }; let r = R { a = 1 }; { r | a = true }
+wrong-pattern	type error:	type mismatch	type 'a R = { a: 'a }; match R { a = 1 } with R { a = true } -> 0 | _ -> 1
+two-args	type error:	type mismatch	type ('a, 'b) R = { a: 'a, b: 'b }; (R { a = 1, b = true } : (bool, int) R)
+alias-payload	type error:	type mismatch	type N = int; type T = C of N; C true
+alias-field	type error:	type mismatch	type N = int; type R = { a: N }; R { a = true }
+alias-annotation	type error:	type mismatch	type N = int; (true : N)
+alias-arity	type error:	type mismatch	type 'a X = 'a list; (1 : X)
+forward-alias	type error:	type mismatch	type X = Y; type Y = int; (1 : X)
+recursive-alias	type error:	type mismatch	type X = X; (1 : X)

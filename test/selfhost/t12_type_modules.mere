@@ -1,0 +1,16 @@
+// Type names retain module scope through flattening and alias expansion.
+module M {
+  type Number = int;
+  type 'a Cell = { value: 'a };
+  type 'a View = 'a Cell;
+  type ('a, 'b) Choice = Left of 'a | Right of 'b;
+  let read = fn (c: Number View) -> c.value;
+  let make = fn x -> Cell { value = x };
+  let extract = fn (c: Number View) -> match c with Cell { value = n } -> n;
+};
+let _ = print (show (M.read (M.make 37)));
+let c = M.Cell { value = true };
+let _ = print (show c.value);
+let _ = print (show (M.extract (M.Cell { value = 41 })));
+let _ = print (show ((43 : M.Number) + 1));
+()

@@ -1,0 +1,24 @@
+// One receiver's arguments constrain every field and pattern at that use.
+type 'a Box = { value: 'a };
+type 'a Same = { left: 'a, right: 'a };
+type ('a, 'b) Pair = { first: 'a, second: 'b };
+type 'a Maybe = Nothing | Just of 'a;
+type 'a Alias = 'a Box;
+let b = Box { value = 17 };
+let text = Box { value = "hello" };
+let _ = print (show b.value);
+let _ = print text.value;
+let _ = print (show ((Box { value = 19 } : int Alias).value));
+let both = Same { right = 5, left = 4 };
+let _ = print (show (both.left + both.right));
+let changed = { b | value = 23 };
+let _ = print (show changed.value);
+let _ = print (show b.value);
+let _ = print (show (match b with Box { value = n } -> n));
+let _ = print (show (match both with Same { right = n } -> n));
+let pair = (Pair { second = true, first = 29 } : (int, bool) Pair);
+let _ = print (show pair.first);
+let _ = print (show pair.second);
+let _ = print (show (match Just 31 with Just n -> n | Nothing -> 0));
+let _ = print (match Just "world" with Just s -> s | Nothing -> "empty");
+()

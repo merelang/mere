@@ -441,6 +441,16 @@ let inc1 = (+) 1 in ...             // turning operators into functions is not y
 For declared records, the self-host typer requires every literal field exactly
 once and refuses unknown fields in access, updates and patterns. Partial
 patterns and updates are allowed; empty records retain their declared shape.
+Field access and updates require a known declared-record receiver. For a lambda,
+annotate the parameter (for example, `fn (p: Point) -> p.x`).
+
+The self-host parser and typer support parameterized record, variant and alias
+heads, including `type 'a Box = { value: 'a };` and
+`type ('a, 'b) Pair = { first: 'a, second: 'b };`. All fields and operations on
+one record share its type arguments; separate constructions instantiate them
+independently. Aliases expand in annotations, fields, payloads and extern
+signatures in declaration order. Forward and recursive names remain nominal;
+an alias application with the wrong number of arguments does not expand.
 
 ```
 (1, 2, 3)                           // tuple

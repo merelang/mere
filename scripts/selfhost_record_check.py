@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require declared-record refusals and logical tail calls from the self-host CLI."""
+"""Require record/type refusals and logical tail calls from the self-host CLI."""
 import argparse
 import json
 from pathlib import Path
@@ -34,6 +34,11 @@ def check(mere, compiler):
             (ROOT / "test/selfhost/record_rejections.tsv").read_text().splitlines()]
     assert len(rows) == 9 and all(len(row) == 4 for row in rows), "record refusal inventory changed"
     assert len({row[0] for row in rows}) == 9
+    type_rows = [line.split("\t") for line in
+                 (ROOT / "test/selfhost/type_rejections.tsv").read_text().splitlines()]
+    assert len(type_rows) == 19 and all(len(row) == 4 for row in type_rows), "type refusal inventory changed"
+    assert len({row[0] for row in type_rows}) == 19
+    rows += type_rows
     host = ROOT / "scripts/run_wasm.js"
     with tempfile.TemporaryDirectory(prefix="mere-record-check-") as temporary:
         work = Path(temporary)
@@ -70,7 +75,7 @@ def check(mere, compiler):
             succeeds(["wat2wasm", "--enable-tail-call", wat, "-o", wasm])
             assert succeeds(["node", host, wasm]) == "true\n", label
         print("  logical tail calls: 50000 steps on reference/self-host Wasm passed", flush=True)
-    print("selfhost_record_check: 9 refusals on three paths, positive compilation and tail calls passed")
+    print("selfhost_record_check: 28 refusals on three paths, positive compilation and tail calls passed")
 
 
 def self_test():
