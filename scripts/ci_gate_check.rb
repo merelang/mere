@@ -275,6 +275,62 @@ module CIGates
     puts "ci_gates: #{mutations.length} negative controls caught; 36 result combinations checked"
   end
 
+  def self.check_release_tools(workflows)
+    tools = {
+      ["ci.yml", "gate_shards", "Install the Wasm component toolchain"] => [
+        "WASM_TOOLS=1.255.0", "WASMTIME=46.0.1", "BINARYEN=132",
+        "--repo bytecodealliance/wasm-tools", "--repo bytecodealliance/wasmtime", "--repo WebAssembly/binaryen"],
+      ["ci.yml", "gate_shards", "Install protoc (oracle for proto_parity)"] => [
+        "PROTOC=27.3", "--repo protocolbuffers/protobuf", "--sha256 6dab2adab83f915126cab53540d48957c40e9e9023969c3e84d44bfb936c7741"],
+      ["ci.yml", "gate_shards", "Install grpcurl (client for grpc_parity)"] => [
+        "GRPCURL=1.8.8", "--repo fullstorydev/grpcurl", "--sha256 a47140caf9b9ef019d4e3b5f7138b16f54b7a0da117a3c8258dc50911737a68b"],
+      ["pages.yml", "build", "Install binaryen (wasm-opt), pinned as in ci.yml"] => [
+        "BINARYEN=132", "--repo WebAssembly/binaryen"]
+    }
+    tools.each do |(file, job, label), pins|
+      step = workflows.fetch(file).fetch("jobs").fetch(job).fetch("steps").find { |s| s["name"] == label }
+      require!(step && step["timeout-minutes"].is_a?(Integer) && (1..10).cover?(step["timeout-minutes"]) &&
+               !step.key?("if") && !step["continue-on-error"] && step.fetch("env", {})["GH_TOKEN"] == "${{ github.token }}",
+               "#{label}: verified release tool installation must remain bounded and required")
+      run = step.fetch("run")
+      require!(run.include?("python3 scripts/ci_release_asset.py") && pins.all? { |pin| run.include?(pin) } &&
+               !run.include?("/releases/download/"), "#{label}: retain pinned release API downloads")
+    end
+  end
+
+  def self.release_tools_self_test(workflows)
+    checks = 0
+    [["ci.yml", "gate_shards", "Install the Wasm component toolchain"],
+     ["ci.yml", "gate_shards", "Install protoc (oracle for proto_parity)"],
+     ["ci.yml", "gate_shards", "Install grpcurl (client for grpc_parity)"],
+     ["pages.yml", "build", "Install binaryen (wasm-opt), pinned as in ci.yml"]].each do |file, job, label|
+      %w[removed skipped optional timeout token helper pin].each do |poison|
+        copy = Marshal.load(Marshal.dump(workflows))
+        steps = copy.fetch(file).fetch("jobs").fetch(job).fetch("steps")
+        step = steps.find { |s| s["name"] == label }
+        case poison
+        when "removed" then steps.delete(step)
+        when "skipped" then step["if"] = false
+        when "optional" then step["continue-on-error"] = true
+        when "timeout" then step.delete("timeout-minutes")
+        when "token" then step.delete("env")
+        when "helper" then step["run"].gsub!("python3 scripts/ci_release_asset.py", "curl")
+        when "pin" then step["run"].gsub!(/(?:WASM_TOOLS|PROTOC|GRPCURL|BINARYEN)=/, "UNPINNED=")
+        end
+        begin
+          check_release_tools(copy)
+        rescue Invalid
+          checks += 1
+          next
+        end
+        raise Invalid, "release tool control stayed green: #{label}/#{poison}"
+      end
+    end
+    stdout, stderr, status = Open3.capture3("python3", File.join(__dir__, "ci_release_asset.py"), "--self-test")
+    require!(status.success?, "release asset controls failed: #{stdout}#{stderr}")
+    puts "ci_gates: #{checks} release tool routing controls caught; digest and atomic replacement controls passed"
+  end
+
   def self.check_opam_setup(workflows)
     [["ci.yml", "build"], ["ci.yml", "gate_shards"],
      ["pages.yml", "build"], ["release-build.yml", "binary"]].each do |file, job|
@@ -403,8 +459,8 @@ module CIGates
     require!(apt_commands.length == 2 && apt_commands.all? { |line|
       %w[Acquire::Retries=2 Acquire::http::Timeout=30 Acquire::https::Timeout=30].all? { |flag| line.include?(flag) }
     }, "Pages apt requests need bounded retries and timeouts")
-    require!(%w[--retry\ 2 --connect-timeout\ 20 --max-time\ 180].all? { |flag| curl.fetch("run").include?(flag) },
-             "Pages curl requests need bounded retries and timeouts")
+    require!(curl.fetch("run").include?("python3 scripts/ci_release_asset.py --repo WebAssembly/binaryen"),
+             "Pages tool download must use the verified, bounded release API helper")
     [["release-build.yml", "binary", "Upload to draft release and verify the served bytes"],
      ["release.yml", "create-release", "Create (or reuse) the release"],
      ["release.yml", "checksums", "Publish checksums of the verified release assets"]].each do |file, job, label|
@@ -452,7 +508,7 @@ module CIGates
       steps = copy["pages.yml"]["jobs"]["build"]["steps"]
       case poison
       when "apt" then steps.find { |s| s["name"] == "Install wabt (wat2wasm)" }["run"].gsub!("Acquire::Retries=2", "Acquire::Retries=0")
-      when "curl" then steps.find { |s| s["name"] == "Install binaryen (wasm-opt), pinned as in ci.yml" }["run"].gsub!("--max-time 180", "")
+      when "curl" then steps.find { |s| s["name"] == "Install binaryen (wasm-opt), pinned as in ci.yml" }["run"].gsub!("python3 scripts/ci_release_asset.py", "curl")
       when "checkout" then steps.find { |s| s["uses"].to_s.start_with?("actions/checkout@") }.delete("timeout-minutes")
       when "transfer" then copy["release.yml"]["jobs"]["checksums"]["steps"].last.delete("timeout-minutes")
       when "deployment" then copy["pages.yml"]["jobs"]["deploy"]["steps"].first["if"] = false
@@ -581,11 +637,13 @@ if $PROGRAM_NAME == __FILE__
     end
     CIGates.check_setup(workflows)
     CIGates.check_opam_setup(workflows)
+    CIGates.check_release_tools(workflows)
     puts "ci_gates: #{assigned.values.sum(&:length)} checks assigned exactly once across #{assigned.length} groups"
     assigned.each { |group, checks| puts "  #{group}: #{checks.length}" }
     CIGates.self_test(workflow) if ARGV.include?("--self-test")
     CIGates.setup_self_test(workflows) if ARGV.include?("--self-test")
     CIGates.opam_setup_self_test(workflows) if ARGV.include?("--self-test")
+    CIGates.release_tools_self_test(workflows) if ARGV.include?("--self-test")
   rescue CIGates::Invalid, KeyError, Psych::Exception => e
     warn "ci_gates: #{e.message}"
     exit 1

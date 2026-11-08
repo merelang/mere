@@ -325,6 +325,18 @@ The existing assignment gate checks bootstrap ordering and runs signature,
 digest, interrupted-download and cache-publication controls. Compiler caching,
 all 191 gates and all build configurations remain required.
 
+Pinned Wasm, protobuf and gRPC oracle archives also use the release API. The
+shared downloader checks release identity, size and SHA-256 before atomically
+replacing an archive; older assets without digest metadata require a reviewed
+SHA-256 pin in the workflow. Each API request has a 45-second timeout and at
+most two attempts. The assignment gate checks failed and partial downloads,
+wrong metadata and preservation of a previously verified destination.
+
+The public installer tries official release API endpoints when browser release
+redirects fail, including latest-tag resolution. Both binary and checksums stay
+pinned to that tag. The existing SHA-256, version and program execution checks
+still precede atomic replacement; API failures preserve an existing install.
+
 ## Binary releases
 
 `release-build.yml` is shared by the distribution CI jobs and tagged

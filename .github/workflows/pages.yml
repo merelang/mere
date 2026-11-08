@@ -62,12 +62,15 @@ jobs:
       # away from the recorded ones without anything saying so.
       - name: Install binaryen (wasm-opt), pinned as in ci.yml
         timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           BINARYEN=132
           mkdir -p "$HOME/.local/bin"
-          curl --retry 2 --connect-timeout 20 --max-time 180 -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" \
-            | tar -xz -C /tmp
+          python3 scripts/ci_release_asset.py --repo WebAssembly/binaryen --tag "version_${BINARYEN}" \
+            --asset "binaryen-version_${BINARYEN}-x86_64-linux.tar.gz" --output /tmp/binaryen.tar.gz
+          tar -xzf /tmp/binaryen.tar.gz -C /tmp
           install "/tmp/binaryen-version_${BINARYEN}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 

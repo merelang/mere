@@ -2,37 +2,19 @@
 """Populate setup-ocaml's tool cache using signed GitHub release API assets."""
 import argparse
 import hashlib
-import json
 import os
 from pathlib import Path
 import platform
 import re
+from ci_release_asset import api, verify_asset
 import shutil
 import subprocess
 import tempfile
-import time
 import urllib.request
 
 # Matches the pinned setup-ocaml implementation, including its signing key.
 SIGNER = "92C526AE50DF39470EB2911BED4CF1CA67CBAA92"
 KEY_URL = "https://opam.ocaml.org/opam-dev-pubkey.pgp"
-
-
-def api(path, destination=None):
-    args = ["gh", "api", "--hostname", "github.com", path]
-    if destination is not None:
-        args[2:2] = ["-H", "Accept: application/octet-stream"]
-    for attempt in range(2):
-        try:
-            if destination is None:
-                return json.loads(subprocess.check_output(args, timeout=45))
-            with destination.open("wb") as output:
-                subprocess.run(args, stdout=output, check=True, timeout=45)
-            return
-        except (subprocess.SubprocessError, json.JSONDecodeError):
-            if attempt:
-                raise
-            time.sleep(2)
 
 
 def target(system, machine):
@@ -62,19 +44,6 @@ def select_release(releases, system, arch):
                 raise ValueError("selected opam release has no detached signature")
             return version, assets[name], assets[name + ".sig"]
     raise ValueError("no supported stable opam release")
-
-
-def verify_asset(path, asset):
-    if not isinstance(asset.get("id"), int) or asset["id"] <= 0:
-        raise ValueError("invalid release asset ID")
-    digest = asset.get("digest", "")
-    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-        raise ValueError("release asset has no SHA-256 digest")
-    if path.stat().st_size != asset.get("size"):
-        raise ValueError("release asset size differs from metadata")
-    actual = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    if actual != digest:
-        raise ValueError("release asset digest differs from metadata")
 
 
 def verify_status(status):

@@ -84,6 +84,12 @@ errors or missing output. A serial mode and required orchestration controls
 cover ordering, coverage, failure propagation and worker cancellation. All
 191 gates, nine integration groups and four build configurations remain required.
 
+Pinned CI oracle archives use the same bounded API transport with size and
+SHA-256 verification before extraction. The installer falls back to the
+official API when public release redirects fail, keeping checksum and binary
+version checks, a program execution check and atomic replacement. No additional
+installer dependencies are required.
+
 ## v0.1.713 — 2026-11-07
 
 `with` validates a record's instantiated close field as `unit -> unit`
