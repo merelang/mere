@@ -40,4 +40,6 @@ let _ = print (show (captured_tail ()));
 let _ = print (show (match (let _ = print "subject" in (2, 9)) with (1, x) | (x, 9) -> x | _ -> 99));
 let _ = print (show (match "a\0b" with "a\0c" -> 99 | _ -> 15));
 let _ = print (show (match "a\0b" with "a" <> tail -> str_len tail | _ -> 99));
+let _ = print (show (let x = 10 in let y = (let ((1, x) | (x, 9)) = (2, 9) in x) in x + y));
+let _ = print (show (let x = 10 in let y = (let "a" <> x = "abc" in str_len x) in x + y));
 ()

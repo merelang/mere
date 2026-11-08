@@ -12469,6 +12469,8 @@ let () =
     "prefix UTF-8", "match \"あい\" with \"あ\" <> tail -> str_len tail | _ -> 99", "3";
     "escaping selection", "let f = match (2, 9) with (1, x) | (x, 9) -> fn () -> x | _ -> fn () -> 0 in f ()", "2";
     "guard lexical scope", "match 5 with x when (let x = 9 in x == 9) -> x | _ -> 0", "5";
+    "pattern let lexical scope", "let x = 10 in let y = (let ((1, x) | (x, 9)) = (2, 9) in x) in x + y", "12";
+    "prefix let lexical scope", "let x = 10 in let y = (let \"a\" <> x = \"abc\" in str_len x) in x + y", "12";
     "pattern let", "let ((1, x) | (x, 9)) = (2, 9) in x", "2";
     "record traversal", "type Pair = { a: int, b: int }; match Pair { a = 1, b = 2 } with Pair { b = x, a = x } -> x", "1";
   ] in

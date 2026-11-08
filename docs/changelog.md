@@ -12,17 +12,19 @@ bindings from the first matching alternative before evaluating its guard;
 false guards advance to the next source arm. Duplicate names use the last
 binding in traversal order, including aliases and heterogeneous components.
 The typer checks both alternatives for matching name sets and visible types.
-Pattern lets check their selected route and refuse a runtime mismatch.
+Pattern lets check their selected route and refuse a runtime mismatch. Their
+local bindings stay within the let body, preserving outer names in later
+expressions.
 
 Prefix suffixes preserve exact byte boundaries, including NUL and UTF-8.
 Length-aware equality also keeps distinct binary literals separate during
 self-compilation, and WAT literals escape non-ASCII and control bytes.
 Formatter parentheses preserve nested choices and alias scope. The required
-self-host gate compares 36 handwritten output lines through five execution
+self-host gate compares 38 handwritten output lines through five execution
 paths, including the evaluator under both the interpreter and Wasm. The
 bootstrap fixpoint compiles a program using these patterns, compares its
 WAT byte for byte and executes it. Independent choices retain linear output
-growth. The full-toolchain unit suite has 3,051 tests; the ordinary parity
+growth. The full-toolchain unit suite has 3,057 tests; the ordinary parity
 inventory remains 251 programs.
 
 Generated C FFI headers include borrowed callback closure types, including

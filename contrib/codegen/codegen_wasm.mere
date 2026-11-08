@@ -876,7 +876,7 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
     // 53c-1 only handles PVar (one new local) and PWild (no binding).
     // Destructure patterns (PTuple etc.) land in 53d / 53e once we have
     // multi-value layout in linear memory.
-    (match pat with
+    let result = (match pat with
       | PVar name ->
         let s1 = emit_expr value_expr s in
         let s2 = alloc_local name s1 in
@@ -898,7 +898,9 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
         let (val_slot, s2) = alloc_tmp_local s1 in
         let s3 = push_instr ("local.set " ++ show val_slot) s2 in
         let s4 = emit_pattern_let pat val_slot s3 in
-        emit_expr body (set_tail is_tail s4))
+        emit_expr body (set_tail is_tail s4)) in
+    // A let expression's names never escape into its caller's continuation.
+    ({ result | locals = s.locals } : EmitState)
   | EIf (cond, then_e, else_e) ->
     // (cond) if (result i32) (then_e) else (else_e) end. The condition
     // i32 is consumed; both branches must push exactly one i32 result.
