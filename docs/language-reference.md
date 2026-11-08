@@ -451,6 +451,10 @@ one record share its type arguments; separate constructions instantiate them
 independently. Aliases expand in annotations, fields, payloads and extern
 signatures in declaration order. Forward and recursive names remain nominal;
 an alias application with the wrong number of arguments does not expand.
+Bare and module-qualified record/type names share their canonical bare identity.
+An identical record declaration can be restated inside a module and used with
+an outer record value. Later module aliases cannot capture earlier annotations,
+alias bodies or field types.
 
 ```
 (1, 2, 3)                           // tuple

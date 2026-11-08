@@ -23,9 +23,10 @@ substitution, including newer constraints before an older link.
 
 Aliases expand in annotations, constructor payloads, record fields and extern
 signatures. Expansion captures declaration order: forward or recursive names
-remain nominal, and a use with the wrong arity does not expand. Module
-flattening rewrites type references alongside declarations. Annotation and
-ordinary inference use the same declaration registration path.
+remain nominal, and a use with the wrong arity does not expand. Bare and
+module-qualified type names share one canonical identity. Module flattening
+preserves declaration order, so later aliases cannot capture earlier annotations,
+alias bodies or fields. Annotation and ordinary inference use the same declaration registration path.
 
 The OCaml `Mere.Typer` (`lib/typer.ml`, 1893 lines) is the reference
 implementation; this directory holds the in-progress Mere self-host of

@@ -16,23 +16,25 @@ single and multiple type parameters in declaration heads and multi-argument
 type applications. Record field schemes share their variables with the
 receiver, so literals, accesses, updates and patterns propagate the same
 arguments while separate uses instantiate independently. Substitution chains
-now retain newer constraints when following an older link. Module flattening
-rewrites type references, and inference and annotation share declaration
-registration.
+now retain newer constraints when following an older link. Module types and
+records keep their canonical bare identity across bare and qualified uses.
+Module flattening preserves declaration order, so later aliases cannot capture
+earlier annotations, aliases or field bodies. Inference and
+annotation share declaration registration.
 
-Three new runtime fixtures cover aliases, polymorphic types and module type
-references. Seven required fixtures provide 89 handwritten output lines on
+Four new runtime fixtures cover aliases, polymorphic types and module type
+references. Eight required fixtures provide 100 handwritten output lines on
 five execution paths. The refusal gate checks 28 cases on three typer paths,
 including incompatible shared fields, updates, patterns, aliases and invalid
 receivers. Formatter round trips and the compiler bootstrap also exercise
-type parameters. The full-toolchain suite has 3,168 tests; all 251 parity
+type parameters. The full-toolchain suite has 3,178 tests; all 251 parity
 programs, 191 gates, nine groups and four build configurations remain.
 
-The optimized formatter and REPL grow by 7,923 and 8,445 bytes respectively
-with the expanded parser. Only their size bands are recentered, retaining the
-same ±10% policy. The other 13 bands remain unchanged. Optimized browser
-modules preserve the runtime oracles and formatter round trips, and the
-optimized typer accepts five positive cases and refuses all 28 invalid cases.
+All 15 existing Wasm size bands remain unchanged. The optimized formatter
+round-trips six fixtures, the optimized REPL executes all 100 oracle lines,
+and the optimized typer accepts seven positive cases and refuses all 28
+invalid cases. Module regression cases cover identical record restatements,
+bare/qualified use, and aliases declared after annotations, aliases or fields.
 
 ## v0.1.715 — 2026-11-08
 

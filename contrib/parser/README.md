@@ -17,8 +17,9 @@ self-host plan.
 
 Type declaration heads accept a single parameter (`type 'a Box = ...`) or
 multiple parameters (`type ('a, 'b) Pair = ...`). Type applications accept
-`int Box` and `(int, bool) Pair`. Module flattening carries type references
-through annotations, aliases, fields and variant payloads. The formatter
+`int Box` and `(int, bool) Pair`. Module type names and record literals/patterns
+use their canonical bare identity. Flattening preserves declaration order; it
+never builds a map of future type aliases to rewrite earlier annotations. The formatter
 retains declaration parameters and application grouping.
 
 ## Files

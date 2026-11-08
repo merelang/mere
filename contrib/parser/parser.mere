@@ -45,6 +45,16 @@ let is_upper_first_c = fn (s: str) ->
   let o = ord (char_at s 0) in
   o >= 65 && o <= 90;
 
+// Nominal type names are canonical and global, including declarations in
+// modules. Qualified record syntax denotes the same bare record identity.
+let canonical_type_name = fn (name: str) ->
+  let n = str_len name in
+  let rec find = fn i ->
+    if i < 0 then name
+    else if char_at name i == "." then substring name (i + 1) n
+    else find (i - 1)
+  in find (n - 1);
+
 let peek_tok = fn (toks: pos_token list) ->
   match toks with
   | Cons (pt, _) -> let (_, t) = pt in t
@@ -669,11 +679,11 @@ and desugar_list = fn (elems: expr list) ->
 and parse_record_lit_body = fn (name: str)
                           -> fn (toks: pos_token list) ->
   (match peek_tok toks with
-    | TRBrace -> (ERecordLit (name, Nil), advance toks)
+    | TRBrace -> (ERecordLit (canonical_type_name name, Nil), advance toks)
     | _ ->
       let (fields, toks1) = parse_record_field_inits toks in
       let toks2 = expect_rbrace toks1 in
-      (ERecordLit (name, fields), toks2))
+      (ERecordLit (canonical_type_name name, fields), toks2))
 
 // `{` has been consumed — parse `BASE | f1 = e1, ... }` record update.
 // Matches OCaml-side `lib/parser.ml` syntax: the type name is omitted
@@ -789,7 +799,7 @@ and parse_pattern_base = fn (toks: pos_token list) ->
                 (PConstr (ctor_name, Some payload), rest2)
               | TLBrace ->
                 let (fields, rest2) = parse_record_pat_fields (advance after_qual) in
-                (PRecord (ctor_name, fields), rest2)
+                (PRecord (canonical_type_name ctor_name, fields), rest2)
               | other ->
                 // Atom-style payload (`Some t`, `Some 1`, `Cons Nil`,
                 // ...): if the next token can start a pattern atom,
@@ -1058,7 +1068,7 @@ and parse_type_name_tail = fn name -> fn toks ->
   | TDot ->
     let (part, rest) = expect_ident (advance toks) in
     parse_type_name_tail (name ++ "." ++ part) rest
-  | _ -> (name, toks);
+  | _ -> (canonical_type_name name, toks);
 
 // === Top-level parser ======================================================
 //
@@ -1629,9 +1639,11 @@ let prefix_decl = fn (m: str) -> fn (d: top_decl) ->
     let bs2 = list_map bindings (fn (b: str * expr) ->
       let (n, v) = b in (m ++ "." ++ n, v)) in
     TopLetRec bs2
-  | TopType (n, params, ctors) -> TopType (m ++ "." ++ n, params, ctors)
-  | TopRecord (n, params, fields) -> TopRecord (m ++ "." ++ n, params, fields)
-  | TopTypeAlias (n, params, ty) -> TopTypeAlias (m ++ "." ++ n, params, ty)
+  // Preserve declaration order and bare type identities. Alias expansion
+  // belongs to the typer at each declaration, never to a whole-module map.
+  | TopType (n, params, ctors) -> TopType (n, params, ctors)
+  | TopRecord (n, params, fields) -> TopRecord (n, params, fields)
+  | TopTypeAlias (n, params, ty) -> TopTypeAlias (n, params, ty)
   | TopModule _ -> d  // nested modules — flatten_decls handles recursion
   | TopExternFn _ -> d  // extern decls aren't prefixed; their host name matters
   | TopExternType _ -> d;
@@ -1691,43 +1703,9 @@ let rec build_rename_map = fn (m: str) -> fn (decls: top_decl list)
           | None -> acc)) in
     build_rename_map m rest acc2;
 
-let rec rename_ty = fn t -> fn renames ->
-  match t with
-  | TyCon (name, args) ->
-    let full = (match lookup_str_str name renames with
-      | Some n -> n | None -> name) in
-    TyCon (full, list_map args (fn a -> rename_ty a renames))
-  | TyArrow (a, b) -> TyArrow (rename_ty a renames, rename_ty b renames)
-  | TyTuple ts -> TyTuple (list_map ts (fn t1 -> rename_ty t1 renames))
-  | _ -> t;
-
-let rec rename_pattern_types = fn p -> fn types ->
-  match p with
-  | PRecord (name, fields) ->
-    let full = (match lookup_str_str name types with
-      | Some n -> n | None -> name) in
-    PRecord (full, list_map fields (fn entry ->
-      let (n, sub) = entry in (n, rename_pattern_types sub types)))
-  | PTuple ps -> PTuple (list_map ps (fn sub -> rename_pattern_types sub types))
-  | PConstr (n, Some sub) -> PConstr (n, Some (rename_pattern_types sub types))
-  | PAs (sub, n) -> PAs (rename_pattern_types sub types, n)
-  | POr (a, b) -> POr (rename_pattern_types a types, rename_pattern_types b types)
-  | _ -> p;
-
-let rec build_type_renames = fn m -> fn decls ->
-  match decls with
-  | Nil -> Nil
-  | Cons (d, rest) ->
-    let tail = build_type_renames m rest in
-    (match d with
-      | TopType (n, _, _) -> Cons ((n, m ++ "." ++ n), tail)
-      | TopRecord (n, _, _) -> Cons ((n, m ++ "." ++ n), tail)
-      | TopTypeAlias (n, _, _) -> Cons ((n, m ++ "." ++ n), tail)
-      | _ -> tail);
-
 // Walker: rewrite `EVar n` → `EVar n_qualified` for every n in `renames`.
 // Mirrors `rewrite_expr`'s shape but operates on the rename map.
-let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) -> fn types ->
+let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) ->
   match e with
   | EInt _ -> e
   | EFloat _ -> e
@@ -1738,64 +1716,53 @@ let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) -> fn types
     (match lookup_str_str n renames with
       | Some n2 -> EVar n2
       | None -> e)
-  | EBin (op, a, b) -> EBin (op, rename_expr a renames types, rename_expr b renames types)
-  | ECmp (op, a, b) -> ECmp (op, rename_expr a renames types, rename_expr b renames types)
-  | ELogic (op, a, b) -> ELogic (op, rename_expr a renames types, rename_expr b renames types)
-  | ENeg inner -> ENeg (rename_expr inner renames types)
-  | EAnnot (inner, t) -> EAnnot (rename_expr inner renames types, rename_ty t types)
-  | EApp (f, x) -> EApp (rename_expr f renames types, rename_expr x renames types)
-  | EFun (arg, ty_opt, body) -> EFun (arg, (match ty_opt with
-      | None -> None | Some t -> Some (rename_ty t types)), rename_expr body renames types)
+  | EBin (op, a, b) -> EBin (op, rename_expr a renames, rename_expr b renames)
+  | ECmp (op, a, b) -> ECmp (op, rename_expr a renames, rename_expr b renames)
+  | ELogic (op, a, b) -> ELogic (op, rename_expr a renames, rename_expr b renames)
+  | ENeg inner -> ENeg (rename_expr inner renames)
+  | EAnnot (inner, t) -> EAnnot (rename_expr inner renames, t)
+  | EApp (f, x) -> EApp (rename_expr f renames, rename_expr x renames)
+  | EFun (arg, ty_opt, body) -> EFun (arg, ty_opt, rename_expr body renames)
   | ELet (pat, value, body) ->
-    ELet (rename_pattern_types pat types, rename_expr value renames types, rename_expr body renames types)
+    ELet (pat, rename_expr value renames, rename_expr body renames)
   | ELetRec (bindings, body) ->
     let bs2 = list_map bindings (fn (b: str * expr) ->
-      let (n, v) = b in (n, rename_expr v renames types)) in
-    ELetRec (bs2, rename_expr body renames types)
+      let (n, v) = b in (n, rename_expr v renames)) in
+    ELetRec (bs2, rename_expr body renames)
   | EIf (c, t, el) ->
-    EIf (rename_expr c renames types, rename_expr t renames types, rename_expr el renames types)
+    EIf (rename_expr c renames, rename_expr t renames, rename_expr el renames)
   | EMatch (scrutinee, arms) ->
     let arms2 = list_map arms (fn (arm: pattern * expr option * expr) ->
       let (p, g, b) = arm in
       let g2 = (match g with
         | None -> None
-        | Some ge -> Some (rename_expr ge renames types)) in
-      (rename_pattern_types p types, g2, rename_expr b renames types)) in
-    EMatch (rename_expr scrutinee renames types, arms2)
+        | Some ge -> Some (rename_expr ge renames)) in
+      (p, g2, rename_expr b renames)) in
+    EMatch (rename_expr scrutinee renames, arms2)
   | EConstr (name, payload_opt) ->
     (match payload_opt with
       | None -> e
-      | Some p -> EConstr (name, Some (rename_expr p renames types)))
-  | ETuple es -> ETuple (list_map es (fn (e2: expr) -> rename_expr e2 renames types))
+      | Some p -> EConstr (name, Some (rename_expr p renames)))
+  | ETuple es -> ETuple (list_map es (fn (e2: expr) -> rename_expr e2 renames))
   | ERecordLit (name, fields) ->
     let fs2 = list_map fields (fn (f: str * expr) ->
-      let (fname, fv) = f in (fname, rename_expr fv renames types)) in
-    ERecordLit ((match lookup_str_str name types with
-      | Some n -> n | None -> name), fs2)
+      let (fname, fv) = f in (fname, rename_expr fv renames)) in
+    ERecordLit (name, fs2)
   | EFieldGet (recv, field) ->
-    EFieldGet (rename_expr recv renames types, field)
+    EFieldGet (rename_expr recv renames, field)
   | ERecordUpdate (base, fields) ->
     let fs2 = list_map fields (fn (f: str * expr) ->
-      let (fname, fv) = f in (fname, rename_expr fv renames types)) in
-    ERecordUpdate (rename_expr base renames types, fs2);
+      let (fname, fv) = f in (fname, rename_expr fv renames)) in
+    ERecordUpdate (rename_expr base renames, fs2);
 
 // Apply rename_expr to all expressions inside a top_decl.
-let rename_decl = fn (d: top_decl) -> fn (renames: (str * str) list) -> fn types ->
+let rename_decl = fn (d: top_decl) -> fn (renames: (str * str) list) ->
   match d with
-  | TopLet (pat, e) -> TopLet (rename_pattern_types pat types, rename_expr e renames types)
+  | TopLet (pat, e) -> TopLet (pat, rename_expr e renames)
   | TopLetRec bindings ->
     let bs2 = list_map bindings (fn (b: str * expr) ->
-      let (n, v) = b in (n, rename_expr v renames types)) in
+      let (n, v) = b in (n, rename_expr v renames)) in
     TopLetRec bs2
-  | TopType (name, params, ctors) ->
-    TopType (name, params, list_map ctors (fn entry ->
-      let (n, payload) = entry in
-      (n, match payload with | None -> None | Some t -> Some (rename_ty t types))))
-  | TopRecord (name, params, fields) ->
-    TopRecord (name, params, list_map fields (fn entry ->
-      let (n, t) = entry in (n, rename_ty t types)))
-  | TopTypeAlias (name, params, t) -> TopTypeAlias (name, params, rename_ty t types)
-  | TopExternFn (name, t) -> TopExternFn (name, rename_ty t types)
   | _ -> d;
 
 // Flatten the decl list: expand each TopModule into prefixed inner
@@ -1811,8 +1778,7 @@ let rec flatten_decls = fn (decls: top_decl list) ->
       | TopModule (name, sub_decls) ->
         let flat_sub = flatten_decls sub_decls in
         let renames = build_rename_map name flat_sub Nil in
-        let types = build_type_renames name flat_sub in
-        let renamed = list_map flat_sub (fn (sd: top_decl) -> rename_decl sd renames types) in
+        let renamed = list_map flat_sub (fn (sd: top_decl) -> rename_decl sd renames) in
         list_map renamed (fn (sd: top_decl) -> prefix_decl name sd)
       | _ -> Cons (d, Nil)) in
     append_top_decls expanded (flatten_decls rest);

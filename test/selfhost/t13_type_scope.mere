@@ -1,0 +1,39 @@
+// Later aliases cannot capture earlier annotations, aliases or field bodies.
+type VariantScope = ScopeC of int;
+module LaterVariant {
+  let read = fn (n: VariantScope) -> match n with ScopeC x -> x;
+  type VariantScope = int;
+};
+let _ = print (show (LaterVariant.read (ScopeC 7)));
+type PrimitiveScope = int;
+module LaterPrimitive {
+  let read = fn (n: PrimitiveScope) -> n;
+  type PrimitiveScope = bool;
+};
+let _ = print (show (LaterPrimitive.read 11));
+type FieldScope = FieldC of int;
+module CapturedField {
+  type Holder = { value: FieldScope };
+  type FieldScope = int;
+  let make = fn x -> Holder { value = FieldC x };
+};
+let _ = print (show (match (CapturedField.make 13).value with FieldC x -> x));
+type BodyScope = BodyC of int;
+module CapturedAlias {
+  type Saved = BodyScope;
+  type BodyScope = int;
+  let read = fn (x: Saved) -> match x with BodyC n -> n;
+};
+let _ = print (show (CapturedAlias.read (BodyC 17)));
+module LocalAlias {
+  type LocalN = int;
+  let read = fn (n: LocalN) -> n;
+  type LocalN = bool;
+};
+let _ = print (show (LocalAlias.read 19));
+module Recursive {
+  type 'a Chain = End | Next of 'a * 'a Chain;
+  let read = fn (v: int Chain) -> match v with Next (x, _) -> x | End -> 0;
+};
+let _ = print (show (Recursive.read (Next (23, End))));
+()

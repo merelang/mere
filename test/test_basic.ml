@@ -12627,6 +12627,18 @@ let () =
     "module alias", "module M { type N = int; type R = { a: N }; let get = fn (r: R) -> r.a; let make = fn n -> R { a = n }; }; M.get (M.make 4)";
     "qualified type", "module M { type N = int; }; (3 : M.N)";
   ];
+  List.iter (fun (name, input) -> cross_type name input) [
+    "module record identity", "type R = { a: int }; module M { type R = { a: int }; let get = fn (r: R) -> r.a; }; M.get (R { a = 7 })";
+    "module record return identity", "type R = { a: int }; module M { type R = { a: int }; let make = fn n -> R { a = n }; }; (M.make 7 : R).a";
+    "qualified record identity", "module M { type R = { a: int }; }; (M.R { a = 7 } : R).a";
+    "qualified record pattern identity", "type R = { a: int }; module M { type R = { a: int }; }; match R { a = 7 } with M.R { a = n } -> n";
+    "module variant before alias", "type N = C of int; module M { let read = fn (n: N) -> match n with C x -> x; type N = int; }; M.read (C 7)";
+    "module primitive before alias", "type N = int; module M { let read = fn (n: N) -> n; type N = bool; }; M.read 7";
+    "module captured alias body", "type N = C of int; module M { type Saved = N; type N = int; let read = fn (n: Saved) -> match n with C x -> x; }; M.read (C 7)";
+    "module captured field body", "type N = C of int; module M { type R = { a: N }; type N = int; let make = fn n -> R { a = C n }; }; match (M.make 7).a with C n -> n";
+    "module opaque before alias", "extern type H; extern fn make: unit -> H; module M { let read = fn (h: H) -> 7; type H = int; }; M.read (make ())";
+    "module recursive nominal type", "module M { type 'a Chain = End | Next of 'a * 'a Chain; let read = fn (c: int Chain) -> match c with Next (n, _) -> n | End -> 0; }; M.read (Next (7, End))";
+  ];
   let refusal_rows = In_channel.with_open_bin (project_root ^ "/test/selfhost/type_rejections.tsv") In_channel.input_all in
   String.split_on_char '\n' refusal_rows |> List.filter (fun s -> s <> "")
     |> List.iter (fun row -> match String.split_on_char '\t' row with
