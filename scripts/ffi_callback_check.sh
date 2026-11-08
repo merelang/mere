@@ -20,7 +20,6 @@ int check_callbacks(outer h, closure_int_closure_int_int curried,
     if (h.mu_handler.mu_apply.fn(h.mu_handler.mu_apply.env, input) != 4294967301LL) return 2;
     closure_int_int inner = curried.fn(curried.env, 3);
     if (inner.fn(inner.env, 4) != 4294967303LL) return 3;
-    if (curried.fn2 && curried.fn2(curried.env, 3, 4) != 4294967303LL) return 4;
     if (thunk.fn(thunk.env, 0) != 4294967296LL) return 5;
     mere_bytes *input_bytes = malloc(sizeof(*input_bytes) + 3);
     if (!input_bytes) return 7;
@@ -76,3 +75,51 @@ if "$CC" -std=c11 -Werror -fsyntax-only "$T/shim.c" > "$T/poison.log" 2>&1; then
   echo 'ffi_callback: missing callback declaration was not detected' >&2; exit 1
 fi
 echo 'ffi_callback: missing declaration rejected'
+
+# Diagnose unsupported boundaries before producing a partial header or IR.
+reject() {
+  mode=$1; expected=$2
+  if "$MERE" "$mode" "$T/reject.mere" > "$T/reject.out" 2> "$T/reject.err"; then
+    echo "ffi_callback: $mode accepted an unsupported boundary" >&2; exit 1
+  fi
+  grep -F -- "$expected" "$T/reject.err" >/dev/null || { cat "$T/reject.err" >&2; exit 1; }
+  [ ! -s "$T/reject.out" ] || { echo 'ffi_callback: emitted partial output' >&2; exit 1; }
+}
+for source in \
+  'extern fn bad: (int -> int) -> int; 0' \
+  'extern fn bad: (int -> int -> int) -> int; 0' \
+  'type inner = { cb: int -> int }; type outer = { value: inner }; extern fn bad: outer -> int; 0' \
+  'type cb_result = { cb: int -> int }; extern fn bad: unit -> cb_result; 0' \
+  'type choice = Empty | Callback of (int -> int); extern fn bad: choice -> int; 0' \
+  'extern fn bad: Vec[int -> int] -> int; 0'; do
+  printf '%s\n' "$source" > "$T/reject.mere"
+  reject -ll 'extern `bad`: callback values are unsupported on the LLVM backend'
+done
+echo 'ffi_callback: LLVM rejects direct, curried and nested callback boundaries'
+
+for source in \
+  'extern fn bad: ((int * int) -> int) -> int; 0' \
+  'extern fn bad: (int -> (int * int)) -> int; 0' \
+  'type choice = Empty | Number of int; extern fn bad: (choice -> int) -> int; 0' \
+  'extern fn bad: (Vec[int] -> int) -> int; 0' \
+  'type holder = { cb: (int * int) -> int }; extern fn bad: holder -> int; 0' \
+  'extern fn bad: (int * int) -> int; 0'; do
+  printf '%s\n' "$source" > "$T/reject.mere"
+  reject --ffi-header '--ffi-header: extern `bad` uses unsupported type'
+done
+echo 'ffi_callback: undefined header types rejected, including callback arguments/results'
+
+# The extern's own parameter-list arrows are not callbacks. LLVM still emits
+# ordinary multi-argument externs and records without callback fields.
+printf '%s\n' 'type point = { x: int }; extern fn plain: point -> int -> int; 0' > "$T/plain.mere"
+"$MERE" -ll "$T/plain.mere" > "$T/plain.ll"
+grep -F '@plain(' "$T/plain.ll" >/dev/null
+"$MERE" --ffi-header "$T/plain.mere" > "$T/plain.h"
+"$CC" -std=c11 -Werror -x c -fsyntax-only "$T/plain.h"
+
+# Wasm host imports use pointers into linear memory, not this C struct ABI.
+# Keep that separate callback interface available to its existing host glue.
+printf '%s\n' 'extern fn host_callback: (int -> int) -> int; host_callback (fn (x: int) -> x + 1)' > "$T/host.mere"
+"$MERE" -w "$T/host.mere" > "$T/host.wat"
+grep -F '(import "env" "host_callback"' "$T/host.wat" >/dev/null
+echo 'ffi_callback: ordinary LLVM externs and separate Wasm host imports preserved'

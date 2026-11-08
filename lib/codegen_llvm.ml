@@ -18575,6 +18575,8 @@ let rewrite_of_json (prog : Ast.program) : Ast.program =
   { Ast.main; decls = decls0 @ List.rev !decls }
 
 let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
+  Ffi_types.reject_callbacks ~backend:"LLVM"
+    ~reject:(fun msg -> raise (Codegen_error (Loc.dummy, msg))) prog;
   let prog = Ast.lower_snapshots prog in
   let prog = rewrite_read_lines prog in
   let prog = rewrite_of_json prog in
