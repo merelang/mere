@@ -1588,13 +1588,14 @@ let () =
       "let __pfx1 = \"outer\" in match \"ab\" with \"a\" <> r -> __pfx1 ++ r | _ -> \"miss\"")
     "\"outerb\"";
   check "formatter preserves nested choices, aliases and or-pattern lets"
-    (let source = "type T = A of int | B of int; type R = { v: T };\n\
+    (let source = "type T = A of int | B of int; type W = Wrap of T; type R = { v: W };\n\
        let ((a, _) | (_, a)) = (7, 8);\n\
-       let f = fn r -> let ((b, _) | (_, b)) = (1, 2) in match (r, 3) with (R { v = ((A x | B x) as whole) }, n) -> x + n + b;\n\
-       f (R { v = B 7 }) + a" in
+       let f = fn r -> let ((b, _) | (_, b)) = (1, 2) in match (r, 3) with (R { v = (((Wrap (A x | B x)) as first) as whole) }, n) ->\n\
+         (match whole with Wrap (A q | B q) -> q) + (match first with Wrap (A q | B q) -> q) + x + n + b;\n\
+       f (R { v = Wrap (B 7) }) + a" in
      let formatted = Pipeline.format_source source in
      Pipeline.process formatted ^ ":" ^ string_of_bool (Pipeline.format_source formatted = formatted))
-    "18:true";
+    "32:true";
 
   (* --- polymorphic `fst` / `snd` for 2-tuples --- *)
   check "fst int/str"

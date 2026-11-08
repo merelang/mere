@@ -19,7 +19,7 @@ UTF-8, embedded NUL and binary bytes. Removing the old root-only guard rewrite
 also removes generated-name capture. Repeated names within one pattern follow
 the interpreter's existing last-binding rule on every compiled target, including
 heterogeneous fields, aliases and captured values. Hidden occurrences retain
-their tests. The required or-pattern fixture has 112 handwritten runtime answers.
+their tests. The required or-pattern fixture has 114 handwritten runtime answers.
 Plain parity oracles require exact output and successful execution on the
 interpreter, C, LLVM and Wasm, including refusal and missing-tool failures;
 the hosted RISC-V boundary checks require the same oracle at both widths.

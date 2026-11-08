@@ -265,3 +265,10 @@ let poly_selected = poly_select (PolyRow { value = "ab", tag = 1 });
 let _ = print_int (poly_selected ());
 let _ = print_int (match ("a" ++ chr 128 ++ "z") with "a" <> r -> str_len r | _ -> 99);
 let _ = print_int (match ("a" ++ chr 128 ++ "z") with "a" <> r -> if char_at r 0 == chr 128 then 1 else 0 | _ -> 99);
+// Aliases around an enclosing constructor keep their scope when formatted.
+let alias_wrap = fn v -> match v with
+  (Wrap (Left x | Right x | Third x)) as whole -> x + unwrap whole | Empty -> 0;
+let _ = print_int (alias_wrap (Wrap (Right 7)));
+let alias_double = fn v -> match v with
+  ((Wrap (Left x | Right x | Third x)) as first) as whole -> x + unwrap first + unwrap whole | Empty -> 0;
+let _ = print_int (alias_double (Wrap (Right 7)));

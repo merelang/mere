@@ -291,7 +291,7 @@ let rec fmt_pat p =
        unqualified alias for the same reason it does for constructors. *)
     unqualify_ctor name ^ " { " ^ String.concat ", " parts ^ " }"
   | P_as (inner, name) ->
-    fmt_pat_component inner ^ " as " ^ name
+    fmt_pat_atom inner ^ " as " ^ name
   | P_or (a, b) ->
     fmt_pat a ^ " | " ^ fmt_pat b
 
