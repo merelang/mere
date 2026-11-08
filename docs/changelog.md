@@ -31,6 +31,8 @@ The checked entry retains the browser's standard helper implementations, selecti
 referenced helpers and their dependencies in declaration order. Seventeen
 compatibility cases cover list and string operations, map iteration, polymorphic
 use and helper shadowing without increasing memory or stack limits.
+The new checked compiler library joins the contrib differential inventory,
+bringing it to 88 subjects.
 
 The browser compiler grows from 166,357 to 227,778 bytes by adding the checked
 pipeline. Ordered constructor resolution also grows the formatter from 103,703

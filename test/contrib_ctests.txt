@@ -16,6 +16,7 @@ contrib/argparse/argparse.mere
 contrib/async/async.mere
 contrib/bignum/bignum.mere
 contrib/codegen/codegen_wasm.mere
+contrib/codegen/compile.mere
 contrib/csv/parser.mere
 contrib/csv/writer.mere
 contrib/db/live.mere

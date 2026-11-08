@@ -21,7 +21,7 @@
 # Usage:  sh scripts/contrib_ctest.sh
 #         MERE=/path/to/mere sh scripts/contrib_ctest.sh
 #
-# Takes about four minutes: it compiles and runs 87 programs. It is not in
+# Takes about four minutes: it compiles and runs 88 programs. It is not in
 # `dune runtest` for that reason; it belongs with the other differential gates.
 
 set -u
@@ -44,7 +44,7 @@ COUNT=$(printf '%s\n' "$FILES" | grep -c .)
 # The count is asserted so that a list which quietly loses entries -- a library
 # renamed, a line deleted in a merge -- fails rather than passing over fewer
 # subjects. Raise it deliberately when contrib grows.
-EXPECT=${CONTRIB_CTEST_EXPECT:-87}
+EXPECT=${CONTRIB_CTEST_EXPECT:-88}
 if [ "$COUNT" -ne "$EXPECT" ]; then
   echo "FAIL contrib_ctest: the list holds $COUNT entries and $EXPECT were expected."
   echo "  A shorter list is a smaller gate, and a gate that shrinks passes for the"
