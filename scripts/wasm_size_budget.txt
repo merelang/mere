@@ -71,5 +71,10 @@ rvconsole.wasm                 5448     6659
 selfhost-compile.wasm        152044   185831
 selfhost-fmt.wasm             85611   104636
 selfhost-repl.wasm           101928   124579
-selfhost-tyck.wasm           111822   136671
+# v0.1.715: declared-record field-set validation and logical tail propagation
+# grow the optimized type checker from 135314 to 142203 B (wasm-opt 132).
+# Recenter only this module with the same -10% / +10% policy. The actual
+# optimized DOM module accepts two valid programs and refuses all nine required
+# malformed records; 63 handwritten runtime lines still pass on five paths.
+selfhost-tyck.wasm           127983   156423
 wordcount.wasm                 4051     4952

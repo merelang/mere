@@ -437,6 +437,11 @@ let inc1 = (+) 1 in ...             // turning operators into functions is not y
 ```
 
 ### Tuples / records / lists
+
+For declared records, the self-host typer requires every literal field exactly
+once and refuses unknown fields in access, updates and patterns. Partial
+patterns and updates are allowed; empty records retain their declared shape.
+
 ```
 (1, 2, 3)                           // tuple
 
@@ -651,7 +656,7 @@ signature ctx = (db: int, log: int);
 
 ## 7. Evaluation model
 
-- **Strict (call-by-value)**; `&&` and `||` are short-circuit.
+- **Strict (call-by-value)**; `&&` and `||` are short-circuit. The self-host Wasm compiler also evaluates the left operand once and evaluates the right operand only when selected. Both Wasm emitters preserve tail position through that selected operand.
 - **No mutation**; rebinding is not allowed; `with` also creates a new binding.
 - **Closure capture** is by value-reference (the environment is closed in the closure).
 - **Errors**: type errors are compile-time; `fail`/`assert`/`div by zero`/unmatched match etc. are runtime `Eval_error`.

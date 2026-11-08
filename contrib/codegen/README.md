@@ -9,6 +9,13 @@ stored lengths and all bytes, including NUL. WAT data escapes control and
 non-ASCII bytes. Pattern lets trap on a structural miss. The stage tables
 below record the implementation history.
 
+Logical `&&` and `||` lower through conditional emission. The left operand
+runs once; the right operand runs only when selected and retains tail position.
+The reference Wasm emitter preserves the same tail flag through its synthetic
+conditional. Both routes execute 50,000 logical tail calls at the default Node
+stack limit. The required logic oracle also checks skipped division traps and
+the exact order and count of operand side effects.
+
 The OCaml `Mere.Codegen_wasm` (`lib/codegen_wasm.ml`, 5491 lines) is
 the reference implementation; this directory holds the in-progress
 Mere self-host of the same emitter. §S3 closes once 53a–53g land.

@@ -81,7 +81,7 @@ check_one() {
 
   # Explicit answers must hold independently of agreement between compilers.
   oracle="${input%.mere}.expected"
-  case "$name" in t06_patterns|t07_pattern_visibility) required=1 ;; *) required=0 ;; esac
+  case "$name" in t06_patterns|t07_pattern_visibility|t08_logic|t09_records) required=1 ;; *) required=0 ;; esac
   if [ "$required" -eq 1 ] && [ ! -f "$oracle" ]; then
     echo "  FAIL $name: missing required oracle" >&2
     return 1
@@ -154,6 +154,8 @@ else
     test/selfhost/t05_list.mere \
     test/selfhost/t06_patterns.mere \
     test/selfhost/t07_pattern_visibility.mere \
+    test/selfhost/t08_logic.mere \
+    test/selfhost/t09_records.mere \
     examples/hello.mere \
     examples/fibonacci.mere \
   "
@@ -171,6 +173,10 @@ for f in $inputs; do
     failed=$((failed + 1))
   fi
 done
+
+if ! python3 scripts/selfhost_record_check.py --mere "$MERE" --compiler "$SELF"; then
+  failed=$((failed + 1))
+fi
 
 if [ $failed -eq 0 ]; then
   echo "all passed"

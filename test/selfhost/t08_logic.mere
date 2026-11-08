@@ -1,0 +1,15 @@
+// Short-circuit operands run once, only on the selected route.
+let noisy = fn label -> let _ = print label in true;
+let left = fn value -> let _ = print "lhs" in value;
+let _ = print (show (false && (1 / 0 == 0)));
+let _ = print (show (true || (1 / 0 == 0)));
+let _ = print (show (false && noisy "unexpected-and"));
+let _ = print (show (true || noisy "unexpected-or"));
+let _ = print (show (true && noisy "and-rhs"));
+let _ = print (show (false || noisy "or-rhs"));
+let _ = print (show (left false && noisy "unexpected-left-and"));
+let _ = print (show (left true || noisy "unexpected-left-or"));
+let _ = print (show ((false && (1 / 0 == 0)) || (true && true)));
+let rec loop = fn n -> n == 0 || (n > 0 && loop (n - 1));
+let _ = print (show (loop 1000));
+()

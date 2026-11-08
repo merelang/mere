@@ -12478,6 +12478,19 @@ let () =
     "pattern let", "let ((1, x) | (x, 9)) = (2, 9) in x", "2";
     "record traversal", "type Pair = { a: int, b: int }; match Pair { a = 1, b = 2 } with Pair { b = x, a = x } -> x", "1";
   ] in
+  let semantic_cases = [
+    "and skips trap", "if false && (1 / 0 == 0) then 1 else 0", "0";
+    "or skips trap", "if true || (1 / 0 == 0) then 1 else 0", "1";
+    "and evaluates right", "if true && (2 < 3) then 1 else 0", "1";
+    "or evaluates right", "if false || (2 > 3) then 1 else 0", "0";
+    "nested short circuit", "if (false && (1 / 0 == 0)) || (true && true) then 1 else 0", "1";
+    "logical tail call", "let rec loop = fn n -> n == 0 || (n > 0 && loop (n - 1)) in if loop 1000 then 1 else 0", "1";
+    "record reordered literal", "type R = { a: int, b: int }; (R { b = 9, a = 4 }).a", "4";
+    "record partial pattern", "type R = { a: int, b: int }; match R { a = 4, b = 9 } with R { b = x } -> x", "9";
+    "record repeated field pattern", "type R = { a: int }; match R { a = 4 } with R { a = x, a = y } -> x + y", "8";
+    "record partial update", "type R = { a: int, b: int }; let r = R { a = 4, b = 9 } in let changed = { r | b = 6 } in changed.a + changed.b", "10";
+    "empty record", "type Empty = {}; match Empty {} with Empty {} -> 7", "7";
+  ] in
   List.iter (fun (name, input, _) -> cross_validate name input)
     (List.filter (fun (name, _, _) -> List.mem name
       ["constructor alias"; "nested choice"; "independent choices"; "record choices"; "pattern let"; "prefix NUL"]) pattern_cases);
@@ -12536,7 +12549,7 @@ let () =
   cross_eval "str concat" "\"hello, \" ++ \"world\"";
   cross_eval "tuple destructure" "let (a, b) = (3, 4) in a + b";
 
-  List.iter (fun (name, input, _) -> cross_eval name input) pattern_cases;
+  List.iter (fun (name, input, _) -> cross_eval name input) (pattern_cases @ semantic_cases);
 
   (* Phase 52.6 — self-host typer cross-validation. Runs a Mere source
      string through both `Pipeline.type_of` (OCaml typer) and the
@@ -12692,7 +12705,7 @@ let () =
      ...` syntax first. *)
 
 
-  List.iter (fun (name, input, _) -> cross_type name input) pattern_cases;
+  List.iter (fun (name, input, _) -> cross_type name input) (pattern_cases @ semantic_cases);
   List.iter (fun (name, input) ->
     let rejects f = try ignore (f input); false with _ -> true in
     check ("self-host or-pattern rejects: " ^ name)
@@ -12704,6 +12717,21 @@ let () =
     "right structure", "match (1, 2) with (x, _) | (x, true) -> 0 | _ -> 0";
     "nested missing name", "match Some 1 with Some (x | _) -> 0 | _ -> 0";
     "hidden missing name", "match ((1, 2), 3) with (((x, _) | (_, _)), x) -> x";
+  ];
+
+  List.iter (fun (name, input) ->
+    let rejects f = try ignore (f input); false with _ -> true in
+    check ("self-host record rejects: " ^ name)
+      (string_of_bool (rejects Pipeline.type_of && rejects self_host_type)) "true") [
+    "missing", "type R = { a: int, b: int }; R { a = 1 }";
+    "extra", "type R = { a: int }; R { a = 1, b = 2 }";
+    "duplicate", "type R = { a: int }; R { a = 1, a = 2 }";
+    "missing-all", "type R = { a: int }; R {}";
+    "empty-extra", "type R = {}; R { a = 1 }";
+    "field-get", "type R = { a: int }; (R { a = 1 }).b";
+    "update", "type R = { a: int }; let r = R { a = 1 }; { r | b = 2 }";
+    "pattern", "type R = { a: int }; match R { a = 1 } with R { b = x } -> x";
+    "nested", "type R = { a: int, b: int }; type Wrap = { r: R }; Wrap { r = R { a = 1 } }";
   ];
 
   (* Phase 53.9 — self-host codegen cross-validation. Runs a Mere source
@@ -13092,7 +13120,7 @@ let () =
   in
 
   if have_wat2wasm && have_node then begin
-    List.iter (fun (name, input, expected) -> cross_emit name input expected) pattern_cases;
+    List.iter (fun (name, input, expected) -> cross_emit name input expected) (pattern_cases @ semantic_cases);
     let choice_size n =
       let values = String.concat ", " (List.init n (fun _ -> "2")) in
       let patterns = String.concat ", " (List.init n (fun _ -> "(1 | 2)")) in
@@ -13820,7 +13848,7 @@ let () =
         let _ = Unix.close_process_in ic in
         Buffer.contents buf
       in
-      let t_src = "let choose = fn v -> match v with (1, x) | (x, 9) -> x | _ -> 0 in let suffix = match \"a\\0bz\" with (\"x\" <> tail | \"a\\0b\" <> tail) -> str_len tail | _ -> 99 in let repeated = match (1, 2) with (x, x) -> x in print (show (choose (2, 9) + suffix + repeated))" in
+      let t_src = "let _ = if false && (1 / 0 == 0) then print \"bad\" else () in let _ = if true || (1 / 0 == 0) then () else print \"bad\" in let choose = fn v -> match v with (1, x) | (x, 9) -> x | _ -> 0 in let suffix = match \"a\\0bz\" with (\"x\" <> tail | \"a\\0b\" <> tail) -> str_len tail | _ -> 99 in let repeated = match (1, 2) with (x, x) -> x in print (show (choose (2, 9) + suffix + repeated))" in
       let refa_path = Filename.temp_file "mere_fixpoint_refA_" ".mere" in
       let oc = open_out refa_path in
       Printf.fprintf oc

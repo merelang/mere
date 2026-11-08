@@ -1,0 +1,14 @@
+// Declared field sets allow reordered literals and partial patterns/updates.
+type R = { a: int, b: int };
+type Empty = {};
+let r = R { b = 9, a = 4 };
+let _ = print (show r.a);
+let _ = print (show (match r with R { b = x } -> x));
+let _ = print (show (match r with R { a = x, a = y } -> x + y));
+let changed = { r | b = 6 };
+let _ = print (show (changed.a + changed.b));
+let _ = print (show (r.a + r.b));
+let _ = print (show (match Empty {} with Empty {} -> 7));
+let __record_fields__R = 13;
+let _ = print (show (__record_fields__R + (R { a = 2, b = 3 }).a));
+()

@@ -523,6 +523,60 @@ let rec register_record_fields = fn (fields: (str * ty) list)
     register_record_fields rest record_name param_ids param_map env2
   ;
 
+// Shape metadata uses an unlexable key and never participates in unification.
+// Keep it even for empty records, whose declaration has no field schemes.
+let record_shape_key = fn (name: str) -> "@record_fields:" ++ name;
+
+let rec record_shape = fn (fields: (str * ty) list) ->
+  match fields with
+  | Nil -> Nil
+  | Cons (entry, rest) ->
+    let (name, _) = entry in
+    Cons (TyCon (name, Nil), record_shape rest);
+
+let register_record_definition = fn fields -> fn name -> fn ids -> fn params -> fn env ->
+  let shape = mono (TyTuple (record_shape fields)) in
+  register_record_fields fields name ids params (Cons ((record_shape_key name, shape), env));
+
+let rec record_shape_contains = fn (field: str) -> fn (shape: ty list) ->
+  match shape with
+  | Nil -> false
+  | Cons (entry, rest) ->
+    (match entry with
+      | TyCon (name, _) -> str_eq field name || record_shape_contains field rest
+      | _ -> false);
+
+let rec validate_record_members = fn (name: str) -> fn fields -> fn shape ->
+  match fields with
+  | Nil -> ()
+  | Cons (entry, rest) ->
+    let (field, _) = entry in
+    if record_shape_contains field shape then validate_record_members name rest shape
+    else fail ("record " ++ name ++ " has no field " ++ field);
+
+let rec record_fields_count = fn fields ->
+  match fields with
+  | Nil -> 0
+  | Cons (_, rest) -> 1 + record_fields_count rest;
+
+let rec record_fields_unique = fn fields -> fn seen ->
+  match fields with
+  | Nil -> true
+  | Cons (entry, rest) ->
+    let (name, _) = entry in
+    if record_shape_contains name seen then false
+    else record_fields_unique rest (Cons (TyCon (name, Nil), seen));
+
+let validate_record_fields = fn (name: str) -> fn fields -> fn complete -> fn env ->
+  match lookup_scheme_opt (record_shape_key name) env with
+  | Some (_, TyTuple shape) ->
+    let _ = validate_record_members name fields shape in
+    if complete && (record_fields_count fields != record_fields_count shape
+                    || not (record_fields_unique fields Nil)) then
+      fail ("record " ++ name ++ ": field set mismatch")
+    else ()
+  | _ -> (); // Preserve the existing unregistered-record AST compatibility.
+
 // Phase 55c: register a list of constructors into the env. Each ctor
 // gets a scheme quantified over the parent type's param ids, so
 // polymorphic ctors freshen at each use via `instantiate`.
@@ -762,6 +816,7 @@ and check_visible_pattern = fn (p: pattern) -> fn (expected: ty)
             let (a, s1) = fresh_meta s in
             check_visible_pattern sub_p a env s1))
   | PRecord (name, field_pats) ->
+    let _ = validate_record_fields name field_pats false env in
     let s1 = unify_state s expected (TyCon (name, Nil)) in
     check_record_field_pats field_pats name env s1
 
@@ -977,6 +1032,7 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     // expected field ty gets `instantiate`d (freshening quantified
     // param metas) and unified with the field expr's inferred ty.
     // Undeclared records fall back to the pre-55c-2 permissive path.
+    let _ = validate_record_fields name fields true env in
     let s1 = infer_record_fields_strict env name fields s in
     (TyCon (name, Nil), s1)
   | EFieldGet (e, field) ->
@@ -999,6 +1055,7 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let resolved = apply_subst (subst_of s1) te in
     (match resolved with
       | TyCon (record_name, _args) ->
+        let _ = validate_record_fields record_name (Cons ((field, ()), Nil)) false env in
         let key = make_record_field_key record_name field in
         (match lookup_scheme_opt key env with
           | Some sch ->
@@ -1021,6 +1078,7 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let name = (match apply_subst (subst_of s1) te with
       | TyCon (n, _) -> n
       | _ -> "") in
+    let _ = validate_record_fields name fields false env in
     let s2 = infer_record_fields_strict env name fields s1 in
     (apply_subst (subst_of s2) te, s2)
   | _ -> fail "typer: stage 52e doesn't handle this expr yet"
@@ -1403,7 +1461,7 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let n_params = list_len_names all_params in
     let (param_ids, s1) = alloc_fresh_ids_n n_params s in
     let param_map = zip_params_ids all_params param_ids in
-    let env2 = register_record_fields fields name param_ids param_map env in
+    let env2 = register_record_definition fields name param_ids param_map env in
     (env2, s1)
   | TopTypeAlias _ -> (env, s)
   | TopModule _ -> fail "typer: TopModule reached typer — parser flatten missing?"
@@ -1644,7 +1702,7 @@ let rec annotate_decl = fn (d: top_decl) -> fn (env: type_env)
     let n_params = list_len_names all_params in
     let (param_ids, s1) = alloc_fresh_ids_n n_params s in
     let param_map = zip_params_ids all_params param_ids in
-    let env2 = register_record_fields fields name param_ids param_map env in
+    let env2 = register_record_definition fields name param_ids param_map env in
     (d, env2, s1)
   | TopTypeAlias _ -> (d, env, s)
   | TopModule _ -> (d, env, s)

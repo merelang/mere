@@ -2614,6 +2614,9 @@ and emit_expr ?(let_body_top = false) (e : Ast.expr) : unit =
        the If emission (which handles the tail flag correctly). *)
     let const_bool v =
       Ast.{ node = Ast.Bool_lit v; ty = Some Ast.TyBool; loc = e.Ast.loc } in
+    (* Re-entering emit_expr otherwise loses the enclosing tail flag before
+       the synthesized If can propagate it to its selected operand. *)
+    wasm_tail_pos := saved_tail;
     (match op with
      | Ast.And -> emit_expr Ast.{ e with node = Ast.If (a, b, const_bool false) }
      | Ast.Or -> emit_expr Ast.{ e with node = Ast.If (a, const_bool true, b) })

@@ -850,9 +850,12 @@ let rec emit_expr = fn (e: expr) -> fn (s0: EmitState) ->
       let s2 = emit_expr b s1 in
       push_instr (cmpop_instr op) s2
   | ELogic (op, a, b) ->
-    let s1 = emit_expr a s in
-    let s2 = emit_expr b s1 in
-    push_instr (logicop_instr op) s2
+    // Reuse conditional emission so only the selected operand runs. The
+    // right operand inherits tail position; the condition never does.
+    let conditional = (match op with
+      | OpAnd -> EIf (a, b, EBool false)
+      | OpOr -> EIf (a, EBool true, b)) in
+    emit_expr conditional (set_tail is_tail s)
   | ENeg inner ->
     // `-x` lowers to `0 - x`. Wasm has no i32.neg.
     let s1 = push_instr "i32.const 0" s in
