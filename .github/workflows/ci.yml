@@ -197,7 +197,8 @@ jobs:
           # SDL2 for the window capability. window_check.sh skips without it, and
           # a skipped gate is a gate that is not running — so install it here.
           # OpenSSL headers for downstream_cc_check (mere-blog and mbrowse include them)
-          apt_ci install -y clang wabt lldb libsdl2-dev libssl-dev
+          # Perl counts formatter comments, including the poison corpus runs.
+          apt_ci install -y clang wabt lldb libsdl2-dev libssl-dev perl
 
       # socket_parity builds a Wasm component and compares its socket behaviour
       # against the C build, so it needs the component toolchain: wasm-tools,
@@ -1168,7 +1169,7 @@ jobs:
           sh scripts/refutable_let_check.sh --poison
 
       - name: fmt_comments_check (the formatter keeps column-1 comments)
-        if: ${{ !cancelled() && matrix.group == 'compiler' }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: |
           sh scripts/fmt_comments_check.sh
           sh scripts/fmt_comments_check.sh --poison
@@ -1226,7 +1227,7 @@ jobs:
       # not a nicety -- 52 of 293 examples came back as something the compiler
       # refused, and the formatter's own tests were all small single files.
       - name: fmt_roundtrip_check (what fmt writes is still the same program)
-        if: ${{ !cancelled() && matrix.group == 'compiler' }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: |
           sh scripts/fmt_roundtrip_check.sh
           sh scripts/fmt_roundtrip_check.sh --poison

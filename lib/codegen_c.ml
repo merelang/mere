@@ -4939,14 +4939,25 @@ let rec emit_expr (e : Ast.expr) : string =
       | Some t -> Ast.walk t
       | None -> Ast.TyInt
     in
-    (* Flatten P_or into multiple arms (the typer guarantees both
-       branches bind the same names so duplicating the body is safe). *)
-    let rec expand_or (pat, guard, body) =
+    (* Keep guard failure attached to the original arm. Once a pattern
+       matched, later alternatives must not run its guard again. *)
+    let rec expand_or pat =
       match pat.Ast.pnode with
-      | Ast.P_or (a, b) -> expand_or (a, guard, body) @ expand_or (b, guard, body)
-      | _ -> [(pat, guard, body)]
+      | Ast.P_or (a, b) -> expand_or a @ expand_or b
+      | _ -> [pat]
     in
-    let arms = List.concat_map expand_or arms in
+    let selected_decls = ref [] in
+    let arms = List.concat_map (fun (pat, guard, body) ->
+      let alternatives = expand_or pat in
+      let selected = match guard, alternatives with
+        | Some _, _ :: _ :: _ ->
+          let name = fresh_bin_tmp () in
+          selected_decls := ("int " ^ name ^ " = 0; ") :: !selected_decls;
+          Some name
+        | _ -> None
+      in
+      List.map (fun pat -> pat, guard, body, selected) alternatives
+    ) arms in
     (* Phase 22.5 fix: non-exhaustive fallthrough — emit a value of the
        MATCH result type, not always `0` (int). Otherwise tuple/record
        returning matches break with "incompatible operand types".
@@ -4988,7 +4999,7 @@ let rec emit_expr (e : Ast.expr) : string =
        the guard (if any) and the body. *)
     let rec emit_arms = function
       | [] -> fallthrough_default
-      | (pat, guard, body) :: rest ->
+      | (pat, guard, body, selected) :: rest ->
         let (test, bindings) = compile_pattern pat "__scrut" scrut_ty in
         let next = emit_arms rest in
         (* Phase 28.1 (DEFERRED §1.9 fix): add pattern-bound names to
@@ -5019,13 +5030,17 @@ let rec emit_expr (e : Ast.expr) : string =
           | None -> test
           | Some g ->
             let guard_c = with_pat (fun () -> emit_expr g) in
-            Printf.sprintf "(%s) && ({ %s(%s); })" test bindings guard_c
+            let test, mark = match selected with
+              | None -> test, ""
+              | Some name -> "!" ^ name ^ " && (" ^ test ^ ")", name ^ " = 1; "
+            in
+            Printf.sprintf "(%s) && ({ %s%s(%s); })" test mark bindings guard_c
         in
         Printf.sprintf "(%s) ? ({ %s%s; }) : (%s)" test bindings body_c next
     in
     Printf.sprintf
-      "({ __auto_type __scrut = %s; %s; })"
-      scrut_c (emit_arms arms)
+      "({ __auto_type __scrut = %s; %s%s; })"
+      scrut_c (String.concat "" (List.rev !selected_decls)) (emit_arms arms)
   | Ast.Tuple es ->
     (* Construction via C99 compound literal. Use the typer's recorded
        type to pick the right struct name. *)

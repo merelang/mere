@@ -8332,15 +8332,23 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       | Ast.P_or _ ->
         unsupported pat.Ast.ploc "P_or should have been flattened"
     in
-    (* Pre-flatten or-patterns into multiple arms. The typer guarantees
-       both branches bind the same names with compatible types. *)
-    let rec expand_or (pat, guard, body) =
+    (* A failed pattern tries the next alternative; a failed guard skips
+       the remaining alternatives of the same source arm. *)
+    let rec expand_or pat =
       match pat.Ast.pnode with
-      | Ast.P_or (a, b) ->
-        expand_or (a, guard, body) @ expand_or (b, guard, body)
-      | _ -> [(pat, guard, body)]
+      | Ast.P_or (a, b) -> expand_or a @ expand_or b
+      | _ -> [pat]
     in
-    let arms = List.concat_map expand_or arms in
+    let arms = List.concat_map (fun (pat, guard, body) ->
+      let alternatives = expand_or pat in
+      let guard_next = match guard, alternatives with
+        | Some _, _ :: _ :: _ -> Some (fresh_label "next_")
+        | _ -> None
+      in
+      List.mapi (fun i pat ->
+        pat, guard, body, guard_next, i = List.length alternatives - 1
+      ) alternatives
+    ) arms in
     let rec emit_arms = function
       | [] ->
         (* v0.1.470: the named, catchable failure — not a bare abort.
@@ -8355,9 +8363,13 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
            different claim from a user's match. *)
         emit_instr "  call void @__lang_fail_impl(ptr @.nomatch_msg)";
         emit_instr "  unreachable"
-      | (pat, guard, body) :: rest ->
+      | (pat, guard, body, guard_next, last_alternative) :: rest ->
         let arm_label = fresh_label "arm_" in
-        let next_label = fresh_label "next_" in
+        let next_label = match guard_next with
+          | Some label when last_alternative -> label
+          | _ -> fresh_label "next_"
+        in
+        let guard_fail = Option.value guard_next ~default:next_label in
         let (cond, bindings, var_tys) = compile_pat pat scrut_v scrut_ty next_label in
         emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
                       cond arm_label next_label);
@@ -8365,15 +8377,14 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
         let env' = bindings @ env in
         let saved_vt = !current_var_types in
         current_var_types := var_tys @ saved_vt;
-        (* Guard: evaluate within the arm's bindings scope. If false,
-           branch to next_label (= same as failing the test). *)
+        (* The guard runs only after the first matching alternative. *)
         (match guard with
          | None -> ()
          | Some g ->
            let gv = emit_expr env' g in
            let pass_label = fresh_label "guard_pass_" in
            emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
-                         gv pass_label next_label);
+                         gv pass_label guard_fail);
            emit_label pass_label);
         (* v0.1.269: an arm in tail position RETURNS, like a tail-position
            If branch. Nearly every recursive list helper is written with

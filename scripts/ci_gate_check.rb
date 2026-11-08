@@ -14,6 +14,10 @@ module CIGates
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   FIRST_RUN = "first_run_check (the README, executed)"
+  FORMATTERS = {
+    "fmt_comments_check (the formatter keeps column-1 comments)" => "fmt_comments_check.sh",
+    "fmt_roundtrip_check (what fmt writes is still the same program)" => "fmt_roundtrip_check.sh"
+  }.freeze
   CHECKOUT = "Check out the dogfood repositories"
   CACHE = "Restore the downstream compile cache"
   PACKAGES = "Install package dependencies"
@@ -119,6 +123,8 @@ module CIGates
     require!(RV_EXEC.keys.all? { |n| checks.count { |s| s["name"] == n } == 1 },
              "all three RISC-V execution partitions must run once")
     require!(checks.count { |s| s["name"] == FIRST_RUN } == 1, "the README execution gate must run once")
+    require!(FORMATTERS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
+             "both formatter gates must run once")
     require!(checks.count { |s| s["name"] == FULL_TESTS } == 1, "the full toolchain unit suite must run once")
     require!(checks.count { |s| s["name"] == CHECKOUT } == 1, "downstream checkouts must be present")
     require!(checks.count { |s| s["name"] == CACHE } == 1, "the downstream compile cache must be present")
@@ -142,6 +148,13 @@ module CIGates
         require!(step["run"] == "opam exec -- sh scripts/first_run_check.sh",
                  "the README gate must retain the executed transcript and full test-count check")
         assigned.fetch("containers") << name
+      when *FORMATTERS.keys
+        require!(selected == ["downstream"], "formatter corpus gates belong to downstream")
+        script = FORMATTERS.fetch(name)
+        require!(step["run"] == "sh scripts/#{script}\nsh scripts/#{script} --poison\n",
+                 "formatter gates must retain their full corpus and poison runs")
+        require!(!step["continue-on-error"], "formatter failures must fail downstream")
+        assigned.fetch("downstream") << name
       when CHECKOUT
         require!(selected.sort == CHECKOUT_GROUPS, "downstream and every RISC-V oracle group need checkouts")
         require!(!step["continue-on-error"], "missing required oracle checkouts must fail the group")
@@ -215,6 +228,12 @@ module CIGates
       "renamed README gate" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["name"] = "README renamed" },
       "README in wrong group" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" },
       "empty README gate" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["run"] = "true" },
+      "missing formatter gate" => ->(c) { c[:steps].reject! { |s| s["name"] == FORMATTERS.keys.first } },
+      "renamed formatter gate" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.first }["name"] = "formatter renamed" },
+      "formatter in wrong group" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.first }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" },
+      "formatter poison removed" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.first }["run"] = "sh scripts/fmt_comments_check.sh\n" },
+      "formatter corpus removed" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.last }["run"] = "sh scripts/fmt_roundtrip_check.sh --poison\n" },
+      "optional formatter" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.last }["continue-on-error"] = true },
       "missing full suite" => ->(c) { c[:steps].delete(c[:full]) },
       "empty full suite" => ->(c) { c[:full]["run"] = "true" },
       "missing required preflight" => ->(c) { c[:steps].reject! { |s| s["name"] == PREFLIGHT } },

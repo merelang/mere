@@ -82,6 +82,8 @@ if [ "$MODE" = "--poison" ]; then
     "ABSENT   dune" MERE_CI_GROUP=containers MERE_PREFLIGHT_FAKE_MISSING=dune
   run "conformance still requires its normalization worker runner" \
     "ABSENT   python3" MERE_CI_GROUP=conformance MERE_PREFLIGHT_FAKE_MISSING=python3
+  run "downstream requires the formatter comment counter" \
+    "ABSENT   perl" MERE_CI_GROUP=downstream MERE_PREFLIGHT_FAKE_MISSING=perl
   for group in compiler web; do
     out=$(MERE_CI_GROUP="$group" MERE_PREFLIGHT_FAKE_MISSING=qemu-system-riscv32 sh "$0" 2>&1)
     if [ $? -ne 0 ] || ! printf '%s' "$out" | grep -qF "gate group: $group" \
@@ -92,7 +94,7 @@ if [ "$MODE" = "--poison" ]; then
       echo "poison caught: $group does not require an unrelated emulator"
     fi
   done
-  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 12 caught"; exit 0; }
+  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 13 caught"; exit 0; }
   echo "tool_preflight --poison: $fails not caught"; exit 1
 fi
 

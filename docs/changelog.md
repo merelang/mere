@@ -6,6 +6,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## Unreleased
 
+RV32 and RV64 support or-patterns that bind variables. Alternatives share a
+reserved home for each name, including reordered bindings, aliases and nested
+aggregate patterns. Existing first-match and guard behavior, stack restoration,
+closure capture and spilled bindings are covered by an explicit runtime oracle
+at both widths. The ordinary aggregate-let path uses the same reservation.
+
+C, LLVM and Wasm also preserve first-alternative guard behavior. A false guard
+advances to the next source arm, rather than retrying the same guard with
+another alternative's bindings. Repeated matches, side effects and captured
+outer values agree with the interpreter and RISC-V.
+
+The formatter comment and round-trip corpus gates run in downstream. Both
+complete corpus runs and poison runs remain required; assignment controls pin
+their commands and group. All 191 gates, nine groups and four build
+configurations remain required.
+
 The Unicode normalization conformance gate runs two interpreter workers over
 all 20,034 cases, retaining all six NFC/NFD assertions per case. It verifies
 partition coverage, reassembles outputs in original order, and fails on worker

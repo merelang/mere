@@ -44,6 +44,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "fmt_comments: $MERE not built" >&2; exit 2; }
+command -v perl >/dev/null 2>&1 || { echo "fmt_comments: perl is required for comment counts" >&2; exit 2; }
 
 tmp="${TMPDIR:-/tmp}/fmt_comments.$$"
 mkdir -p "$tmp"
