@@ -1,6 +1,6 @@
 // `"lit" <> rest` — the prefix test and the slice that always followed it,
-// as one pattern. Every backend sees the desugared form (a guard and a
-// binding), which is the point: no backend knows this syntax exists.
+// as one pattern. Every backend selects the prefix before the user's guard
+// and binds the suffix at the literal's exact byte boundary.
 let scheme = fn (url: str) ->
   match url with
   | "https://" <> rest -> "secure:" ++ rest

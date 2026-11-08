@@ -280,91 +280,41 @@ let check_module_privacy (prog : Ast.program) =
     check_in "" prog.Ast.main
   end
 
-(* `| "lit" <> rest ->` : the arm becomes a guard and a binding.
-
-   The rewrite, once, so that no backend has to learn a pattern:
-
-     match s with | "http://" <> rest -> body
-   =>
-     match s with | __pfxN when str_starts_with __pfxN "http://" ->
-                    let rest = utf8_sub __pfxN 7 (utf8_len __pfxN - 7) in body
-
-   Every piece of that is a function the programs doing this by hand already
-   call (`str_starts_with` and a slice, 13 times in `contrib/` alone). The arm
-   binds the scrutinee rather than naming it, so the subject is evaluated once
-   by `match` and the guard and the binding both read the same value.
-
-   A GUARDED ARM CLOSES NOTHING, which is what exhaustiveness should already
-   say about a prefix test: `| "a" <> r -> ...` covers some strings and the
-   checker has no way to know which, so a `_` arm is still required. That falls
-   out of the existing rule rather than being added to it.
-
-   The literal's length is counted in CODE POINTS, because `utf8_sub` is
-   codepoint-indexed. "http://" is 7 either way; "日本" is 2 here and 6 bytes.
-
-   ⚠ `utf8_sub` walks the string. That is the right first implementation and the
-   wrong one for a hot loop; a byte-indexed slice would be a builtin, which is
-   five backends, and is worth adding when something measured asks for it. *)
-let prefix_desugar (prog : Ast.program) : Ast.program =
-  let counter = ref 0 in
-  let codepoints (s : string) =
-    let n = ref 0 in
-    String.iter (fun c -> if Char.code c land 0xC0 <> 0x80 then incr n) s;
-    !n
+(* Preserve the source pattern tests while giving every visible name one
+   binding. Prefixes remain patterns: turning their tests into user guards
+   loses the distinction between trying an alternative and leaving an arm. *)
+let prepare_patterns (prog : Ast.program) : Ast.program =
+  let rec check_names (p : Ast.pattern) =
+    match p.Ast.pnode with
+    | Ast.P_or (a, b) ->
+      let names q = List.sort_uniq compare (Ast.pattern_vars q) in
+      let na = names a and nb = names b in
+      if na <> nb then
+        raise (Typer.Type_error (p.Ast.ploc,
+          Printf.sprintf "or-pattern branches bind different names: [%s] vs [%s]"
+            (String.concat ", " na) (String.concat ", " nb)));
+      check_names a; check_names b
+    | Ast.P_tuple ps -> List.iter check_names ps
+    | Ast.P_record (_, fs) -> List.iter (fun (_, p) -> check_names p) fs
+    | Ast.P_as (p, _) | Ast.P_constr (_, Some p) -> check_names p
+    | _ -> ()
   in
+  let prepare p = check_names p; Ast.visible_pattern p in
   let rec go (e : Ast.expr) : Ast.expr =
     Ast.rv_map_scoped ~shadow:[] (fun _ (x : Ast.expr) ->
       match x.Ast.node with
-      | Ast.Match (scrut, arms)
-        when List.exists (fun ((p : Ast.pattern), _, _) ->
-               match p.Ast.pnode with Ast.P_str_prefix _ -> true | _ -> false) arms ->
-        let arms' =
-          List.map (fun ((p : Ast.pattern), guard, body) ->
-            let guard = Option.map go guard and body = go body in
-            match p.Ast.pnode with
-            | Ast.P_str_prefix (lit, name) ->
-              incr counter;
-              let fresh = Printf.sprintf "__pfx%d" !counter in
-              let loc = p.Ast.ploc in
-              let mk node = { Ast.loc; ty = None; node } in
-              let var n = mk (Ast.Var n) in
-              let app f a = mk (Ast.App (f, a)) in
-              let k = codepoints lit in
-              let test =
-                app (app (var "str_starts_with") (var fresh)) (mk (Ast.Str_lit lit))
-              in
-              let slice () =
-                app (app (app (var "utf8_sub") (var fresh)) (mk (Ast.Int_lit k)))
-                  (mk (Ast.Bin (Ast.Sub,
-                                app (var "utf8_len") (var fresh),
-                                mk (Ast.Int_lit k))))
-              in
-              let bind_rest e =
-                if name = "_" then e
-                else
-                  { e with Ast.node =
-                      Ast.Let ({ Ast.ploc = loc; pnode = Ast.P_var name }, slice (), e) }
-              in
-              let guard' =
-                match guard with
-                | None -> Some test
-                (* THE USER'S GUARD CAN NAME THE BINDER — `| "ab" <> r when
-                   str_len r > 1` — so `r` has to be bound for the guard too,
-                   not only for the body. `&&` short-circuits, so the slice is
-                   only computed once the prefix has matched. *)
-                | Some g -> Some (mk (Ast.Logic (Ast.And, test, bind_rest g)))
-              in
-              let body' = bind_rest body in
-              ({ Ast.ploc = loc; pnode = Ast.P_var fresh }, guard', body')
-            | _ -> (p, guard, body)) arms
-        in
-        Some { x with Ast.node = Ast.Match (go scrut, arms') }
+      | Ast.Match (scrut, arms) ->
+        Some { x with Ast.node = Ast.Match (go scrut,
+          List.map (fun (p, guard, body) ->
+            prepare p, Option.map go guard, go body) arms) }
+      | Ast.Let (p, value, body) ->
+        Some { x with Ast.node = Ast.Let (prepare p, go value, go body) }
       | _ -> None) e
   in
-  let decl d =
-    match d with
-    | Ast.Top_let (p, e) -> Ast.Top_let (p, go e)
-    | Ast.Top_let_rec bs -> Ast.Top_let_rec (List.map (fun (n, l, e) -> (n, l, go e)) bs)
+  let decl = function
+    | Ast.Top_let (p, e) -> Ast.Top_let (prepare p, go e)
+    | Ast.Top_let_rec bs ->
+      Ast.Top_let_rec (List.map (fun (n, l, e) -> n, l, go e) bs)
     | other -> other
   in
   { Ast.decls = List.map decl prog.Ast.decls; Ast.main = go prog.Ast.main }
@@ -840,7 +790,7 @@ let parse_program ?(prelude = true) ?(keep_sugar = false) ?base_dir ?(search_pat
                      call is a formatter people stop running on broken files,
                      which is when they need it. *)
                   check_module_privacy p; check_file_privacy p;
-                  fold_str_concat (coro_rewrite (prefix_desugar (echo_rewrite p)))))
+                  fold_str_concat (coro_rewrite (prepare_patterns (echo_rewrite p)))))
                 { user_prog with Ast.decls = prelude_decls @ user_prog.Ast.decls })
   in
   (* Tell the typer what this program declares, here rather than only when the

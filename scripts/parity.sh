@@ -42,13 +42,13 @@
 #   sh scripts/parity.sh path/to/x.mere ...
 #
 # Prerequisites: dune-built mere.exe + a C compiler. LLVM needs the same C
-# compiler; Wasm needs wat2wasm (wabt) + node. Missing tools -> that backend
-# is SKIPped, not failed.
+# compiler; Wasm needs wat2wasm (wabt) + node. A plain .expected oracle requires
+# every backend to execute; other cases report missing tools as SKIP.
 
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-MERE="$ROOT/_build/default/bin/mere.exe"
+MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
 [ -x "$MERE" ] || { echo "parity: $MERE not found — run 'dune build'" >&2; exit 1; }
 command -v "$CC" >/dev/null 2>&1 || { echo "parity: no C compiler" >&2; exit 0; }
@@ -163,19 +163,34 @@ classify_mismatch() {
   if [ -f "$_exp" ] && [ "$3" = "$(cat "$_exp")" ]; then echo DIVERGE; else echo DIFF; fi
 }
 
+# A plain .expected file is a required runtime oracle, not a divergence pin.
+# Every backend must run it and match its exact bytes. Other corpus programs
+# retain their named backend limits and per-backend divergence pins.
+note_oracle() {
+  if [ -f "$oracle" ] && ! cmp -s "$oracle" "$TMP/$1.out"; then
+    diag="$diag~$1: output differs from the explicit oracle"
+    bad=1
+  fi
+}
+
 for f in $FILES; do
   name="$(basename "$f" .mere)"
-  ref="$(bounded "$MERE" "$f" 2>"$TMP/i.err")" && iref=0 || iref=$?
+  bounded "$MERE" "$f" > "$TMP/interp.out" 2>"$TMP/i.err" && iref=0 || iref=$?
+  ref="$(cat "$TMP/interp.out")"
+  oracle="${f%.mere}.expected"
   if [ "$iref" = "$HUNG_RC" ]; then
     echo "FAIL $name  (the interpreter did not finish within ${PARITY_TIMEOUT}s)"
     fail=$((fail + 1)); hung_names="$hung_names interp/$name"; continue
   fi
   [ "$iref" = 0 ] || { echo "SKIP $name (interpreter error)"; sed 's/^/    /' "$TMP/i.err" | head -3; skip=$((skip + 1)); skip_names="$skip_names $name"; continue; }
   row=""; bad=0; diag=""
+  note_oracle interp
   # C
   if "$MERE" -c "$f" > "$TMP/c.c" 2>"$TMP/c.err"; then
     if "$CC" -O0 -w "$TMP/c.c" -o "$TMP/c.bin" -lm 2>"$TMP/c.cc"; then
-      out="$(bounded "$TMP/c.bin" 2>/dev/null)" && orc=0 || orc=$?
+      bounded "$TMP/c.bin" > "$TMP/c.out" 2>/dev/null && orc=0 || orc=$?
+      out="$(cat "$TMP/c.out")"
+      note_oracle c
       if [ "$orc" = "$HUNG_RC" ]; then row="$row c:HUNG"; bad=1; hung_names="$hung_names c/$name"
       else
         if [ "$out" = "$ref" ]; then row="$row c:MATCH"
@@ -189,7 +204,9 @@ for f in $FILES; do
   # LLVM
   if "$MERE" -ll "$f" > "$TMP/l.ll" 2>"$TMP/l.err"; then
     if "$CC" -O0 -w "$TMP/l.ll" -o "$TMP/l.bin" -lm 2>"$TMP/l.cc"; then
-      out="$(bounded "$TMP/l.bin" 2>/dev/null)" && orc=0 || orc=$?
+      bounded "$TMP/l.bin" > "$TMP/llvm.out" 2>/dev/null && orc=0 || orc=$?
+      out="$(cat "$TMP/llvm.out")"
+      note_oracle llvm
       if [ "$orc" = "$HUNG_RC" ]; then row="$row llvm:HUNG"; bad=1; hung_names="$hung_names llvm/$name"
       else
         if [ "$out" = "$ref" ]; then row="$row llvm:MATCH"
@@ -204,7 +221,9 @@ for f in $FILES; do
   if [ "$have_wat" = 1 ]; then
     if "$MERE" -w "$f" > "$TMP/w.wat" 2>"$TMP/w.err"; then
       if wat2wasm --enable-tail-call --enable-threads "$TMP/w.wat" -o "$TMP/w.wasm" 2>"$TMP/w.w2"; then
-        out="$(bounded node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" 2>/dev/null)" && orc=0 || orc=$?
+        bounded node "$ROOT/scripts/run_wasm.js" "$TMP/w.wasm" > "$TMP/wasm.out" 2>/dev/null && orc=0 || orc=$?
+        out="$(cat "$TMP/wasm.out")"
+        note_oracle wasm
         if [ "$orc" = "$HUNG_RC" ]; then row="$row wasm:HUNG"; bad=1; hung_names="$hung_names wasm/$name"
         else
           if [ "$out" = "$ref" ]; then row="$row wasm:MATCH"
@@ -216,6 +235,15 @@ for f in $FILES; do
       else row="$row wasm:MISCOMPILE"; bad=1; note_diag wasm "$TMP/w.w2"; fi
     else [ "$(emit_kind "$TMP/w.err")" = unsup ] && row="$row wasm:UNSUP" || { row="$row wasm:EMITFAIL"; bad=1; note_diag wasm "$TMP/w.err"; }; fi
   else row="$row wasm:SKIP"; fi
+
+  if [ -f "$oracle" ]; then
+    for backend in c llvm wasm; do
+      case "$row" in
+        *"$backend:MATCH"*) ;;
+        *) bad=1; diag="$diag~$backend: the explicit oracle requires successful execution" ;;
+      esac
+    done
+  fi
 
   # A pin that no longer describes a divergence is a claim that has stopped being
   # true. v0.1.272 is what made this worth checking: the Wasm backend learned to

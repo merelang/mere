@@ -219,6 +219,66 @@ let pattern_vars (p : Ast.pattern) : string list =
   in
   go p
 
+(* Global registration consumes named lets. A top-level destructuring needed
+   by a lifted function must select its pattern once, then expose named lets
+   at the same source position. Work on the typed tree, after inference has
+   already checked the original let's coverage and generalization. *)
+let lower_top_pattern_globals ~needed ~reserved body =
+  let used = Hashtbl.create 64 in
+  let add n = Hashtbl.replace used n () in
+  let rec collect (e : Ast.expr) =
+    (match e.Ast.node with
+     | Ast.Var n | Ast.Fun (n, _, _) | Ast.With (n, _, _) -> add n
+     | Ast.Let (p, _, _) -> List.iter add (pattern_vars p)
+     | Ast.Let_rec (bs, _) -> List.iter (fun (n, _, _) -> add n) bs
+     | Ast.Match (_, arms) ->
+       List.iter (fun (p, _, _) -> List.iter add (pattern_vars p)) arms
+     | _ -> ());
+    List.iter collect (Ast.children e)
+  in
+  collect reserved; collect body;
+  let counter = ref 0 in
+  let rec fresh () =
+    incr counter;
+    let n = "__pattern_result" ^ string_of_int !counter in
+    if Hashtbl.mem used n then fresh () else (add n; n)
+  in
+  let rec go (e : Ast.expr) =
+    match e.Ast.node with
+    | Ast.Let (p, value, rest) ->
+      let rest = go rest in
+      let simple = match p.Ast.pnode with Ast.P_var _ | Ast.P_wild -> true | _ -> false in
+      if simple || not (List.exists needed (pattern_vars p)) then
+        { e with Ast.node = Ast.Let (p, value, rest) }
+      else begin
+        let value_ty = Option.value value.Ast.ty ~default:Ast.TyInt in
+        let bindings = Typer.check_pattern p value_ty in
+        let mk ty node = { Ast.loc = p.Ast.ploc; ty = Some ty; node } in
+        let pat pnode = { p with Ast.pnode } in
+        let var (n, ty) = mk ty (Ast.Var n) in
+        match bindings with
+        | [name, ty] ->
+          let selected = mk ty (Ast.Match (value, [p, None, var (name, ty)])) in
+          { e with Ast.node = Ast.Let (pat (Ast.P_var name), selected, rest) }
+        | _ ->
+          let ty = Ast.TyTuple (List.map snd bindings) in
+          let selected = mk ty (Ast.Match (value,
+            [p, None, mk ty (Ast.Tuple (List.map var bindings))])) in
+          let name = fresh () in
+          let pack = mk ty (Ast.Var name) in
+          let rest = List.fold_right (fun ((n, t) as binding) rest ->
+            let projection = pat (Ast.P_tuple (List.map (fun (other, _) ->
+              pat (if other = n then Ast.P_var n else Ast.P_wild)) bindings)) in
+            let value = mk t (Ast.Match (pack, [projection, None, var binding])) in
+            { rest with Ast.node = Ast.Let (pat (Ast.P_var n), value, rest) }
+          ) bindings rest in
+          { e with Ast.node = Ast.Let (pat (Ast.P_var name), selected, rest) }
+      end
+    | Ast.Let_rec (bs, rest) -> { e with Ast.node = Ast.Let_rec (bs, go rest) }
+    | _ -> e
+  in
+  go body
+
 type fn_decl = {
   name      : string;
   param     : string;

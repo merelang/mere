@@ -409,7 +409,8 @@ let adapters : (string, unit) Hashtbl.t = Hashtbl.create 16
 let rec pat_vars (p : Ast.pattern) : string list =
   match p.Ast.pnode with
   | Ast.P_var x -> [x]
-  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit -> []
+  | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> []
+  | Ast.P_str_prefix (_, n) -> if n = "_" then [] else [n]
   | Ast.P_tuple ps -> List.concat_map pat_vars ps
   | Ast.P_constr (_, Some s) -> pat_vars s
   | Ast.P_constr (_, None) -> []
@@ -4890,13 +4891,38 @@ and bind_pattern homes pat l_fail =
     | None -> err pat.Ast.ploc "internal: pattern variable has no reserved home"
   in
   match pat.Ast.pnode with
-  (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not run
-     on this path: it is rewritten into a guarded binding before inference, so
-     nothing below the typer should ever see one. Named rather than ignored --
-     a silent fallthrough here would compile a match that tests nothing. *)
-  | Ast.P_str_prefix _ ->
-    raise (Codegen_error (pat.Ast.ploc,
-      "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
+  | Ast.P_str_prefix (lit, name) ->
+    (* A prefix is part of pattern selection, before the user guard. Park the
+       subject across the byte test and the optional suffix allocation. *)
+    push a0;
+    let n = String.length lit in
+    emit_word (enc_i 0 a0 (ldf3 ()) t0 0x03);
+    li t1 n;
+    emit (Branch (6, t0, t1, l_fail));
+    if n > 0 then begin
+      let literal = fresh_label "prefix_" in
+      string_data := (literal, mk_str_block lit) :: !string_data;
+      let loop = fresh_label ".prefix_loop" in
+      base_addi t0 a0 (wsz ());
+      emit (LoadAddr (t1, literal));
+      base_addi t1 t1 (wsz ());
+      li t2 n;
+      emit (Label loop);
+      emit_word (enc_i 0 t0 4 t3 0x03);
+      emit_word (enc_i 0 t1 4 t4 0x03);
+      emit (Branch (1, t3, t4, l_fail));
+      base_addi t0 t0 1;
+      base_addi t1 t1 1;
+      base_addi t2 t2 (-1);
+      emit (Branch (1, t2, zero, loop))
+    end;
+    pop a0;
+    if name <> "_" then begin
+      li a1 n;
+      emit_word (enc_i 0 a0 (ldf3 ()) a2 0x03);
+      emit (Jal (ra, "__substring"));
+      bind name
+    end
   | Ast.P_wild | Ast.P_unit -> ()
   | Ast.P_var name -> bind name
   | Ast.P_int n -> li t0 n; emit (Branch (1, a0, t0, l_fail))

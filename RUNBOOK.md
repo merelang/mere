@@ -273,6 +273,13 @@ these checks run; it does not remove either execution or reuse cached output.
 The assignment validator pins its name, command and destination, and the
 containers preflight requires dune for it.
 
+The parity harness treats a plain `test/parity/<case>.expected` as a required
+runtime oracle. Interpreter, C, LLVM and Wasm must execute successfully and
+match its exact bytes; a backend refusal or Wasm tool skip fails that case.
+Per-backend divergence pins and named refusals for other cases remain separate.
+The factory, scope and pattern oracles also run in the hosted RISC-V boundary
+checks at both widths.
+
 The hosted RISC-V execution sweep has three required partitions:
 `rv_exec_check.sh --corpus32` in coroutines, `--corpus64` in RISC-V ownership,
 and `--contracts` in RISC-V. The default `--all` still runs both corpora and

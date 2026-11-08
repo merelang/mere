@@ -4503,6 +4503,11 @@ let rec match_pattern (p : Ast.pattern) (v : value) : (string * value) list opti
   | Ast.P_int n, V_int m when n = m -> Some []
   | Ast.P_bool b, V_bool b' when b = b' -> Some []
   | Ast.P_str s, V_str s' when s = s' -> Some []
+  | Ast.P_str_prefix (prefix, name), V_str s
+    when String.starts_with ~prefix s ->
+    if name = "_" then Some []
+    else Some [name, V_str (String.sub s (String.length prefix)
+                            (String.length s - String.length prefix))]
   | Ast.P_unit, V_unit -> Some []
   | Ast.P_constr (c, None), V_constr (c', None)
     when Ast.canonical_ctor c = c' -> Some []

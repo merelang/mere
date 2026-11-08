@@ -6,6 +6,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## Unreleased
 
+Patterns compose on the interpreter, C, LLVM, Wasm, RV32 and RV64.
+Parenthesized or-patterns work inside constructors, tuples, records, lists and
+aliases. Each choice selects its first match before the source arm's guard;
+false guards advance to the next arm. C, LLVM and Wasm share selected bindings
+without expanding independent choices into a Cartesian product or duplicating
+the arm body.
+
+String prefix patterns remain part of pattern selection, including inside
+alternatives and aggregates. Their suffixes use exact byte boundaries, preserving
+UTF-8, embedded NUL and binary bytes. Removing the old root-only guard rewrite
+also removes generated-name capture. Repeated names within one pattern follow
+the interpreter's existing last-binding rule on every compiled target, including
+heterogeneous fields, aliases and captured values. Hidden occurrences retain
+their tests. The required or-pattern fixture has 114 handwritten runtime answers.
+Plain parity oracles require exact output and successful execution on the
+interpreter, C, LLVM and Wasm, including refusal and missing-tool failures;
+the hosted RISC-V boundary checks require the same oracle at both widths.
+Top-level pattern bindings also remain available to later functions. Native
+global registration selects the original pattern once, preserves initializer
+order and shadowing, and avoids collisions with user-written temporary names.
+
 RV32 and RV64 support or-patterns that bind variables. Alternatives share a
 reserved home for each name, including reordered bindings, aliases and nested
 aggregate patterns. Existing first-match and guard behavior, stack restoration,

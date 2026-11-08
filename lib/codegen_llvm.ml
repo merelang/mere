@@ -1977,6 +1977,7 @@ let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
     match p.Ast.pnode with
     | Ast.P_var n -> [n]
+    | Ast.P_str_prefix (_, n) -> if n = "_" then [] else [n]
     | Ast.P_constr (_, Some sub) -> go sub
     | Ast.P_tuple ps -> List.concat_map go ps
     | Ast.P_record (_, fs) -> List.concat_map (fun (_, p) -> go p) fs
@@ -4632,7 +4633,7 @@ let emit_chan_pair (e : Ast.expr) (call : string) : string =
   emit_instr (Printf.sprintf "  %s = insertvalue %s %s, %s %s, 1" t1 tn t0 ety v);
   t1
 
-let rec emit_expr (env : env) (e : Ast.expr) : string =
+let rec emit_expr ?(let_body_top = false) (env : env) (e : Ast.expr) : string =
   (* Q-029: whether THIS expression is in tail position. Cleared immediately,
      so a sub-expression is not in tail position unless the case below puts it
      back -- the same discipline the C backend's c_tail_pos uses. *)
@@ -5245,7 +5246,8 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
           (the interp accepted every pattern) — a backend parity gap
           surfaced by the mere-blog dogfood. *)
        llvm_tail_pos := __in_tail;
-       emit_expr env { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
+       emit_expr ~let_body_top:__in_top env
+         { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
   (* v0.1.172: a name the user bound is the user's, not the builtin's.
      Every arm below this one dispatches on a builtin name without asking
      whether the program defined something of its own by that name, and a
@@ -8162,13 +8164,21 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
       (fail_label : string)
       : string * (string * string) list * (string * Ast.ty) list =
       match pat.Ast.pnode with
-      (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not
-         run: it is rewritten into a guarded binding before inference. Named
-         rather than ignored -- a silent fallthrough compiles a match that
-         tests nothing. *)
-      | Ast.P_str_prefix _ ->
-        raise (Codegen_error (pat.Ast.ploc,
-          "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
+      | Ast.P_str_prefix (lit, name) ->
+        let label = fresh_str_global lit in
+        let cond = fresh_reg () in
+        emit_instr (Printf.sprintf "  %s = call i1 @__lang_str_starts_with(ptr %s, ptr %s)"
+                      cond v_reg label);
+        if name = "_" then cond, [], [] else begin
+          let ok = fresh_label "prefix_ok_" in
+          emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" cond ok fail_label);
+          emit_label ok;
+          let len = fresh_reg () and rest = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" len v_reg);
+          emit_instr (Printf.sprintf "  %s = call ptr @__lang_substring(ptr %s, i64 %d, i64 %s)"
+                        rest v_reg (String.length lit) len);
+          "1", [name, rest], [name, Ast.TyStr]
+        end
       | Ast.P_wild -> ("1", [], [])
       | Ast.P_var n -> ("1", [(n, v_reg)], [(n, v_ty)])
       | Ast.P_unit -> ("1", [], [])
@@ -8329,26 +8339,29 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
          | Some _, None ->
            unsupported pat.Ast.ploc
              "pattern has payload but constructor has no payload type")
-      | Ast.P_or _ ->
-        unsupported pat.Ast.ploc "P_or should have been flattened"
+      | Ast.P_or (a, b) ->
+        let right = fresh_label "or_right_" in
+        let left_ok = fresh_label "or_left_ok_" in
+        let right_ok = fresh_label "or_right_ok_" in
+        let join = fresh_label "or_join_" in
+        let ca, ba, ta = compile_pat a v_reg v_ty right in
+        emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" ca left_ok right);
+        emit_label left_ok;
+        emit_instr (Printf.sprintf "  br label %%%s" join);
+        emit_label right;
+        let cb, bb, _ = compile_pat b v_reg v_ty fail_label in
+        emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" cb right_ok fail_label);
+        emit_label right_ok;
+        emit_instr (Printf.sprintf "  br label %%%s" join);
+        emit_label join;
+        let bindings = List.map (fun (name, value) ->
+          let result = fresh_reg () in
+          emit_instr (Printf.sprintf "  %s = phi %s [%s, %%%s], [%s, %%%s]"
+                        result (llvm_ty_of (List.assoc name ta))
+                        value left_ok (List.assoc name bb) right_ok);
+          name, result) ba in
+        "1", bindings, ta
     in
-    (* A failed pattern tries the next alternative; a failed guard skips
-       the remaining alternatives of the same source arm. *)
-    let rec expand_or pat =
-      match pat.Ast.pnode with
-      | Ast.P_or (a, b) -> expand_or a @ expand_or b
-      | _ -> [pat]
-    in
-    let arms = List.concat_map (fun (pat, guard, body) ->
-      let alternatives = expand_or pat in
-      let guard_next = match guard, alternatives with
-        | Some _, _ :: _ :: _ -> Some (fresh_label "next_")
-        | _ -> None
-      in
-      List.mapi (fun i pat ->
-        pat, guard, body, guard_next, i = List.length alternatives - 1
-      ) alternatives
-    ) arms in
     let rec emit_arms = function
       | [] ->
         (* v0.1.470: the named, catchable failure — not a bare abort.
@@ -8363,13 +8376,9 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
            different claim from a user's match. *)
         emit_instr "  call void @__lang_fail_impl(ptr @.nomatch_msg)";
         emit_instr "  unreachable"
-      | (pat, guard, body, guard_next, last_alternative) :: rest ->
+      | (pat, guard, body) :: rest ->
         let arm_label = fresh_label "arm_" in
-        let next_label = match guard_next with
-          | Some label when last_alternative -> label
-          | _ -> fresh_label "next_"
-        in
-        let guard_fail = Option.value guard_next ~default:next_label in
+        let next_label = fresh_label "next_" in
         let (cond, bindings, var_tys) = compile_pat pat scrut_v scrut_ty next_label in
         emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
                       cond arm_label next_label);
@@ -8384,7 +8393,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
            let gv = emit_expr env' g in
            let pass_label = fresh_label "guard_pass_" in
            emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s"
-                         gv pass_label guard_fail);
+                         gv pass_label next_label);
            emit_label pass_label);
         (* v0.1.269: an arm in tail position RETURNS, like a tail-position
            If branch. Nearly every recursive list helper is written with
@@ -8392,6 +8401,7 @@ let rec emit_expr (env : env) (e : Ast.expr) : string =
            v0.1.267 left their tail calls sitting before a `br` to the join
            -- which is the one shape musttail cannot take. *)
         llvm_tail_pos := match_in_tail;
+        llvm_in_top_level_body := let_body_top;
         let v = emit_expr env' body in
         current_var_types := saved_vt;
         if match_in_tail then begin
@@ -18854,6 +18864,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       [] skels
   in
   let needs_global_llvm name = List.mem name fvs_used_in_skels_llvm in
+  let body_expr = Monomorph.lower_top_pattern_globals
+      ~needed:needs_global_llvm ~reserved:main_expr body_expr in
   (* Phase 36 (DEFERRED §1.18 fix): keep Let bindings in body_expr so
      globals get initialized at their source-order position (via
      `store` emit_expr Let). We only collect (name, ty) for declaring
@@ -18949,7 +18961,9 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     if mono_variant_is_recursive vn args sv then
       Hashtbl.replace recursive_variants (mono_variant_name vn args) ()
   ) mono_variant_instances;
-  let tuple_shapes = collect_tuple_shapes main_expr fns in
+  let tuple_shapes =
+    List.sort_uniq (fun a b -> compare (tuple_struct_name a) (tuple_struct_name b))
+      (collect_tuple_shapes main_expr fns @ collect_tuple_shapes body_expr []) in
   let tuple_typedefs = List.map emit_tuple_typedef tuple_shapes in
   let record_names = collect_record_names main_expr fns in
   let record_typedefs = List.map emit_record_typedef record_names in

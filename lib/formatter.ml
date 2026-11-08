@@ -283,17 +283,22 @@ let rec fmt_pat p =
   | P_constr (c, None) -> unqualify_ctor c
   | P_constr (c, Some sub) -> unqualify_ctor c ^ " " ^ fmt_pat_atom sub
   | P_tuple ps ->
-    "(" ^ String.concat ", " (List.map fmt_pat ps) ^ ")"
+    "(" ^ String.concat ", " (List.map fmt_pat_component ps) ^ ")"
   | P_record (name, fields) ->
-    let parts = List.map (fun (f, p) -> f ^ " = " ^ fmt_pat p) fields in
+    let parts = List.map (fun (f, p) -> f ^ " = " ^ fmt_pat_component p) fields in
     (* A record type declared inside a module is `M.Rect` in the tree, and the
        literal syntax cannot spell that either -- the parser injects an
        unqualified alias for the same reason it does for constructors. *)
     unqualify_ctor name ^ " { " ^ String.concat ", " parts ^ " }"
   | P_as (inner, name) ->
-    fmt_pat inner ^ " as " ^ name
+    fmt_pat_atom inner ^ " as " ^ name
   | P_or (a, b) ->
     fmt_pat a ^ " | " ^ fmt_pat b
+
+and fmt_pat_component p =
+  match p.pnode with
+  | P_or _ -> "(" ^ fmt_pat p ^ ")"
+  | _ -> fmt_pat p
 
 (* Parenthesise around a pattern when it would otherwise read as
    adjacent tokens (e.g. inside a ctor payload). *)
@@ -567,7 +572,7 @@ and fmt_block ~ind e =
           else
             " " ^ fmt_expr ~prec:prec_top ~ind value
         in
-        let one_line = "let " ^ fmt_pat pat ^ " =" ^ value_s ^ " in" in
+        let one_line = "let " ^ fmt_pat_component pat ^ " =" ^ value_s ^ " in" in
         Buffer.add_string buf
           (one_line
            ^ take_trailing_on ~same_file:(e.loc.Loc.file = None) e.loc.Loc.line one_line
@@ -721,12 +726,12 @@ and fmt_else_chain ~ind else_ =
 let fmt_top_let pat value =
   match value.node with
   | Fun _ when (match pat.pnode with P_var _ -> true | _ -> false) ->
-    "let " ^ fmt_pat pat ^ " = " ^ fmt_fun_chain ~ind:0 value ^ ";"
+    "let " ^ fmt_pat_component pat ^ " = " ^ fmt_fun_chain ~ind:0 value ^ ";"
   | _ when is_block value ->
-    "let " ^ fmt_pat pat ^ " =\n"
+    "let " ^ fmt_pat_component pat ^ " =\n"
     ^ indent 1 ^ fmt_expr ~prec:prec_top ~ind:1 value ^ ";"
   | _ ->
-    "let " ^ fmt_pat pat ^ " = " ^ fmt_expr ~prec:prec_top ~ind:0 value ^ ";"
+    "let " ^ fmt_pat_component pat ^ " = " ^ fmt_expr ~prec:prec_top ~ind:0 value ^ ";"
 
 let fmt_top_let_rec bindings =
   let parts =

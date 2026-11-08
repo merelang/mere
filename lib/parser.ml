@@ -1031,6 +1031,15 @@ let rec parse_program_internal tokens =
     | (pos, T_lparen) :: (_, T_rparen) :: rest -> mkp pos Ast.P_unit, rest
     | (pos, T_lparen) :: rest ->
       let first, toks = pattern rest in
+      let first, toks =
+        let rec alternatives lhs = function
+          | (pos, T_pipe) :: rest ->
+            let rhs, rest = pattern rest in
+            alternatives (mkp pos (Ast.P_or (lhs, rhs))) rest
+          | rest -> lhs, rest
+        in
+        alternatives first toks
+      in
       (match toks with
        | (_, T_comma) :: _ ->
          let rec collect acc toks =

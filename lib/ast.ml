@@ -465,6 +465,43 @@ let rec pattern_vars p =
   | P_as (inner, n) -> n :: pattern_vars inner
   | P_or (a, _) -> pattern_vars a  (* P_or arms bind the same names *)
 
+(* The interpreter introduces bindings in traversal order, with later entries
+   shadowing earlier ones. Keep the tests of hidden occurrences, but remove
+   their bindings before typing and emission. An alias precedes its inner
+   bindings, and alternatives have separate scopes. *)
+let visible_pattern p =
+  let rec go seen p =
+    let keep name = not (List.mem name seen) in
+    let with_node pnode seen = ({ p with pnode }, seen) in
+    match p.pnode with
+    | P_var name ->
+      if keep name then p, name :: seen else with_node P_wild seen
+    | P_str_prefix (lit, name) when name <> "_" ->
+      if keep name then p, name :: seen
+      else with_node (P_str_prefix (lit, "_")) seen
+    | P_as (inner, name) ->
+      let inner, seen = go seen inner in
+      if List.mem name seen then inner, seen
+      else with_node (P_as (inner, name)) (name :: seen)
+    | P_or (a, b) ->
+      let a, seen_a = go seen a in
+      let b, _ = go seen b in
+      with_node (P_or (a, b)) seen_a
+    | P_tuple ps ->
+      let seen, ps = List.fold_right (fun p (seen, ps) ->
+        let p, seen = go seen p in seen, p :: ps) ps (seen, []) in
+      with_node (P_tuple ps) seen
+    | P_record (name, fields) ->
+      let seen, fields = List.fold_right (fun (name, p) (seen, fields) ->
+        let p, seen = go seen p in seen, (name, p) :: fields) fields (seen, []) in
+      with_node (P_record (name, fields)) seen
+    | P_constr (name, Some sub) ->
+      let sub, seen = go seen sub in
+      with_node (P_constr (name, Some sub)) seen
+    | _ -> p, seen
+  in
+  fst (go [] p)
+
 (* Rename BOUND variables in a pattern. `pattern_vars` answers which names a pattern
    binds; this rewrites them. Used by the shadow-uniquifier below, which has to move a
    binder out of the way rather than a reference to one. *)
@@ -835,7 +872,11 @@ let uniquify_toplevel_shadows ?(shadowable = []) (prog : program) : program =
       let v' = rename_free_vars lk v in
       let n' = bind_def n in
       Top_let ({ p with pnode = P_var n' }, v')
-    | Top_let (p, v) -> Top_let (p, rename_free_vars lk v)
+    | Top_let (p, v) ->
+      let v = rename_free_vars lk v in
+      let names = List.sort_uniq compare (pattern_vars p) in
+      let renames = List.map (fun n -> n, bind_def n) names in
+      Top_let (rename_pat_vars renames p, v)
     | Top_let_rec bs ->
       (* recursive: names are in scope within their own values *)
       let names' = List.map (fun (n, _, _) -> bind_def n) bs in
