@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -15,12 +16,15 @@ def api(path, destination=None):
     args = ["gh", "api", "--hostname", "github.com", path]
     if destination is not None:
         args[2:2] = ["-H", "Accept: application/octet-stream"]
+    # setup-ocaml forces CLI color globally; machine-readable API bytes must
+    # stay uncolored even when stdout is redirected.
+    environment = dict(os.environ, CLICOLOR_FORCE="0", NO_COLOR="1")
     for attempt in range(2):
         try:
             if destination is None:
-                return json.loads(subprocess.check_output(args, timeout=45))
+                return json.loads(subprocess.check_output(args, timeout=45, env=environment))
             with destination.open("wb") as output:
-                subprocess.run(args, stdout=output, check=True, timeout=45)
+                subprocess.run(args, stdout=output, check=True, timeout=45, env=environment)
             return
         except (subprocess.SubprocessError, json.JSONDecodeError):
             if attempt:
@@ -118,7 +122,8 @@ def self_test():
          patch("time.sleep") as backoff:
         assert api("repos/owner/repo/releases") == {}
         assert request.call_count == 2
-        assert all(call.kwargs["timeout"] == 45 for call in request.call_args_list)
+        assert all(call.kwargs["timeout"] == 45 and call.kwargs["env"]["CLICOLOR_FORCE"] == "0"
+                   and call.kwargs["env"]["NO_COLOR"] == "1" for call in request.call_args_list)
         backoff.assert_called_once_with(2)
     with patch("subprocess.check_output", side_effect=subprocess.TimeoutExpired("gh", 45)) as request, \
          patch("time.sleep"):
