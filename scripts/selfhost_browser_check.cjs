@@ -69,6 +69,17 @@ async function check(playground) {
       execute(fs.readFileSync(file + '.mere', 'utf8'), expected);
       lines += expected.split('\n').length - 1;
     }
+    const prelude = path.join(root, 'test/selfhost/compiler_prelude');
+    execute(fs.readFileSync(prelude + '.mere', 'utf8'), fs.readFileSync(prelude + '.expected', 'utf8'));
+    console.log('  browser standard helpers: 3 handwritten answers passed');
+    const helperRows = fs.readFileSync(path.join(root, 'test/selfhost/compiler_helpers.tsv'), 'utf8').trimEnd().split('\n');
+    assert.equal(helperRows.length, 17, 'required helper inventory');
+    for (const row of helperRows) {
+      const [name, answers, source, ...extra] = row.split('\t');
+      assert.equal(extra.length, 0, name);
+      execute(source, JSON.parse(answers).join('\n') + '\n');
+    }
+    console.log('  browser helper inventory: 17 compatibility cases passed');
     let refusals = 0;
     for (const [inventory, columns] of [['record_rejections', 4], ['type_rejections', 4], ['declaration_rejections', 5]]) {
       const rows = fs.readFileSync(path.join(root, 'test/selfhost', inventory + '.tsv'), 'utf8').trimEnd().split('\n');

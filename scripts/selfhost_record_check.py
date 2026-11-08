@@ -71,6 +71,45 @@ def check(mere, compiler):
         wat.write_text(succeeds(["node", host, compiler, source]))
         succeeds(["wat2wasm", "--enable-tail-call", wat, "-o", wasm])
         assert succeeds(["node", host, wasm]) == "17\n"
+        # Sharing the checked entry must preserve the browser's existing helper
+        # implementations, including the map iterator's polymorphic map_head.
+        prelude = ROOT / "test/selfhost/compiler_prelude.mere"
+        expected = prelude.with_suffix(".expected").read_text()
+        assert succeeds([mere, prelude]) == expected
+        assert succeeds([mere, "-t", prelude]).strip() == "unit"
+        bridge.write_text("import " + quoted(ROOT / "contrib/typer/typer.mere")
+                          + ";\nimport " + quoted(ROOT / "contrib/codegen/codegen_wasm.mere")
+                          + ";\nprint (parse_and_infer (selfhost_prelude_fns ++ "
+                          + quoted(prelude.read_text()) + "))\n")
+        assert succeeds([mere, bridge]).strip() == "unit"
+        wat.write_text(succeeds(["node", host, compiler, prelude]))
+        succeeds(["wat2wasm", "--enable-tail-call", wat, "-o", wasm])
+        assert succeeds(["node", host, wasm]) == expected
+        print("  standard helpers: 3 handwritten answers, source typing and target execution passed", flush=True)
+        helper_rows = [line.split("\t") for line in
+                       (ROOT / "test/selfhost/compiler_helpers.tsv").read_text().splitlines()]
+        assert len(helper_rows) == 17 and all(len(row) == 3 for row in helper_rows)
+        # Some browser helpers (such as list_mapi) are supplied by this Mere
+        # catalog rather than the native prelude. Interpret the catalog as the
+        # reference, independently checking each handwritten output oracle.
+        bridge.write_text("import " + quoted(ROOT / "contrib/codegen/codegen_wasm.mere")
+                          + ";\nprint selfhost_prelude_fns\n")
+        catalog = succeeds([mere, bridge])
+        # map_head is the self-host runtime's internal traversal primitive.
+        # The native interpreter supplies map_iter directly instead.
+        parts = catalog.rsplit("\nlet map_iter = fn m -> fn f ->", 1)
+        assert len(parts) == 2 and parts[1].strip() == "list_iter (map_head m) (fn p -> f (fst p) (snd p));"
+        catalog = parts[0] + "\n"
+        reference = work / "reference.mere"
+        for name, answers, text in helper_rows:
+            source.write_text(text + "\n")
+            reference.write_text(catalog + text + "\n")
+            expected = "\n".join(json.loads(answers)) + "\n"
+            assert succeeds([mere, reference]) == expected, name
+            wat.write_text(succeeds(["node", host, compiler, source]))
+            succeeds(["wat2wasm", "--enable-tail-call", wat, "-o", wasm])
+            assert succeeds(["node", host, wasm]) == expected, name
+        print("  helper inventory: 17 compatibility cases passed", flush=True)
         # Default Node stack and runtime memory limits stay in force. Check
         # both compiled routes; the evaluator has its own recursion strategy.
         source.write_text("let rec loop = fn n -> n == 0 || (n > 0 && loop (n - 1));\n"

@@ -467,6 +467,9 @@ fields or variant constructors and arities; a record/variant kind collision is
 also refused. The final nominal schema checks earlier values, while aliases
 keep their declaration-time meaning. The low-level `parse_and_emit` bootstrap
 API remains unchecked; it is not the source entry used by these two compilers.
+The checked entry retains standard list and string helpers and map iteration,
+selecting referenced implementations and their dependencies in declaration
+order to stay within the normal Wasm arena.
 
 Named variables in function and expression annotations are fresh for each
 annotation. Repeated names within one annotation share a type: `fn (x: 'a) -> x`

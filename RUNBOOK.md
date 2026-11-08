@@ -332,6 +332,9 @@ the actual generated HTML, DOM glue and optimized compiler. It executes all
 130 oracle lines, refuses the same 56 inputs, clears stale WAT and recompiles
 valid input after each failure on the same instance, with default memory and
 stack limits. Host imports are explicit: missing imports cannot become stubs.
+The CLI and browser gates also execute the standard-helper fixture and all
+17 required compatibility cases, including transitive helper dependencies,
+polymorphic calls and declaration-order shadowing.
 
 CI, Pages and release builds populate the opam tool cache through the official
 GitHub release API before running the pinned OCaml setup action. Downloads must

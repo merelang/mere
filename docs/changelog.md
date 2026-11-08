@@ -27,10 +27,17 @@ compiler allocations are reclaimed before each click. The full-toolchain suite
 has 3,246 tests; 251 parity programs, 191 gates, nine groups and four build
 configurations remain required.
 
-The browser compiler grows from 166,357 to 225,683 bytes by adding the checked
+The checked entry retains the browser's standard helper implementations, selecting
+referenced helpers and their dependencies in declaration order. Seventeen
+compatibility cases cover list and string operations, map iteration, polymorphic
+use and helper shadowing without increasing memory or stack limits.
+
+The browser compiler grows from 166,357 to 227,778 bytes by adding the checked
 pipeline. Ordered constructor resolution also grows the formatter from 103,703
-to 105,240 bytes and the REPL from 122,096 to 125,989 bytes. These three bands
-retain the existing ±10% policy; the other twelve bands remain unchanged.
+to 105,240 bytes and the REPL from 122,096 to 125,989 bytes. Declaration and
+constructor checks, including the map iterator's polymorphic `map_head` scheme,
+grow the typer from 147,180 to 157,228 bytes. These four bands retain the
+existing ±10% policy; the other eleven bands remain unchanged.
 
 ## v0.1.716 — 2026-11-08
 

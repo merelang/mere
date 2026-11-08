@@ -1,0 +1,7 @@
+// The checked entry retains the browser compiler's standard helper functions.
+let _ = print (show (list_len (list_map [1, 2, 3] (fn n -> n + 1))));
+let _ = print (str_join ":" ["a", "b"]);
+let m = map_new ();
+let _ = map_set m 7 11;
+let _ = map_iter m (fn k -> fn v -> print (show (k + v)));
+()

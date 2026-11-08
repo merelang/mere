@@ -3,10 +3,61 @@
 import "../typer/typer.mere";
 import "codegen_wasm.mere";
 
+// Parse the helper catalog once. Select only referenced implementations and
+// their dependencies: checking/emitting the entire catalog for every input
+// exhausts the normal Wasm arena on otherwise small programs.
+let standard_helper_decls =
+  let ((decls, _), _) = parse_decls Nil (tokenize (selfhost_prelude_fns ++ "()")) in
+  decls;
+
+let helper_names = fn d -> match d with
+  | TopLet (pat, _) -> pattern_bindings pat
+  | TopLetRec bindings -> letrec_names bindings
+  | _ -> Nil;
+
+let rec catalog_names = fn ds -> match ds with
+  | Nil -> Nil
+  | Cons (d, rest) -> union_strs (helper_names d) (catalog_names rest);
+let standard_helper_names = catalog_names standard_helper_decls;
+
+let rec referenced_helpers = fn toks -> fn names -> match toks with
+  | Nil -> names
+  | Cons ((_, tok), rest) ->
+    let names1 = (match tok with
+      | TIdent n -> if member_str n standard_helper_names then union_strs (Cons (n, Nil)) names else names
+      | _ -> names) in
+    referenced_helpers rest names1;
+
+let rec reverse_helper_decls = fn ds -> fn acc -> match ds with
+  | Nil -> acc
+  | Cons (d, rest) -> reverse_helper_decls rest (Cons (d, acc));
+let reversed_standard_helpers = reverse_helper_decls standard_helper_decls Nil;
+
+let rec helpers_needed = fn names -> fn needed -> match names with
+  | Nil -> false
+  | Cons (name, rest) -> member_str name needed || helpers_needed rest needed;
+
+// The catalog is in dependency order: a helper refers only to primitive
+// builtins, its recursive group, or earlier helpers. Walking backwards finds
+// transitive dependencies while prepending preserves declaration order.
+let rec select_standard_helpers = fn ds -> fn needed -> fn selected -> match ds with
+  | Nil -> selected
+  | Cons (d, rest) ->
+    if helpers_needed (helper_names d) needed then
+      let dependencies = (match d with
+        | TopLet (_, e) -> free_vars e Nil
+        | TopLetRec bindings -> free_vars_letrec_vals bindings (letrec_names bindings)
+        | _ -> Nil) in
+      select_standard_helpers rest (union_strs needed dependencies) (Cons (d, selected))
+    else select_standard_helpers rest needed selected;
+
 let compile_source_to_wat = fn (src: str) ->
   let toks = tokenize src in
   let (prog, _rest) = parse_decls Nil toks in
-  let (decls, main_expr) = flatten_and_resolve prog in
+  let helpers = select_standard_helpers reversed_standard_helpers (referenced_helpers toks Nil) Nil in
+  let (source_decls, source_main) = prog in
+  let (decls, main_expr) = flatten_and_resolve
+    ((append_top_decls helpers source_decls, source_main) : program) in
   let (source_env, source_state) = prepare_source_env decls in
   let (decls_r, env1, s1) =
     annotate_decls decls source_env source_state in

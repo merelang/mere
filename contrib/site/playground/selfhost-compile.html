@@ -192,7 +192,9 @@
       <li>Save it as <code>out.wat</code>.</li>
       <li><code>wat2wasm out.wat -o out.wasm</code> — produces a
         binary Wasm module.</li>
-      <li><code>node -e "WebAssembly.instantiate(require('fs').readFileSync('out.wasm'),{env:{}}).then(({instance})=>console.log(instance.exports.main()))"</code></li>
+      <li>From the repository checkout, run
+        <code>node scripts/run_wasm.js out.wasm</code>. This host supplies
+        the module's output imports.</li>
     </ol>
     <p>
       The printed integer is the result of evaluating the source
@@ -215,14 +217,10 @@
     <h2>Limitations</h2>
     <ul>
       <li>
-        <strong>No stdlib codegen.</strong> Functions like
-        <code>print</code>, <code>show</code>, <code>str_concat</code>,
-        <code>vec_*</code>, <code>map_*</code>, <code>file_*</code>
-        aren't emitted — the OCaml-side codegen ships ~2000 lines of
-        runtime helpers for these. The self-host MVP would call them
-        via <code>(import "env" ...)</code> declarations + extern fn
-        stubs in the host's `env` table; this is the standard pattern
-        but isn't wired into the demos yet.
+        <strong>Partial standard library.</strong> The compiler includes
+        referenced list and string helpers and their dependencies, plus the
+        supported runtime primitives. Host I/O requires imports supplied by
+        the embedder; this browser host does not provide file access.
       </li>
       <li>
         <strong>Uniform value representation.</strong> The self-host
@@ -230,9 +228,9 @@
         in annotations, and uses an i32 representation for their runtime values.
       </li>
       <li>
-        <strong>No optimisation pass.</strong> Tail calls aren't
-        optimised; closure records are never reused; constant folding
-        only happens at the parser level.
+        <strong>Limited optimisation.</strong> The self-host compiler has
+        tail-call lowering and selects referenced standard helpers, but does
+        not run the native compiler's full optimisation pipeline.
       </li>
       <li>
         <strong>Compilation errors.</strong> A rejected program displays its

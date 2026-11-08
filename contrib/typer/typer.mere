@@ -1442,6 +1442,7 @@ let initial_type_env =
    //   map_set : Map R K V -> K -> V -> unit
    //   map_get : Map R K V -> K -> V
    //   map_has : Map R K V -> K -> bool
+   //   map_head : Map R K V -> (K * V) list
    Cons (("map_new", ((Cons (1021, Cons (1022, Cons (1023, Nil))),
      TyArrow (TyUnit,
        TyCon ("Map", Cons (TyMeta 1021, Cons (TyMeta 1022, Cons (TyMeta 1023, Nil)))))) : scheme)),
@@ -1455,7 +1456,10 @@ let initial_type_env =
    Cons (("map_has", ((Cons (1030, Cons (1031, Cons (1032, Nil))),
      TyArrow (TyCon ("Map", Cons (TyMeta 1030, Cons (TyMeta 1031, Cons (TyMeta 1032, Nil)))),
        TyArrow (TyMeta 1031, TyBool))) : scheme)),
-   Nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
+   Cons (("map_head", ((Cons (1035, Cons (1036, Cons (1037, Nil))),
+     TyArrow (TyCon ("Map", Cons (TyMeta 1035, Cons (TyMeta 1036, Cons (TyMeta 1037, Nil)))),
+       TyCon ("list", Cons (TyTuple (Cons (TyMeta 1036, Cons (TyMeta 1037, Nil))), Nil)))) : scheme)),
+   Nil))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
 
 let nominal_shape_key = fn name -> "@nominal_shape:" ++ name;
 let rec variant_shape = fn ctors -> match ctors with
