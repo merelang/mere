@@ -305,6 +305,17 @@ downstream preflight requires Perl for comment counts. The full unit suite
 remains in compiler and README execution remains in containers.
 All 191 gates, nine groups and four build configurations remain required.
 
+## Self-host pattern verification
+
+`scripts/selfhost_check.sh` rebuilds the CLI compiler in an isolated temporary
+directory on every run. The pattern fixture's `.expected` companion is required.
+Its 36 handwritten lines must match the reference interpreter and Wasm, the
+self-host evaluator under the interpreter and Wasm, and programs emitted by
+the self-host compiler running on Wasm. Emission, assembly and runtime failures
+fail the gate, including when several paths agree on the same wrong output.
+The existing compiler-group gate retains this verification; all 191 gates,
+nine groups and four build configurations remain required.
+
 ## Binary releases
 
 `release-build.yml` is shared by the distribution CI jobs and tagged

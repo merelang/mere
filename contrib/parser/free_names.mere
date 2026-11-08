@@ -43,6 +43,7 @@ let rec pat_vars = fn (p: pattern) -> fn (acc: str list) ->
   | PInt _ -> acc
   | PBool _ -> acc
   | PStr _ -> acc
+  | PStrPrefix (_, n) -> if str_eq n "_" then acc else add_name n acc
   | PUnit -> acc
   | PConstr (_, sub) ->
     (match sub with

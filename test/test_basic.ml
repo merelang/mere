@@ -12448,6 +12448,34 @@ let () =
   check_self_host "parser.mere" "contrib/parser/parser.mere";
   check_self_host "fmt.mere" "contrib/fmt/fmt.mere";
 
+  let pattern_cases = [
+    "or right bindings", "match (2, 9) with (1, x) | (x, 9) -> x | _ -> 0", "2";
+    "or first bindings", "match (1, 9) with (1, x) | (x, 9) -> x | _ -> 0", "9";
+    "duplicate binder", "match (1, 2) with (x, x) -> x", "2";
+    "heterogeneous duplicate", "match (1, \"abc\") with (x, x) -> str_len x", "3";
+    "alias traversal", "match (1, 2) with ((x, x) as x) -> x", "2";
+    "constructor alias", "type Box = Box of int; match Box 14 with ((Box x) as whole) -> x + (match whole with Box y -> y)", "28";
+    "nested choice", "match 2 with (1 | 2) -> 7 | _ -> 0", "7";
+    "independent choices", "match (2, 4) with ((1 | 2), (3 | 4)) -> 8 | _ -> 0", "8";
+    "record choices", "type Pair = { a: int, b: int }; match Pair { a = 2, b = 4 } with Pair { a = (1 | 2), b = (3 | 4) } -> 10 | _ -> 0", "10";
+    "list choices", "match [2, 4] with [(1 | 2), (3 | 4)] -> 11 | _ -> 0", "11";
+    "prefix suffix", "match \"abc\" with \"a\" <> tail -> str_len tail | _ -> 99", "2";
+    "prefix alternative", "match \"abc\" with \"x\" <> tail | \"a\" <> tail -> str_len tail | _ -> 99", "2";
+    "prefix guard", "match \"abc\" with \"a\" <> tail | \"ab\" <> tail when str_len tail == 1 -> 7 | _ -> 97", "97";
+    "prefix NUL", "match \"a\\0bz\" with \"a\\0b\" <> tail -> str_len tail | _ -> 99", "1";
+    "NUL literal distinction", "match \"a\\0b\" with \"a\\0c\" -> 99 | _ -> 15", "15";
+    "NUL suffix", "match \"a\\0b\" with \"a\" <> tail -> str_len tail | _ -> 99", "2";
+    "prefix binary byte", "match \"a\128z\" with \"a\128\" <> tail -> str_len tail | _ -> 99", "1";
+    "prefix UTF-8", "match \"あい\" with \"あ\" <> tail -> str_len tail | _ -> 99", "3";
+    "escaping selection", "let f = match (2, 9) with (1, x) | (x, 9) -> fn () -> x | _ -> fn () -> 0 in f ()", "2";
+    "guard lexical scope", "match 5 with x when (let x = 9 in x == 9) -> x | _ -> 0", "5";
+    "pattern let", "let ((1, x) | (x, 9)) = (2, 9) in x", "2";
+    "record traversal", "type Pair = { a: int, b: int }; match Pair { a = 1, b = 2 } with Pair { b = x, a = x } -> x", "1";
+  ] in
+  List.iter (fun (name, input, _) -> cross_validate name input)
+    (List.filter (fun (name, _, _) -> List.mem name
+      ["constructor alias"; "nested choice"; "independent choices"; "record choices"; "pattern let"; "prefix NUL"]) pattern_cases);
+
   (* Phase 51.6 — self-host eval cross-validation. Run a Mere source
      string through both OCaml-side `Pipeline.process` (which is
      parse + typer + eval) and the self-host `tokenize + parse_decls +
@@ -12501,6 +12529,8 @@ let () =
     "match 2 with | 1 -> \"one\" | 2 -> \"two\" | _ -> \"other\"";
   cross_eval "str concat" "\"hello, \" ++ \"world\"";
   cross_eval "tuple destructure" "let (a, b) = (3, 4) in a + b";
+
+  List.iter (fun (name, input, _) -> cross_eval name input) pattern_cases;
 
   (* Phase 52.6 — self-host typer cross-validation. Runs a Mere source
      string through both `Pipeline.type_of` (OCaml typer) and the
@@ -12655,6 +12685,19 @@ let () =
      cross_type requires the self-host parser gaining `type opt 'a =
      ...` syntax first. *)
 
+
+  List.iter (fun (name, input, _) -> cross_type name input) pattern_cases;
+  List.iter (fun (name, input) ->
+    let rejects f = try ignore (f input); false with _ -> true in
+    check ("self-host or-pattern rejects: " ^ name)
+      (string_of_bool (rejects Pipeline.type_of && rejects self_host_type)) "true") [
+    "missing right name", "match (1, 2) with (x, _) | (_, _) -> x | _ -> 0";
+    "extra right name", "match (1, 2) with (_, _) | (_, x) -> 0";
+    "different names", "match (1, 2) with (x, _) | (_, y) -> x | _ -> 0";
+    "binding types", "match (1, true) with (x, _) | (_, x) -> 0";
+    "right structure", "match (1, 2) with (x, _) | (x, true) -> 0 | _ -> 0";
+    "nested missing name", "match Some 1 with Some (x | _) -> 0 | _ -> 0";
+  ];
 
   (* Phase 53.9 — self-host codegen cross-validation. Runs a Mere source
      string through:
@@ -13042,6 +13085,15 @@ let () =
   in
 
   if have_wat2wasm && have_node then begin
+    List.iter (fun (name, input, expected) -> cross_emit name input expected) pattern_cases;
+    let choice_size n =
+      let values = String.concat ", " (List.init n (fun _ -> "2")) in
+      let patterns = String.concat ", " (List.init n (fun _ -> "(1 | 2)")) in
+      String.length (self_host_emit (Printf.sprintf
+        "match (%s) with (%s) -> 7 | _ -> 0" values patterns)) in
+    let a, b, c = choice_size 6, choice_size 12, choice_size 18 in
+    check "self-host independent pattern choices grow linearly"
+      (string_of_bool (b > a && c > b && c - b <= 2 * (b - a))) "true";
     cross_emit "int literal" "42" "42";
     cross_emit "int arith" "1 + 2 * 3" "7";
     cross_emit "int div + mod" "(17 / 4) + (17 % 4)" "5";
@@ -13733,7 +13785,8 @@ let () =
        string it emits a length header -- four bytes per literal, plus the two
        allocation helpers -- so the module it produces is 17 bytes longer. *)
     codegen_runtime_bootstrap "oneshot codegen"
-      "examples/oneshot_codegen.mere" "97289";
+      "examples/oneshot_codegen.mere"
+      (string_of_int (String.length (self_host_emit "42")));
 
     (* Stage 55g: THE bootstrap fixpoint. Compile a test program T with
        (A) the self-host compiler running under the interpreter, and
@@ -13760,12 +13813,17 @@ let () =
         let _ = Unix.close_process_in ic in
         Buffer.contents buf
       in
-      let t_src = "print (show (1 + 2 * 3))" in
+      let t_src = "let choose = fn v -> match v with (1, x) | (x, 9) -> x | _ -> 0 in let suffix = match \"a\\0bz\" with (\"x\" <> tail | \"a\\0b\" <> tail) -> str_len tail | _ -> 99 in let repeated = match (1, 2) with (x, x) -> x in print (show (choose (2, 9) + suffix + repeated))" in
       let refa_path = Filename.temp_file "mere_fixpoint_refA_" ".mere" in
       let oc = open_out refa_path in
       Printf.fprintf oc
         "import \"%s/contrib/codegen/codegen_wasm.mere\";\nprint (parse_and_emit \"%s\")\n"
-        project_root t_src;
+        project_root (let b = Buffer.create 128 in String.iter (fun c ->
+          match c with
+          | '\\' -> Buffer.add_string b "\\\\"
+          | '"' -> Buffer.add_string b "\\\""
+          | '{' -> Buffer.add_string b "\\{"
+          | _ -> Buffer.add_char b c) t_src; Buffer.contents b);
       close_out oc;
       (* (A) reference: the compiler under the interp *)
       let wat_a = run_capture (Printf.sprintf "%s %s 2>/dev/null"
@@ -13799,7 +13857,9 @@ let () =
           else Printf.sprintf "DIFFERENT (lenA=%d lenB=%d)"
                  (String.length wat_a) (String.length wat_b)
         in
-        check "bootstrap fixpoint: self-compiled compiler output" verdict "identical"
+        check "bootstrap fixpoint: self-compiled compiler output" verdict "identical";
+        check "bootstrap fixpoint: generated pattern program executes"
+          (run_wasm_stdout wat_b) "5"
       end;
       List.iter (fun p -> try Sys.remove p with _ -> ())
         [refa_path; bd_path; driver_wat; driver_wasm]

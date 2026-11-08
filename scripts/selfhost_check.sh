@@ -18,17 +18,20 @@
 #   - dune-built `_build/default/bin/mere.exe` (`dune build`)
 #   - `wat2wasm` on PATH (wabt)
 #   - `node` on PATH
-#   - Self-hosted CLI Wasm at /tmp/selfmere.wasm — this script builds
-#     it if it doesn't exist.
+# The CLI compiler is rebuilt in an isolated temporary directory every run.
+# Fixtures with .expected companions must match handwritten answers through
+# five paths, including the self-host evaluator under interp and Wasm.
 
 set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-MERE="$ROOT/_build/default/bin/mere.exe"
+MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 RUN="node $ROOT/scripts/run_wasm.js"
-SELF="/tmp/selfmere.wasm"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/mere-selfhost.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+SELF="$WORK/selfmere.wasm"
 
 if [ ! -x "$MERE" ]; then
   echo "selfhost_check: $MERE not found — run 'dune build' first" >&2
@@ -44,23 +47,24 @@ fi
 #
 # The whole build is 260ms. There was never enough here to cache.
 echo "== building the self-hosted compiler =="
-"$MERE" -w examples/selfhost_wasm_cli.mere > /tmp/selfmere.wat
-wat2wasm --enable-tail-call /tmp/selfmere.wat -o "$SELF"
+"$MERE" -w examples/selfhost_wasm_cli.mere > "$WORK/selfmere.wat"
+wat2wasm --enable-tail-call "$WORK/selfmere.wat" -o "$SELF"
 
 check_one() {
   input="$1"
+  case "$input" in /*) input_path="$input" ;; *) input_path="$ROOT/$input" ;; esac
   name=$(basename "$input" .mere)
-  ref_wat="/tmp/${name}_ref.wat"
-  ref_wasm="/tmp/${name}_ref.wasm"
-  self_wat="/tmp/${name}_self.wat"
-  self_wasm="/tmp/${name}_self.wasm"
-  ref_out="/tmp/${name}_ref.out"
-  self_out="/tmp/${name}_self.out"
+  ref_wat="$WORK/${name}_ref.wat"
+  ref_wasm="$WORK/${name}_ref.wasm"
+  self_wat="$WORK/${name}_self.wat"
+  self_wasm="$WORK/${name}_self.wasm"
+  ref_out="$WORK/${name}_ref.out"
+  self_out="$WORK/${name}_self.out"
 
   # OCaml mere pipeline
-  "$MERE" -w "$input" > "$ref_wat"
-  wat2wasm --enable-tail-call "$ref_wat" -o "$ref_wasm" 2>/dev/null
-  $RUN "$ref_wasm" > "$ref_out" 2>&1
+  "$MERE" -w "$input" > "$ref_wat" || return 1
+  wat2wasm --enable-tail-call "$ref_wat" -o "$ref_wasm" || return 1
+  $RUN "$ref_wasm" > "$ref_out" 2>&1 || return 1
 
   # Self-hosted pipeline. `run_wasm.js` calling selfmere.wasm prints the
   # generated WAT via Mere's `print`, and nothing else: the driver's own main
@@ -71,9 +75,34 @@ check_one() {
   # was eating the blank line `print` leaves after a WAT that already ends in
   # a newline -- harmless, and for a reason its own comment no longer
   # described. wat2wasm takes the untrimmed output (checked), so it is gone.
-  $RUN "$SELF" "$input" 2>/dev/null > "$self_wat"
-  wat2wasm --enable-tail-call "$self_wat" -o "$self_wasm" 2>/dev/null
-  $RUN "$self_wasm" > "$self_out" 2>&1
+  $RUN "$SELF" "$input" > "$self_wat" || return 1
+  wat2wasm --enable-tail-call "$self_wat" -o "$self_wasm" || return 1
+  $RUN "$self_wasm" > "$self_out" 2>&1 || return 1
+
+  # Explicit answers must hold independently of agreement between compilers.
+  oracle="${input%.mere}.expected"
+  if [ "$name" = t06_patterns ] && [ ! -f "$oracle" ]; then
+    echo "  FAIL $name: missing required oracle" >&2
+    return 1
+  fi
+  if [ -f "$oracle" ]; then
+    "$MERE" "$input" > "$WORK/interp.out" || return 1
+    cat > "$WORK/eval.mere" <<EOF
+import "$ROOT/contrib/eval/eval.mere";
+let _ = parse_and_eval (read_file "$input_path") in ()
+EOF
+    "$MERE" "$WORK/eval.mere" > "$WORK/eval.out" || return 1
+    "$MERE" -w "$WORK/eval.mere" > "$WORK/eval.wat" || return 1
+    wat2wasm --enable-tail-call "$WORK/eval.wat" -o "$WORK/eval.wasm" || return 1
+    $RUN "$WORK/eval.wasm" > "$WORK/eval-wasm.out" 2>&1 || return 1
+    for actual in "$ref_out" "$self_out" "$WORK/interp.out" "$WORK/eval.out" "$WORK/eval-wasm.out"; do
+      if ! diff -u "$oracle" "$actual"; then
+        echo "  FAIL $name: explicit oracle" >&2
+        return 1
+      fi
+    done
+    echo "  oracle $name: reference interp/Wasm, self-host eval interp/Wasm and compiler Wasm passed"
+  fi
 
   # Both compilers now emit main-return auto-print (OCaml via
   # `Phase 27.2` epilogue; self-host via the CLI wrapper that annotates
@@ -122,6 +151,7 @@ else
     test/selfhost/t03_fib.mere \
     test/selfhost/t04_string.mere \
     test/selfhost/t05_list.mere \
+    test/selfhost/t06_patterns.mere \
     examples/hello.mere \
     examples/fibonacci.mere \
   "
@@ -131,7 +161,8 @@ echo "== self-host functional equivalence =="
 failed=0
 for f in $inputs; do
   if [ ! -f "$f" ]; then
-    printf "  SKIP %-40s (file not found)\n" "$(basename "$f")"
+    printf "  FAIL %-40s (file not found)\n" "$(basename "$f")"
+    failed=$((failed + 1))
     continue
   fi
   if ! check_one "$f"; then

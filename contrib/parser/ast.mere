@@ -53,6 +53,7 @@ type pattern =
   | PInt of int
   | PBool of bool
   | PStr of str
+  | PStrPrefix of str * str
   | PUnit
   | PConstr of str * pattern option
   | PTuple of pattern list

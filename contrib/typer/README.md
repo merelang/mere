@@ -1,5 +1,11 @@
 # contrib/typer — Mere self-hosted Hindley-Milner type inference (Phase 52)
 
+Current pattern checking validates both or-pattern alternatives, requiring
+the same bound names and compatible visible types. Hidden duplicate bindings
+keep their structural checks without constraining the visible occurrence's
+type. Prefix suffix bindings have type `str`. The stage tables below record
+the implementation history.
+
 The OCaml `Mere.Typer` (`lib/typer.ml`, 1893 lines) is the reference
 implementation; this directory holds the in-progress Mere self-host of
 the same type inferencer. §S2.B closes once 52a–52g land.

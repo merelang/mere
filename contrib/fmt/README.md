@@ -1,5 +1,10 @@
 # contrib/fmt — Mere self-hosted formatter (Phase 49 in progress)
 
+Current pattern formatting preserves parentheses around nested alternatives,
+whole-constructor aliases and or-pattern lets. Prefix patterns remain source
+patterns, and NUL and carriage-return bytes are escaped for round trips.
+The stage tables below record the implementation history.
+
 The OCaml `Mere.Formatter` (lib/formatter.ml, ~600 lines) is the
 reference implementation; this directory holds the in-progress Mere
 self-host of the same pretty-printer.

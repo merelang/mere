@@ -518,6 +518,11 @@ save 100 10 5                       // 115
 
 ## 4. Patterns
 
+The Mere self-hosted parser, evaluator, typer, formatter and Wasm compiler
+also support these pattern compositions. Their required runtime fixture uses
+handwritten answers, and the bootstrap fixpoint checks generated WAT and its
+execution after self-compilation.
+
 ### String prefix patterns (v0.1.504)
 
 ```mere

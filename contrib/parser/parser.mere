@@ -726,7 +726,8 @@ and parse_record_field_inits = fn (toks: pos_token list) ->
 // === Pattern parser =========================================================
 //
 // `parse_pattern` wraps `parse_pattern_base` with an optional trailing
-// `as IDENT`. Or-patterns (`p1 | p2`) are collected only by `parse_arms`
+// `as IDENT`. Or-patterns (`p1 | p2`) are collected by `parse_arms`
+// and inside explicit pattern parentheses
 // — at this layer a bare `|` would belong to the surrounding context
 // (e.g., the next match arm).
 //
@@ -751,7 +752,14 @@ and parse_pattern_base = fn (toks: pos_token list) ->
       (match t with
         | TUnderscore -> (PWild, rest)
         | TInt n -> (PInt n, rest)
-        | TStr s -> (PStr s, rest)
+        | TStr s ->
+          (match peek_tok rest with
+            | TLtGt ->
+              (match advance rest with
+                | Cons ((_, TIdent name), more) -> (PStrPrefix (s, name), more)
+                | Cons ((_, TUnderscore), more) -> (PStrPrefix (s, "_"), more)
+                | _ -> fail "expected a name after `<>` in a string prefix pattern")
+            | _ -> (PStr s, rest))
         | TTrue -> (PBool true, rest)
         | TFalse -> (PBool false, rest)
         | TLParen -> parse_paren_pattern rest
@@ -821,6 +829,7 @@ and parse_paren_pattern = fn (toks: pos_token list) ->
     | TRParen -> (PUnit, advance toks)
     | _ ->
       let (p1, toks1) = parse_pattern toks in
+      let (p1, toks1) = parse_or_pattern_tail p1 toks1 in
       (match peek_tok toks1 with
         | TRParen -> (p1, advance toks1)
         | TComma ->
@@ -1315,6 +1324,7 @@ let rec pattern_to_str = fn (p: pattern) ->
     | PInt n -> "Int(" ++ show n ++ ")"
     | PBool b -> if b then "Bool(true)" else "Bool(false)"
     | PStr s -> "Str(\"" ++ s ++ "\")"
+    | PStrPrefix (s, n) -> "StrPrefix(\"" ++ s ++ "\", " ++ n ++ ")"
     | PUnit -> "Unit"
     | PConstr (name, payload) ->
       (match payload with
