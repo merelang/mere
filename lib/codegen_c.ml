@@ -17147,6 +17147,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          its own region and failure buffer). A call from inside a call, on the
          same thread, is not an overlap. *)
       let lib_has_state =
+        !Typer.lib_instance ||
         List.exists (fun (_, _, t) -> Typer.ty_mentions_mutable_container t) top_globals_list in
       let wrapper ((name, ptys, rty, call) as e) =
         let enter, leave =
@@ -17192,6 +17193,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            arm's unwind releases it on failure too). The marshalling copies
            the result out to malloc BEFORE the release, so nothing the host
            receives points into reclaimed memory. *)
+        let acquire = if !Typer.lib_instance then "&__lang_default_region"
+          else "__lang_region_block_acquire(\"lib call\")" in
+        let release = if !Typer.lib_instance then
+          "/* Instance allocations are released by mere_lib_shutdown. */"
+          else "__lang_region_block_release(__call_region);" in
         Printf.sprintf
           "%s {\n\
           \  mere_lib_init();\n\
@@ -17215,17 +17221,17 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           %s\
           \    return MERE_FAIL;\n\
           \  }\n\
-          \  __lang_region* __call_region = __lang_region_block_acquire(\"lib call\");\n\
+          \  __lang_region* __call_region = %s;\n\
           \  __lang_current_region = __call_region;\n\
           %s\n\
           \  __lang_current_region = __saved_cur;\n\
-          \  __lang_region_block_release(__call_region);\n\
+          \  %s\n\
           \  __lang_fail_jmpbuf_set = __saved_set;\n\
           \  memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf));\n\
           %s\
           \  return MERE_OK;\n\
           }"
-          (wrapper_sig e) enter leave body leave
+          (wrapper_sig e) enter leave acquire body release leave
       in
       let uses_str_bnd =
         List.exists (fun (_, ptys, rty, _) ->

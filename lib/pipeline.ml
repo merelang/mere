@@ -1344,7 +1344,7 @@ let infer_top_let_inner outer_env (value : Ast.expr) : Ast.ty =
      Only a FUNCTION body. A top-level `let x = <expr>` runs during module init, where
      the current region is the default one, so wrapping it would claim a lifetime it
      does not have. *)
-  let wrap = !Typer.lib_boundary && is_fn_value value in
+  let wrap = !Typer.lib_boundary && not !Typer.lib_instance && is_fn_value value in
   if not wrap then begin
     let t = Typer.infer outer_env value in
     (* ⚠ A VALUE BUILT AT MODULE INIT LIVES IN THE DEFAULT REGION, WHATEVER THE
@@ -1358,7 +1358,7 @@ let infer_top_let_inner outer_env (value : Ast.expr) : Ast.ty =
        was refused, so mpng-ruby, which links mgz into a library, has not built
        since v0.1.455. At init the call region is the default one: say so in the
        value's type. *)
-    if !Typer.lib_boundary then
+    if !Typer.lib_boundary && not (is_fn_value value) then
       Typer.subst_region Typer.call_region_name "__heap" (Typer.resolve_regions_ty t)
     else t
   end
@@ -1412,7 +1412,7 @@ let infer_top_rec_inner outer_env (bindings : (string * Loc.t * Ast.expr) list) 
      nothing else. A group may hold a non-function (`let rec x = 1 and f = ...`
      parses), and one that does is module-init code, not a call. *)
   let wrap =
-    !Typer.lib_boundary
+    !Typer.lib_boundary && not !Typer.lib_instance
     && bindings <> []
     && List.for_all (fun (_, _, v) -> is_fn_value v) bindings
   in

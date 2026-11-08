@@ -1,0 +1,4 @@
+extern fn host_hold: unit -> unit;
+let blocking = fn (u: unit) -> host_hold ();
+let roundtrip_number = fn (n: int) -> n;
+()
