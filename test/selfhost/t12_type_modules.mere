@@ -1,0 +1,32 @@
+// Type names retain module scope through flattening and alias expansion.
+module M {
+  type Number = int;
+  type 'a Cell = { value: 'a };
+  type 'a View = 'a Cell;
+  type ('a, 'b) Choice = Left of 'a | Right of 'b;
+  let read = fn (c: Number View) -> c.value;
+  let make = fn x -> Cell { value = x };
+  let extract = fn (c: Number View) -> match c with Cell { value = n } -> n;
+};
+let _ = print (show (M.read (M.make 37)));
+let c = M.Cell { value = true };
+let _ = print (show c.value);
+let _ = print (show (M.extract (M.Cell { value = 41 })));
+let _ = print (show ((43 : M.Number) + 1));
+type Shared = { a: int };
+module Restated {
+  type Shared = { a: int };
+  let get = fn (r: Shared) -> r.a;
+  let make = fn n -> Shared { a = n };
+};
+let _ = print (show (Restated.get (Shared { a = 7 })));
+let _ = print (show ((Restated.make 11 : Shared).a));
+let _ = print (show (match Shared { a = 13 } with Restated.Shared { a = n } -> n));
+type 'a SharedBox = { value: 'a };
+module PolyRestated {
+  type 'a SharedBox = { value: 'a };
+  let get = fn (r: int SharedBox) -> r.value;
+};
+let _ = print (show (PolyRestated.get (SharedBox { value = 17 })));
+let _ = print (show ((Restated.Shared { a = 19 } : Shared).a));
+()

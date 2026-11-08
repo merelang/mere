@@ -12388,6 +12388,11 @@ let () =
   cross_validate "multi-decl program"
     "type opt = | Just of int | Nothing; let x = Just (42); let rec sum = fn (xs: int list) -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t; sum [1, 2, 3]";
 
+  cross_validate "type parameter head" "type 'a Box = { value: 'a }; Box { value = 1 }";
+  cross_validate "multiple type parameters" "type ('a, 'b) Pair = { first: 'a, second: 'b }; ()";
+  cross_validate "polymorphic variant" "type 'a Opt = Nothing | Just of 'a; Just 1";
+  cross_validate "multiple type arguments" "type ('a, 'b) Pair = { first: 'a, second: 'b }; (Pair { first = 1, second = true } : (int, bool) Pair)";
+
   (* Stage 50i — records. *)
   cross_validate "record decl" "type Point = { x: int, y: int }; ()";
   cross_validate "record literal"
@@ -12606,6 +12611,42 @@ let () =
   cross_type "tuple destructure" "let (a, b) = (3, 4) in a + b";
   cross_type "match int" "match 1 with | 0 -> \"z\" | _ -> \"o\"";
   cross_type "match with guard" "match 5 with | n when n > 0 -> 1 | _ -> 0";
+  List.iter (fun (name, input) -> cross_type name input) [
+    "alias chain", "type N = int; type Count = N; (3 : Count)";
+    "extern alias", "type N = int; extern fn f: N -> N; fn (x: N) -> f x";
+    "alias field", "type N = int; type R = { a: N }; (R { a = 3 }).a";
+    "alias record", "type R = { a: int }; type S = R; (R { a = 3 } : S).a";
+    "parametric alias", "type 'a Items = 'a list; ([1] : int Items)";
+    "multiple alias args", "type ('a, 'b) Pair = 'a * 'b; ((1, true) : (int, bool) Pair)";
+    "polymorphic record", "type 'a Box = { value: 'a }; (Box { value = 3 }).value";
+    "record arguments", "type ('a, 'b) Pair = { a: 'a, b: 'b }; (Pair { a = 1, b = true }).b";
+    "polymorphic pattern", "type 'a Box = { value: 'a }; match Box { value = 3 } with Box { value = n } -> n";
+    "polymorphic update", "type 'a Box = { value: 'a }; let b = Box { value = 3 }; { b | value = 4 }";
+    "polymorphic ctor", "type 'a Opt = Nothing | Just of 'a; match Just 3 with Just x -> x | Nothing -> 0";
+    "independent record instantiation", "type 'a Box = { value: 'a }; let a = Box { value = 1 }; let b = Box { value = true }; (a.value, b.value)";
+    "module alias", "module M { type N = int; type R = { a: N }; let get = fn (r: R) -> r.a; let make = fn n -> R { a = n }; }; M.get (M.make 4)";
+    "qualified type", "module M { type N = int; }; (3 : M.N)";
+  ];
+  List.iter (fun (name, input) -> cross_type name input) [
+    "module record identity", "type R = { a: int }; module M { type R = { a: int }; let get = fn (r: R) -> r.a; }; M.get (R { a = 7 })";
+    "module record return identity", "type R = { a: int }; module M { type R = { a: int }; let make = fn n -> R { a = n }; }; (M.make 7 : R).a";
+    "qualified record identity", "module M { type R = { a: int }; }; (M.R { a = 7 } : R).a";
+    "qualified record pattern identity", "type R = { a: int }; module M { type R = { a: int }; }; match R { a = 7 } with M.R { a = n } -> n";
+    "module variant before alias", "type N = C of int; module M { let read = fn (n: N) -> match n with C x -> x; type N = int; }; M.read (C 7)";
+    "module primitive before alias", "type N = int; module M { let read = fn (n: N) -> n; type N = bool; }; M.read 7";
+    "module captured alias body", "type N = C of int; module M { type Saved = N; type N = int; let read = fn (n: Saved) -> match n with C x -> x; }; M.read (C 7)";
+    "module captured field body", "type N = C of int; module M { type R = { a: N }; type N = int; let make = fn n -> R { a = C n }; }; match (M.make 7).a with C n -> n";
+    "module opaque before alias", "extern type H; extern fn make: unit -> H; module M { let read = fn (h: H) -> 7; type H = int; }; M.read (make ())";
+    "module recursive nominal type", "module M { type 'a Chain = End | Next of 'a * 'a Chain; let read = fn (c: int Chain) -> match c with Next (n, _) -> n | End -> 0; }; M.read (Next (7, End))";
+  ];
+  let refusal_rows = In_channel.with_open_bin (project_root ^ "/test/selfhost/type_rejections.tsv") In_channel.input_all in
+  String.split_on_char '\n' refusal_rows |> List.filter (fun s -> s <> "")
+    |> List.iter (fun row -> match String.split_on_char '\t' row with
+      | [name; _; _; input] ->
+        check_raises ("reference type refusal: " ^ name) (fun () -> Pipeline.type_of input);
+        check_raises ("self-host type refusal: " ^ name) (fun () -> self_host_type input)
+      | _ -> failwith "invalid type refusal inventory");
+
   (* Phase 55c: TopType decls populate the ctor registry so `EConstr`
      inference returns the parent type name instead of a fresh meta.
      Before 55c, all four below returned `'_0` from parse_and_infer;
@@ -12695,15 +12736,6 @@ let () =
     "list_filter (Cons (1, Cons (2, Nil))) (fn x -> x > 0)";
   cross_type "list_any"
     "list_any (Cons (1, Nil)) (fn x -> x > 0)";
-
-  (* Note: `type opt = | Some of 'a | None; Some "hi"` — the self-host
-     auto-generalizes TyVars from ctor payloads (parser doesn't emit
-     decl-head params). OCaml rejects this same input as a rigid-var
-     mismatch, so we skip cross-validation here — verified by hand via
-     `mere.exe` + parse_and_infer. Adding TopType polymorphic cases to
-     cross_type requires the self-host parser gaining `type opt 'a =
-     ...` syntax first. *)
-
 
   List.iter (fun (name, input, _) -> cross_type name input) (pattern_cases @ semantic_cases);
   List.iter (fun (name, input) ->
@@ -13848,7 +13880,7 @@ let () =
         let _ = Unix.close_process_in ic in
         Buffer.contents buf
       in
-      let t_src = "let _ = if false && (1 / 0 == 0) then print \"bad\" else () in let _ = if true || (1 / 0 == 0) then () else print \"bad\" in let choose = fn v -> match v with (1, x) | (x, 9) -> x | _ -> 0 in let suffix = match \"a\\0bz\" with (\"x\" <> tail | \"a\\0b\" <> tail) -> str_len tail | _ -> 99 in let repeated = match (1, 2) with (x, x) -> x in print (show (choose (2, 9) + suffix + repeated))" in
+      let t_src = "type N = int; type 'a Box = { value: 'a }; type ('a, 'b) Duo = 'a * 'b; let box = (Box { value = 7 } : N Box); let pair = ((box.value, true) : (N, bool) Duo); let _ = match pair with (7, true) -> () | _ -> fail \"type declaration bootstrap\"; let _ = if false && (1 / 0 == 0) then print \"bad\" else () in let _ = if true || (1 / 0 == 0) then () else print \"bad\" in let choose = fn v -> match v with (1, x) | (x, 9) -> x | _ -> 0 in let suffix = match \"a\\0bz\" with (\"x\" <> tail | \"a\\0b\" <> tail) -> str_len tail | _ -> 99 in let repeated = match (1, 2) with (x, x) -> x in print (show (choose (2, 9) + suffix + repeated))" in
       let refa_path = Filename.temp_file "mere_fixpoint_refA_" ".mere" in
       let oc = open_out refa_path in
       Printf.fprintf oc

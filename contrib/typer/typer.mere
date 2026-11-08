@@ -43,19 +43,23 @@ type subst = (int * ty) list;
 // chained bindings — if id N maps to TyMeta M, recurse to resolve M.
 // Returns Some final_ty if eventually concrete, or Some (TyMeta last_id)
 // if the chain ends at an unbound meta.
-let rec resolve_meta = fn (s: subst) -> fn (id: int) ->
+let rec lookup_meta = fn (s: subst) -> fn (id: int) ->
   match s with
   | Nil -> None
-  | Cons (b, rest) ->
-    let (k, v) = b in
-    if k == id then
-      (match v with
-        | TyMeta m -> (match resolve_meta s m with
-                        | Some t -> Some t
-                        | None -> Some (TyMeta m))
-        | _ -> Some v)
-    else resolve_meta rest id
-  ;
+  | Cons (entry, rest) ->
+    let (n, t) = entry in
+    if n == id then Some t else lookup_meta rest id;
+
+let rec resolve_meta = fn (s: subst) -> fn (id: int) ->
+  match lookup_meta s id with
+  | None -> None
+  | Some (TyMeta next) ->
+    // Follow every link against the complete substitution. A newer binding
+    // may precede the link that refers to it in this association list.
+    (match resolve_meta s next with
+      | Some t -> Some t
+      | None -> Some (TyMeta next))
+  | Some t -> Some t;
 
 // Walk a type, replacing every TyMeta n that's bound in subst with
 // its resolved value. Used to "shake out" the substitution into a
@@ -136,14 +140,14 @@ let rec unify = fn (s: subst) -> fn (t1: ty) -> fn (t2: ty) ->
   | (TyStr, TyStr) -> Some s
   | (TyUnit, TyUnit) -> Some s
   | (TyFloat, TyFloat) -> Some s
-  | (TyVar a, TyVar b) -> if a == b then Some s else None
+  | (TyVar a, TyVar b) -> if str_eq a b then Some s else None
   | (TyArrow (a1, b1), TyArrow (a2, b2)) ->
     (match unify s a1 a2 with
       | None -> None
       | Some s1 -> unify s1 b1 b2)
   | (TyTuple xs, TyTuple ys) -> unify_list s xs ys
   | (TyCon (n1, args1), TyCon (n2, args2)) ->
-    if n1 == n2 then unify_list s args1 args2 else None
+    if str_eq n1 n2 then unify_list s args1 args2 else None
   | _ -> None
 
 and unify_list = fn (s: subst) -> fn (xs: ty list) -> fn (ys: ty list) ->
@@ -376,14 +380,9 @@ let rec alloc_fresh_ids_n = fn (n: int) -> fn (s: infer_state) ->
     (Cons (c, rest), s2)
   ;
 
-// Phase 55c-2: build the sentinel env key that stores a record's
-// field type. Using a `__record_field__` prefix keeps these entries
-// from colliding with user-defined variables (identifiers starting
-// with underscore-underscore are conventionally reserved). Keeping
-// records in `type_env` avoids threading a separate record_env
-// parameter through every infer / annotate call site.
+// Field schemes share the type environment, using an unlexable metadata key.
 let make_record_field_key = fn (record_name: str) -> fn (field_name: str) ->
-  "__record_field__" ++ record_name ++ "__" ++ field_name;
+  "@record_field:" ++ record_name ++ ":" ++ field_name;
 
 // Phase 55c: str-keyed int lookup, mirror of lookup_int_id (which is
 // int-keyed). Used to resolve `TyVar name → fresh meta id` per TopType
@@ -501,6 +500,53 @@ let rec union_str_names = fn (xs: str list) -> fn (ys: str list) ->
   | Cons (h, t) -> union_str_names (add_unique_str h xs) t
   ;
 
+let rec type_args_count = fn ts -> match ts with
+  | Nil -> 0 | Cons (_, rest) -> 1 + type_args_count rest;
+
+// Aliases capture their expanded body when declared, just as in the reference
+// parser. Expanding a use substitutes its arguments once; future declarations
+// cannot change an earlier alias's meaning. Metadata keys are unlexable.
+let alias_key = fn name -> "@type_alias:" ++ name;
+
+let rec substitute_named_type = fn mapping -> fn t ->
+  match t with
+  | TyVar name ->
+    let rec find = fn xs -> match xs with
+      | Nil -> t
+      | Cons (entry, rest) ->
+        let (n, value) = entry in
+        if str_eq n name then value else find rest
+    in find mapping
+  | TyArrow (a, b) -> TyArrow (substitute_named_type mapping a, substitute_named_type mapping b)
+  | TyTuple ts -> TyTuple (list_map ts (fn t1 -> substitute_named_type mapping t1))
+  | TyCon (n, args) -> TyCon (n, list_map args (fn t1 -> substitute_named_type mapping t1))
+  | _ -> t;
+
+let rec alias_arguments = fn params -> fn args ->
+  match (params, args) with
+  | (Nil, Nil) -> Nil
+  | (Cons (TyVar n, ps), Cons (t, ts)) -> Cons ((n, t), alias_arguments ps ts)
+  | _ -> fail "type alias argument mismatch";
+
+let rec resolve_type = fn env -> fn t ->
+  match t with
+  | TyArrow (a, b) -> TyArrow (resolve_type env a, resolve_type env b)
+  | TyTuple ts -> TyTuple (list_map ts (fn t1 -> resolve_type env t1))
+  | TyCon (name, args) ->
+    let args2 = list_map args (fn t1 -> resolve_type env t1) in
+    (match lookup_scheme_opt (alias_key name) env with
+      | Some (_, TyArrow (TyTuple params, body)) ->
+        if type_args_count params == type_args_count args2 then
+          substitute_named_type (alias_arguments params args2) body
+        else TyCon (name, args2)
+      | _ -> TyCon (name, args2))
+  | _ -> t;
+
+let register_alias = fn name -> fn params -> fn body -> fn env ->
+  let param_tys = list_map params (fn n -> TyVar n) in
+  let entry = mono (TyArrow (TyTuple param_tys, resolve_type env body)) in
+  Cons ((alias_key name, entry), env);
+
 // Phase 55c-2: register a record's fields into the env. Each field
 // gets a scheme keyed by `make_record_field_key record_name field_name`
 // so `ERecordLit` / `ERecordUpdate` inference can look them up.
@@ -516,8 +562,9 @@ let rec register_record_fields = fn (fields: (str * ty) list)
   | Nil -> env
   | Cons (f, rest) ->
     let (field_name, field_ty) = f in
-    let body_ty = subst_tyvars_in_ty param_map field_ty in
-    let sch = ((param_ids, body_ty) : scheme) in
+    let body_ty = subst_tyvars_in_ty param_map (resolve_type env field_ty) in
+    let receiver = TyCon (record_name, ids_to_tymeta_list param_ids) in
+    let sch = ((param_ids, TyArrow (receiver, body_ty)) : scheme) in
     let key = make_record_field_key record_name field_name in
     let env2 = Cons ((key, sch), env) in
     register_record_fields rest record_name param_ids param_map env2
@@ -536,7 +583,35 @@ let rec record_shape = fn (fields: (str * ty) list) ->
 
 let register_record_definition = fn fields -> fn name -> fn ids -> fn params -> fn env ->
   let shape = mono (TyTuple (record_shape fields)) in
-  register_record_fields fields name ids params (Cons ((record_shape_key name, shape), env));
+  let receiver = ((ids, TyCon (name, ids_to_tymeta_list ids)) : scheme) in
+  let env1 = Cons (("@record_type:" ++ name, receiver), Cons ((record_shape_key name, shape), env)) in
+  register_record_fields fields name ids params env1;
+
+let instantiate_record = fn name -> fn env -> fn s ->
+  match lookup_scheme_opt ("@record_type:" ++ name) env with
+  | Some sch -> instantiate sch s
+  | None -> (TyCon (name, Nil), s);
+
+let require_record_receiver = fn t -> fn env -> fn message ->
+  match t with
+  | TyCon (name, _) ->
+    (match lookup_scheme_opt (record_shape_key name) env with
+      | Some _ -> name
+      | None -> fail message)
+  | _ -> fail message;
+
+// Each field scheme is receiver -> field, with the same quantified variables
+// on both sides. Link every instantiation to the one receiver at this use.
+let instantiate_record_field = fn name -> fn field -> fn receiver -> fn env -> fn s ->
+  match lookup_scheme_opt (make_record_field_key name field) env with
+  | None -> fresh_meta s
+  | Some sch ->
+    let (ft, s1) = instantiate sch s in
+    (match ft with
+      | TyArrow (domain, result) ->
+        let s2 = unify_state s1 receiver domain in
+        (apply_subst (subst_of s2) result, s2)
+      | _ -> fail "invalid record field scheme");
 
 let rec record_shape_contains = fn (field: str) -> fn (shape: ty list) ->
   match shape with
@@ -595,7 +670,7 @@ let rec register_ctors = fn (ctors: (str * ty option) list)
     let (cname, payload_opt) = c in
     let body_ty = (match payload_opt with
       | None -> ret_ty
-      | Some pty -> TyArrow (subst_tyvars_in_ty param_map pty, ret_ty)) in
+      | Some pty -> TyArrow (subst_tyvars_in_ty param_map (resolve_type env pty), ret_ty)) in
     let sch = ((param_ids, body_ty) : scheme) in
     let env2 = Cons ((cname, sch), env) in
     register_ctors rest param_ids param_map ret_ty env2
@@ -817,11 +892,13 @@ and check_visible_pattern = fn (p: pattern) -> fn (expected: ty)
             check_visible_pattern sub_p a env s1))
   | PRecord (name, field_pats) ->
     let _ = validate_record_fields name field_pats false env in
-    let s1 = unify_state s expected (TyCon (name, Nil)) in
-    check_record_field_pats field_pats name env s1
+    let (receiver, s1) = instantiate_record name env s in
+    let s2 = unify_state s1 expected receiver in
+    check_record_field_pats field_pats name receiver env s2
 
 and check_record_field_pats = fn (fps: (str * pattern) list)
                            -> fn (record_name: str)
+                           -> fn (receiver: ty)
                            -> fn (env: type_env)
                            -> fn (s: infer_state) ->
   // Phase 55c-2c: for each field, if the record was registered via
@@ -833,12 +910,9 @@ and check_record_field_pats = fn (fps: (str * pattern) list)
   | Nil -> ((Nil, s) : ((str * scheme) list * infer_state))
   | Cons (fp, rest) ->
     let (field_name, sub_p) = fp in
-    let key = make_record_field_key record_name field_name in
-    let (a, s1) = (match lookup_scheme_opt key env with
-      | Some sch -> instantiate sch s
-      | None -> fresh_meta s) in
+    let (a, s1) = instantiate_record_field record_name field_name receiver env s in
     let (bs1, s2) = check_visible_pattern sub_p a env s1 in
-    let (bs2, s3) = check_record_field_pats rest record_name env s2 in
+    let (bs2, s3) = check_record_field_pats rest record_name receiver env s2 in
     (merge_pattern_bindings bs1 bs2, s3)
 
 and check_pattern_list = fn (ps: pattern list) -> fn (ts: ty list)
@@ -938,7 +1012,7 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let (arg_ty, s1) = fresh_meta s in
     let s2 = (match ty_opt with
       | None -> s1
-      | Some t -> unify_state s1 arg_ty t) in
+      | Some t -> unify_state s1 arg_ty (resolve_type env t)) in
     let env2 = Cons ((arg, mono arg_ty), env) in
     let (body_ty, s3) = infer env2 s2 body in
     (apply_subst (subst_of s3) (TyArrow (arg_ty, body_ty)), s3)
@@ -978,8 +1052,9 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     (apply_subst (subst_of s4) result_ty, s4)
   | EAnnot (inner, t) ->
     let (te, s1) = infer env s inner in
-    let s2 = unify_state s1 te t in
-    (apply_subst (subst_of s2) t, s2)
+    let resolved = resolve_type env t in
+    let s2 = unify_state s1 te resolved in
+    (apply_subst (subst_of s2) resolved, s2)
   | ETuple es ->
     let (tys, s1) = infer_list env s es in
     (apply_subst (subst_of s1) (TyTuple tys), s1)
@@ -1027,60 +1102,24 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let s3 = infer_arms env arms ts result_ty s2 in
     (apply_subst (subst_of s3) result_ty, s3)
   | ERecordLit (name, fields) ->
-    // Phase 55c-2: if TopRecord registered this record, each field
-    // gets its declared ty via lookup on the sentinel key. The
-    // expected field ty gets `instantiate`d (freshening quantified
-    // param metas) and unified with the field expr's inferred ty.
-    // Undeclared records fall back to the pre-55c-2 permissive path.
     let _ = validate_record_fields name fields true env in
-    let s1 = infer_record_fields_strict env name fields s in
-    (TyCon (name, Nil), s1)
+    let (receiver, s1) = instantiate_record name env s in
+    let s2 = infer_record_fields_strict env name receiver fields s1 in
+    (apply_subst (subst_of s2) receiver, s2)
   | EFieldGet (e, field) ->
-    // Phase 55c-2b: resolve field ty from the receiver's record. Infer
-    // the receiver, apply subst; if the result is `TyCon (name, _)`
-    // and `__record_field__<name>__<field>` is in env, instantiate the
-    // field's scheme and return its ty. Otherwise permissive
-    // (pre-55c-2 behaviour) — fresh meta so the surrounding expression
-    // still type-checks even when the field wasn't declared.
-    //
-    // Polymorphic records (`type box = { value: 'a }`) render `box`
-    // as `TyCon ("box", [TyMeta_N])` post-unification. The field
-    // scheme is quantified over the record's param ids so
-    // `instantiate` produces a fresh meta for `'a`. Ideally we'd
-    // unify that meta with the receiver's arg to propagate the
-    // resolved element ty — deferred (small gap: `p.x` on a
-    // polymorphic record still infers to a fresh meta rather than
-    // the concrete arg. Monomorphic records work fully).
     let (te, s1) = infer env s e in
-    let resolved = apply_subst (subst_of s1) te in
-    (match resolved with
-      | TyCon (record_name, _args) ->
-        let _ = validate_record_fields record_name (Cons ((field, ()), Nil)) false env in
-        let key = make_record_field_key record_name field in
-        (match lookup_scheme_opt key env with
-          | Some sch ->
-            let (ft, s2) = instantiate sch s1 in
-            (apply_subst (subst_of s2) ft, s2)
-          | None ->
-            let (a, s2) = fresh_meta s1 in
-            (a, s2))
-      | _ ->
-        let (a, s2) = fresh_meta s1 in
-        (a, s2))
+    let receiver = apply_subst (subst_of s1) te in
+    let name = require_record_receiver receiver env
+      "field access on non-record value (cannot infer record type)" in
+    let _ = validate_record_fields name (Cons ((field, ()), Nil)) false env in
+    instantiate_record_field name field receiver env s1
   | ERecordUpdate (e, fields) ->
-    // `e` is the record being updated; the update returns the same
-    // nominal type. Phase 55c-2: infer_record_fields_strict picks up
-    // the record's declared field tys from the receiver's TyCon name,
-    // so updated fields get type-checked. But receiver ty derivation
-    // needs the record name — infer_record_fields_strict handles the
-    // fallback when we can't resolve.
     let (te, s1) = infer env s e in
-    let name = (match apply_subst (subst_of s1) te with
-      | TyCon (n, _) -> n
-      | _ -> "") in
+    let receiver = apply_subst (subst_of s1) te in
+    let name = require_record_receiver receiver env "record update base must be a record value" in
     let _ = validate_record_fields name fields false env in
-    let s2 = infer_record_fields_strict env name fields s1 in
-    (apply_subst (subst_of s2) te, s2)
+    let s2 = infer_record_fields_strict env name receiver fields s1 in
+    (apply_subst (subst_of s2) receiver, s2)
   | _ -> fail "typer: stage 52e doesn't handle this expr yet"
 
 // `bind_rec_metas`: for each `(name, _body)` in the rec group,
@@ -1176,14 +1215,10 @@ and infer_record_fields = fn (env: type_env) -> fn (s: infer_state)
     let (_te, s1) = infer env s e in
     infer_record_fields env s1 rest
 
-// Phase 55c-2: strict field inference — for each field, if the record
-// name has an entry in env (via TopRecord registration), fetch the
-// declared field ty, instantiate, and unify with the expr's inferred
-// ty. Records not registered (or empty record name from a fallback
-// path) skip the unify and just infer each expr for meta-flow
-// (permissive fallback, matches pre-55c-2 behaviour).
+// Infer fields against one receiver, preserving shared arguments across fields.
 and infer_record_fields_strict = fn (env: type_env)
                               -> fn (record_name: str)
+                              -> fn (receiver: ty)
                               -> fn (fields: (str * expr) list)
                               -> fn (s: infer_state) ->
   match fields with
@@ -1191,13 +1226,9 @@ and infer_record_fields_strict = fn (env: type_env)
   | Cons (f, rest) ->
     let (fname, e) = f in
     let (te, s1) = infer env s e in
-    let key = make_record_field_key record_name fname in
-    let s2 = (match lookup_scheme_opt key env with
-      | None -> s1
-      | Some sch ->
-        let (ft, s1b) = instantiate sch s1 in
-        unify_state s1b te ft) in
-    infer_record_fields_strict env record_name rest s2
+    let (ft, s2) = instantiate_record_field record_name fname receiver env s1 in
+    let s3 = unify_state s2 te ft in
+    infer_record_fields_strict env record_name receiver rest s3
   ;
 
 // === Debug printing =======================================================
@@ -1431,15 +1462,8 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
     (final_env, s2)
   | TopType (name, params, ctors) ->
-    // Phase 55c: register each constructor as a scheme in the env so
-    // `EConstr (name, payload)` inference can look it up and unify
-    // payload types. Params come from two sources: (a) explicit
-    // decl-head params (currently the self-host parser doesn't emit
-    // these — kept for future compat), (b) TyVars auto-collected from
-    // ctor payloads. Both sources unify into a single param set with
-    // fresh meta ids that get quantified over. Each ctor use
-    // `instantiate`s the scheme, freshening the quantified metas so
-    // polymorphism composes correctly across use sites.
+    // Declared parameters, including phantom parameters, appear in the
+    // result type. Retain implicit TyVar collection for hand-built ASTs.
     let ctor_tyvars = collect_tyvars_in_ctors ctors Nil in
     let all_params = union_str_names params ctor_tyvars in
     let n_params = list_len_names all_params in
@@ -1450,12 +1474,7 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let env2 = register_ctors ctors param_ids param_map ret_ty env in
     (env2, s1)
   | TopRecord (name, params, fields) ->
-    // Phase 55c-2: register each field as a scheme keyed by
-    // `__record_field__<name>__<field_name>` so ERecordLit /
-    // ERecordUpdate inference can look them up and unify. Same
-    // param-handling as 55c-1's TopType — auto-generalize TyVars
-    // appearing in field types so `type box = { value: 'a }` works
-    // without decl-head params.
+    // All field schemes link their variables to the receiver's arguments.
     let field_tyvars = collect_tyvars_in_fields fields Nil in
     let all_params = union_str_names params field_tyvars in
     let n_params = list_len_names all_params in
@@ -1463,12 +1482,12 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let param_map = zip_params_ids all_params param_ids in
     let env2 = register_record_definition fields name param_ids param_map env in
     (env2, s1)
-  | TopTypeAlias _ -> (env, s)
+  | TopTypeAlias (name, params, body) -> (register_alias name params body env, s)
   | TopModule _ -> fail "typer: TopModule reached typer — parser flatten missing?"
   // Phase 54.2: extern fn — bind name with its declared scheme so
   // downstream EVar references type-check. Permissive: no scheme
   // generalization beyond the declared type.
-  | TopExternFn (name, sig_ty) -> (Cons ((name, mono sig_ty), env), s)
+  | TopExternFn (name, sig_ty) -> (Cons ((name, mono (resolve_type env sig_ty)), env), s)
   | TopExternType _ -> (env, s)
 
 and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
@@ -1555,7 +1574,7 @@ let rec annotate_expr = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr
     (EApp (f_r, x_r), s2)
   | EAnnot (inner, t) ->
     let (inner_r, s1) = annotate_expr env s inner in
-    (EAnnot (inner_r, t), s1)
+    (EAnnot (inner_r, resolve_type env t), s1)
   | ELet (pat, v, body) ->
     // Mirror `infer`'s env-extension logic for ELet.
     let (vt, s1) = infer env s v in
@@ -1581,10 +1600,11 @@ let rec annotate_expr = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr
     let (arg_ty, s1) = fresh_meta s in
     let s2 = (match ty_opt with
       | None -> s1
-      | Some t -> unify_state s1 arg_ty t) in
+      | Some t -> unify_state s1 arg_ty (resolve_type env t)) in
     let env2 = Cons ((arg, mono arg_ty), env) in
     let (body_r, s3) = annotate_expr env2 s2 body in
-    (EFun (arg, ty_opt, body_r), s3)
+    (EFun (arg, (match ty_opt with
+      | None -> None | Some t -> Some (resolve_type env t)), body_r), s3)
   | EMatch (scrut, arms) ->
     let (ts, s1) = infer env s scrut in
     let (scrut_r, s2) = annotate_expr env s1 scrut in
@@ -1677,37 +1697,10 @@ let rec annotate_decl = fn (d: top_decl) -> fn (env: type_env)
     let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
     let (bindings_r, s3) = annotate_bindings bindings pre_env s2 in
     (TopLetRec bindings_r, final_env, s3)
-  | TopType (name, params, ctors) ->
-    // Phase 55d: annotate_decl must mirror infer_decl's env extension
-    // for TopType so downstream annotate_expr calls (on main / later
-    // decls) can resolve ctor names to their proper TyCon type. Without
-    // this, `show Red` sees Red as an unresolved TyMeta and codegen
-    // falls back to `$show_int` — losing the whole point of Stage 55d.
-    let ctor_tyvars = collect_tyvars_in_ctors ctors Nil in
-    let all_params = union_str_names params ctor_tyvars in
-    let n_params = list_len_names all_params in
-    let (param_ids, s1) = alloc_fresh_ids_n n_params s in
-    let param_map = zip_params_ids all_params param_ids in
-    let param_metas = ids_to_tymeta_list param_ids in
-    let ret_ty = TyCon (name, param_metas) in
-    let env2 = register_ctors ctors param_ids param_map ret_ty env in
-    (d, env2, s1)
-  | TopRecord (name, params, fields) ->
-    // Phase 55c-2: annotate_decl must mirror infer_decl's TopRecord
-    // env extension so downstream ERecordLit / ERecordUpdate inside
-    // main can find field schemes. Same shape as the TopType arm just
-    // above.
-    let field_tyvars = collect_tyvars_in_fields fields Nil in
-    let all_params = union_str_names params field_tyvars in
-    let n_params = list_len_names all_params in
-    let (param_ids, s1) = alloc_fresh_ids_n n_params s in
-    let param_map = zip_params_ids all_params param_ids in
-    let env2 = register_record_definition fields name param_ids param_map env in
-    (d, env2, s1)
-  | TopTypeAlias _ -> (d, env, s)
   | TopModule _ -> (d, env, s)
-  | TopExternFn (name, sig_ty) -> (d, Cons ((name, mono sig_ty), env), s)
-  | TopExternType _ -> (d, env, s)
+  | _ ->
+    let (env1, s1) = infer_decl d env s in
+    (d, env1, s1)
 
 and annotate_decls = fn (decls: top_decl list) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
@@ -1862,21 +1855,21 @@ let _ = print "" in
 let _ = print "=== Stage 52e typer demos (records + EAnnot) ===" in
 // Record literal — nominal type from the constructor name.
 // (Mere strings treat `{` as interpolation start, so demo source uses `\{` escapes.)
-let _ = print ("l1  (Point \{ x = 1, y = 2 }):         " ++ parse_and_infer "Point \{ x = 1, y = 2 }") in
+let _ = print ("l1  (Point \{ x = 1, y = 2 }):         " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; Point \{ x = 1, y = 2 }") in
 // Empty-field record literal.
-let _ = print ("l2  (Empty \{}):                       " ++ parse_and_infer "Empty \{}") in
-// Field access — permissive, fresh meta result.
-let _ = print ("l3  (p.x where p = Point):            " ++ parse_and_infer "let p = Point \{ x = 1, y = 2 } in p.x") in
+let _ = print ("l2  (Empty \{}):                       " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; Empty \{}") in
+// Field access requires a declared record receiver.
+let _ = print ("l3  (p.x where p = Point):            " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; let p = Point \{ x = 1, y = 2 } in p.x") in
 // Record literal nested as a let-binding type.
-let _ = print ("l4  (let p = Point \{...}; p):         " ++ parse_and_infer "let p = Point \{ x = 1, y = 2 } in p") in
+let _ = print ("l4  (let p = Point \{...}; p):         " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; let p = Point \{ x = 1, y = 2 } in p") in
 // Record update — same nominal type as base.
-let _ = print ("l5  (record update):                  " ++ parse_and_infer "let p = Point \{ x = 1, y = 2 } in \{ p | x = 99 }") in
+let _ = print ("l5  (record update):                  " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; let p = Point \{ x = 1, y = 2 } in \{ p | x = 99 }") in
 // PRecord pattern — match a record by constructor, bind a field.
-let _ = print ("l6  (match Point \{ x }):              " ++ parse_and_infer "match Point \{ x = 1, y = 2 } with | Point \{ x = a, y = b } -> a + b") in
+let _ = print ("l6  (match Point \{ x }):              " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; match Point \{ x = 1, y = 2 } with | Point \{ x = a, y = b } -> a + b") in
 // EAnnot tightening — annotating a record literal pins its type.
-let _ = print ("l7  ((Point \{...} : Point)):          " ++ parse_and_infer "(Point \{ x = 1, y = 2 } : Point)") in
+let _ = print ("l7  ((Point \{...} : Point)):          " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; (Point \{ x = 1, y = 2 } : Point)") in
 // EAnnot still works inside an application context.
-let _ = print ("l8  ((fn (x: int) -> x) 5):           " ++ parse_and_infer "(fn (x: int) -> x) 5") in
+let _ = print ("l8  ((fn (x: int) -> x) 5):           " ++ parse_and_infer "type Point = \{ x: int, y: int }; type Empty = \{}; (fn (x: int) -> x) 5") in
 let _ = print "" in
 let _ = print "=== Stage 52f typer demos (top-level decls) ===" in
 // Top-level `let x = 5;` referenced from main.

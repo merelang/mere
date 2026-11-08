@@ -1,0 +1,24 @@
+// Aliases expand in annotations, payloads and fields at declaration time.
+type Number = int;
+type Count = Number;
+type Increment = Count -> Count;
+type Pair = Count * bool;
+type 'a Items = 'a list;
+type ('a, 'b) Duo = 'a * 'b;
+type R = { count: Count, next: Increment };
+type View = R;
+type Wrapped = Wrap of Count;
+let inc = ((fn (x: Number) -> x + 1) : Increment);
+let _ = print (show ((3 : Count) + 2));
+let _ = print (show (inc 7));
+let _ = print (show (match ((4, true) : Pair) with (n, _) -> n));
+let _ = print (show (match ([6, 9] : int Items) with Cons (n, _) -> n | Nil -> 0));
+let _ = print (show (match ((1, true) : (Count, bool) Duo) with (_, b) -> b));
+let r = (R { next = inc, count = 10 } : View);
+let _ = print (show r.count);
+let _ = print (show (r.next 11));
+let _ = print (show (match Wrap 13 with Wrap n -> n));
+let r2 = { r | count = 14 };
+let _ = print (show r2.count);
+let _ = print (show r.count);
+()

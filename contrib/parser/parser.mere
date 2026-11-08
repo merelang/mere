@@ -45,6 +45,16 @@ let is_upper_first_c = fn (s: str) ->
   let o = ord (char_at s 0) in
   o >= 65 && o <= 90;
 
+// Nominal type names are canonical and global, including declarations in
+// modules. Qualified record syntax denotes the same bare record identity.
+let canonical_type_name = fn (name: str) ->
+  let n = str_len name in
+  let rec find = fn i ->
+    if i < 0 then name
+    else if char_at name i == "." then substring name (i + 1) n
+    else find (i - 1)
+  in find (n - 1);
+
 let peek_tok = fn (toks: pos_token list) ->
   match toks with
   | Cons (pt, _) -> let (_, t) = pt in t
@@ -669,11 +679,11 @@ and desugar_list = fn (elems: expr list) ->
 and parse_record_lit_body = fn (name: str)
                           -> fn (toks: pos_token list) ->
   (match peek_tok toks with
-    | TRBrace -> (ERecordLit (name, Nil), advance toks)
+    | TRBrace -> (ERecordLit (canonical_type_name name, Nil), advance toks)
     | _ ->
       let (fields, toks1) = parse_record_field_inits toks in
       let toks2 = expect_rbrace toks1 in
-      (ERecordLit (name, fields), toks2))
+      (ERecordLit (canonical_type_name name, fields), toks2))
 
 // `{` has been consumed — parse `BASE | f1 = e1, ... }` record update.
 // Matches OCaml-side `lib/parser.ml` syntax: the type name is omitted
@@ -789,7 +799,7 @@ and parse_pattern_base = fn (toks: pos_token list) ->
                 (PConstr (ctor_name, Some payload), rest2)
               | TLBrace ->
                 let (fields, rest2) = parse_record_pat_fields (advance after_qual) in
-                (PRecord (ctor_name, fields), rest2)
+                (PRecord (canonical_type_name ctor_name, fields), rest2)
               | other ->
                 // Atom-style payload (`Some t`, `Some 1`, `Cons Nil`,
                 // ...): if the next token can start a pattern atom,
@@ -960,8 +970,8 @@ and parse_or_pattern_tail = fn (acc: pattern) -> fn (toks: pos_token list) ->
 //             | IDENT_NON_PRIMITIVE     (0-arg TyCon)
 //             | '(' ty ')'
 //
-// `'a` tyvars and `&R T` borrow refs from OCaml-side are deferred —
-// the lexer doesn't tokenise either yet. Bracket forms like `Vec[R, T]`
+// Type variables and multi-argument applications are supported.
+// `&R T` borrow refs remain outside this parser's subset. Bracket forms like `Vec[R, T]`
 // are also out of scope (Stage 50d ships the MVP that real annotations
 // like `fn (s: str) -> ...` and `fn (f: int -> str) -> ...` need).
 
@@ -1003,7 +1013,9 @@ and parse_type_app_tail = fn (acc: ty) -> fn (toks: pos_token list) ->
       (match t with
         | TIdent name ->
           if is_primitive_type_name name then (acc, toks)
-          else parse_type_app_tail (TyCon (name, Cons (acc, Nil))) rest
+          else
+            let (full_name, rest2) = parse_type_name_tail name rest in
+            parse_type_app_tail (TyCon (full_name, Cons (acc, Nil))) rest2
         | _ -> (acc, toks))
     | Nil -> (acc, toks))
 
@@ -1019,18 +1031,44 @@ and parse_type_atom = fn (toks: pos_token list) ->
           else if name == "str" then (TyStr, rest)
           else if name == "unit" then (TyUnit, rest)
           else if name == "float" then (TyFloat, rest)
-          else (TyCon (name, Nil), rest))
+          else
+            let (full_name, rest2) = parse_type_name_tail name rest in
+            (TyCon (full_name, Nil), rest2))
         | TLParen ->
           let (inner, rest2) = parse_type rest in
-          let rest3 = expect_rparen rest2 in
-          (inner, rest3)
+          (match peek_tok rest2 with
+            | TComma ->
+              let (args, rest3) = parse_type_args (advance rest2) in
+              let rest4 = expect_rparen rest3 in
+              let (name, rest5) = parse_type_name rest4 in
+              (TyCon (name, Cons (inner, args)), rest5)
+            | _ -> (inner, expect_rparen rest2))
         | TTyVar name ->
           // Phase 54.4: `'a` type variable in annotations like
           // `fn (l: 'a list) -> ...`. Codegen treats type vars as
           // i32 (uniform representation), so this is purely a parse
           // / typer concern.
           (TyVar name, rest)
-        | _ -> fail ("line " ++ show line ++ ": expected type")));
+        | _ -> fail ("line " ++ show line ++ ": expected type")))
+
+and parse_type_args = fn toks ->
+  let (t, rest) = parse_type toks in
+  match peek_tok rest with
+  | TComma ->
+    let (ts, rest2) = parse_type_args (advance rest) in
+    (Cons (t, ts), rest2)
+  | _ -> (Cons (t, Nil), rest)
+
+and parse_type_name = fn toks ->
+  let (name, rest) = expect_ident toks in
+  parse_type_name_tail name rest
+
+and parse_type_name_tail = fn name -> fn toks ->
+  match peek_tok toks with
+  | TDot ->
+    let (part, rest) = expect_ident (advance toks) in
+    parse_type_name_tail (name ++ "." ++ part) rest
+  | _ -> (canonical_type_name name, toks);
 
 // === Top-level parser ======================================================
 //
@@ -1189,16 +1227,16 @@ let rec parse_decls = fn (acc: top_decl list) -> fn (toks: pos_token list) ->
 //   - anything else (lowercase ident, `(`, primitive type name, etc.)
 //     is a type alias whose body is parsed as a `ty`
 //
-// Type parameters (`type T 'a = ...`) are still out of scope until
-// the lexer tokenizes `'a`; `params` stays the empty list.
+// Declaration parameters precede the name: `'a Box` or `('a, 'b) Pair`.
 and parse_type_decl = fn (toks: pos_token list) ->
-  let (name, toks1) = expect_ident toks in
+  let (params, after_params) = parse_type_params toks in
+  let (name, toks1) = expect_ident after_params in
   let toks2 = expect_eq toks1 in
   (match peek_tok toks2 with
     | TLBrace ->
       let (fields, toks3) = parse_record_field_decls (advance toks2) in
       let toks4 = expect_semi toks3 in
-      (TopRecord (name, Nil, fields), toks4)
+      (TopRecord (name, params, fields), toks4)
     | _ ->
       if is_variant_body_start toks2 then
         let toks3 = (match peek_tok toks2 with
@@ -1206,11 +1244,30 @@ and parse_type_decl = fn (toks: pos_token list) ->
           | _ -> toks2) in
         let (variants, toks4) = parse_variant_seq toks3 in
         let toks5 = expect_semi toks4 in
-        (TopType (name, Nil, variants), toks5)
+        (TopType (name, params, variants), toks5)
       else
         let (t, toks3) = parse_type toks2 in
         let toks4 = expect_semi toks3 in
-        (TopTypeAlias (name, Nil, t), toks4))
+        (TopTypeAlias (name, params, t), toks4))
+
+and parse_type_params = fn toks ->
+  match peek_tok toks with
+  | TTyVar name -> (Cons (name, Nil), advance toks)
+  | TLParen ->
+    let (params, rest) = parse_type_param_seq (advance toks) in
+    (params, expect_rparen rest)
+  | _ -> (Nil, toks)
+
+and parse_type_param_seq = fn toks ->
+  match peek_tok toks with
+  | TTyVar name ->
+    let rest = advance toks in
+    (match peek_tok rest with
+      | TComma ->
+        let (params, rest2) = parse_type_param_seq (advance rest) in
+        (Cons (name, params), rest2)
+      | _ -> (Cons (name, Nil), rest))
+  | _ -> fail "expected type variable in type parameter list"
 
 // Variant decls are recognized by either a leading `|` (explicit
 // variant list opener) or an uppercase ident followed by `|` / `of`.
@@ -1582,9 +1639,11 @@ let prefix_decl = fn (m: str) -> fn (d: top_decl) ->
     let bs2 = list_map bindings (fn (b: str * expr) ->
       let (n, v) = b in (m ++ "." ++ n, v)) in
     TopLetRec bs2
-  | TopType (n, params, ctors) -> TopType (m ++ "." ++ n, params, ctors)
-  | TopRecord (n, params, fields) -> TopRecord (m ++ "." ++ n, params, fields)
-  | TopTypeAlias (n, params, ty) -> TopTypeAlias (m ++ "." ++ n, params, ty)
+  // Preserve declaration order and bare type identities. Alias expansion
+  // belongs to the typer at each declaration, never to a whole-module map.
+  | TopType (n, params, ctors) -> TopType (n, params, ctors)
+  | TopRecord (n, params, fields) -> TopRecord (n, params, fields)
+  | TopTypeAlias (n, params, ty) -> TopTypeAlias (n, params, ty)
   | TopModule _ -> d  // nested modules — flatten_decls handles recursion
   | TopExternFn _ -> d  // extern decls aren't prefixed; their host name matters
   | TopExternType _ -> d;

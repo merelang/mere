@@ -4,6 +4,38 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.716 — 2026-11-08
+
+The self-host typer rejects field access and updates on non-record values,
+including primitive, variant, opaque and unresolved receiver types. Lambda
+parameters need a record annotation when their type is otherwise unknown.
+
+Type aliases now expand in annotations, record fields, constructor payloads
+and extern signatures, preserving declaration order. The parser accepts
+single and multiple type parameters in declaration heads and multi-argument
+type applications. Record field schemes share their variables with the
+receiver, so literals, accesses, updates and patterns propagate the same
+arguments while separate uses instantiate independently. Substitution chains
+now retain newer constraints when following an older link. Module types and
+records keep their canonical bare identity across bare and qualified uses.
+Module flattening preserves declaration order, so later aliases cannot capture
+earlier annotations, aliases or field bodies. Inference and
+annotation share declaration registration.
+
+Four new runtime fixtures cover aliases, polymorphic types and module type
+references. Eight required fixtures provide 100 handwritten output lines on
+five execution paths. The refusal gate checks 28 cases on three typer paths,
+including incompatible shared fields, updates, patterns, aliases and invalid
+receivers. Formatter round trips and the compiler bootstrap also exercise
+type parameters. The full-toolchain suite has 3,178 tests; all 251 parity
+programs, 191 gates, nine groups and four build configurations remain.
+
+All 15 existing Wasm size bands remain unchanged. The optimized formatter
+round-trips six fixtures, the optimized REPL executes all 100 oracle lines,
+and the optimized typer accepts seven positive cases and refuses all 28
+invalid cases. Module regression cases cover identical record restatements,
+bare/qualified use, and aliases declared after annotations, aliases or fields.
+
 ## v0.1.715 — 2026-11-08
 
 The self-host Wasm compiler short-circuits `&&` and `||`: the left operand
