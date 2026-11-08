@@ -81,7 +81,8 @@ check_one() {
 
   # Explicit answers must hold independently of agreement between compilers.
   oracle="${input%.mere}.expected"
-  if [ "$name" = t06_patterns ] && [ ! -f "$oracle" ]; then
+  case "$name" in t06_patterns|t07_pattern_visibility) required=1 ;; *) required=0 ;; esac
+  if [ "$required" -eq 1 ] && [ ! -f "$oracle" ]; then
     echo "  FAIL $name: missing required oracle" >&2
     return 1
   fi
@@ -152,6 +153,7 @@ else
     test/selfhost/t04_string.mere \
     test/selfhost/t05_list.mere \
     test/selfhost/t06_patterns.mere \
+    test/selfhost/t07_pattern_visibility.mere \
     examples/hello.mere \
     examples/fibonacci.mere \
   "

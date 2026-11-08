@@ -12471,6 +12471,10 @@ let () =
     "guard lexical scope", "match 5 with x when (let x = 9 in x == 9) -> x | _ -> 0", "5";
     "pattern let lexical scope", "let x = 10 in let y = (let ((1, x) | (x, 9)) = (2, 9) in x) in x + y", "12";
     "prefix let lexical scope", "let x = 10 in let y = (let \"a\" <> x = \"abc\" in str_len x) in x + y", "12";
+    "hidden or binding types", "match ((1, \"a\"), 3) with (((x, _) | (_, x)), x) -> x", "3";
+    "hidden record or binding types", "type Mixed = { pair: int * str, final: int }; match Mixed { pair = (1, \"a\"), final = 5 } with Mixed { pair = ((x, _) | (_, x)), final = x } -> x", "5";
+    "hidden prefix binding types", "match ((\"abc\", 7), 6) with (((\"a\" <> x, _) | (\"zzz\", x)), x) -> x | _ -> 99", "6";
+    "hidden prefix keeps tests", "match ((\"xbc\", 7), 6) with (((\"a\" <> x, _) | (\"zzz\", x)), x) -> x | _ -> 99", "99";
     "pattern let", "let ((1, x) | (x, 9)) = (2, 9) in x", "2";
     "record traversal", "type Pair = { a: int, b: int }; match Pair { a = 1, b = 2 } with Pair { b = x, a = x } -> x", "1";
   ] in
@@ -12699,6 +12703,7 @@ let () =
     "binding types", "match (1, true) with (x, _) | (_, x) -> 0";
     "right structure", "match (1, 2) with (x, _) | (x, true) -> 0 | _ -> 0";
     "nested missing name", "match Some 1 with Some (x | _) -> 0 | _ -> 0";
+    "hidden missing name", "match ((1, 2), 3) with (((x, _) | (_, _)), x) -> x";
   ];
 
   (* Phase 53.9 — self-host codegen cross-validation. Runs a Mere source

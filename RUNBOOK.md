@@ -308,9 +308,9 @@ All 191 gates, nine groups and four build configurations remain required.
 ## Self-host pattern verification
 
 `scripts/selfhost_check.sh` rebuilds the CLI compiler in an isolated temporary
-directory on every run. The pattern fixture's `.expected` companion is required.
-Its 38 handwritten lines must match the reference interpreter and Wasm, the
-self-host evaluator under the interpreter and Wasm, and programs emitted by
+directory on every run. Both pattern fixtures' `.expected` companions are
+required. Their combined 42 handwritten lines must match the reference
+interpreter and Wasm, the self-host evaluator under the interpreter and Wasm, and programs emitted by
 the self-host compiler running on Wasm. Emission, assembly and runtime failures
 fail the gate, including when several paths agree on the same wrong output.
 The existing compiler-group gate retains this verification; all 191 gates,

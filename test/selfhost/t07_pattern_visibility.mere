@@ -1,0 +1,7 @@
+// Hidden names retain their tests without constraining visible bindings.
+type Mixed = { pair: int * str, final: int };
+let _ = print (show (match ((1, "a"), 3) with (((x, _) | (_, x)), x) -> x));
+let _ = print (show (match Mixed { pair = (1, "a"), final = 5 } with Mixed { pair = ((x, _) | (_, x)), final = x } -> x));
+let _ = print (show (match (("abc", 7), 6) with ((("a" <> x, _) | ("zzz", x)), x) -> x | _ -> 99));
+let _ = print (show (match (("xbc", 7), 6) with ((("a" <> x, _) | ("zzz", x)), x) -> x | _ -> 99));
+()
