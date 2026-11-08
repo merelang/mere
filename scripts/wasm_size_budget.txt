@@ -68,9 +68,16 @@ hello.wasm                     1757     2148
 # raytrace.ppm and the same adler=48497-22482.
 raytrace.wasm                  5496     6718
 rvconsole.wasm                 5448     6659
-selfhost-compile.wasm        152044   185831
-selfhost-fmt.wasm             85611   104636
-selfhost-repl.wasm           101928   124579
+# v0.1.717: the browser compiler now includes the same checked source pipeline
+# as the CLI, growing 166357 -> 225683 B. Ordered constructor identity/arity
+# resolution adds parser metadata shared by fmt (103703 -> 105240 B) and repl
+# (122096 -> 125989 B). Recenter these three with the same -10% / +10% policy.
+# The real optimized browser executes 130 handwritten lines and refuses 56
+# invalid programs with same-instance retries; formatter and evaluator oracles
+# also remain required. The other twelve bands are unchanged.
+selfhost-compile.wasm        203115   248251
+selfhost-fmt.wasm             94716   115764
+selfhost-repl.wasm           113390   138588
 # v0.1.715: declared-record field-set validation and logical tail propagation
 # grow the optimized type checker from 135314 to 142203 B (wasm-opt 132).
 # Recenter only this module with the same -10% / +10% policy. The actual

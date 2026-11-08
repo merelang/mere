@@ -456,6 +456,25 @@ An identical record declaration can be restated inside a module and used with
 an outer record value. Later module aliases cannot capture earlier annotations,
 alias bodies or field types.
 
+The CLI and browser self-host compilers share `compile_source_to_wat` in
+`contrib/codegen/compile.mere`: both check source before emitting WAT. Unknown
+constructors, missing or extra constructor payloads and invalid constructor
+patterns are refused. Module-qualified constructors such as `M.C` retain their
+canonical parent type, payload arity and runtime identity even when another type
+uses the same constructor label. Source declarations quantify only explicitly
+declared parameters. Nonempty nominal restatements must have the same record
+fields or variant constructors and arities; a record/variant kind collision is
+also refused. The final nominal schema checks earlier values, while aliases
+keep their declaration-time meaning. The low-level `parse_and_emit` bootstrap
+API remains unchecked; it is not the source entry used by these two compilers.
+
+Named variables in function and expression annotations are fresh for each
+annotation. Repeated names within one annotation share a type: `fn (x: 'a) -> x`
+can be let-generalized, while `((1, true) : 'a * 'a)` is rejected. Constraints
+from a captured monomorphic value remain shared. A browser compilation failure
+replaces previous WAT with its diagnostic; the next click reclaims temporary
+compiler allocations and can compile corrected input on the same instance.
+
 ```
 (1, 2, 3)                           // tuple
 

@@ -105,7 +105,7 @@
     <p>
       Paste a Mere expression or a full file on the left and press
       <strong>Compile</strong>. The Wasm module on this page tokenizes,
-      parses, <em>and emits a fresh Wasm module</em> for your input —
+      parses, type-checks, <em>and emits a fresh Wasm module</em> for your input —
       all written in Mere itself, no server round-trip. The companion
       pages <a href="selfhost-fmt.html">self-host fmt</a>,
       <a href="selfhost-repl.html">self-host REPL</a>, and
@@ -155,15 +155,17 @@
 
     <h2>Pipeline</h2>
     <p>
-      Four contrib libraries combine into the Wasm running on this
+      The following contrib libraries combine into the Wasm running on this
       page:
     </p>
     <ol>
       <li><code>lexer.mere</code> — source → tokens</li>
       <li><code>parser.mere</code> — tokens → AST</li>
+      <li><code>typer.mere</code> — AST → checked, annotated AST</li>
       <li><code>codegen_wasm.mere</code> — AST → Wasm text (this stage)</li>
       <li><code>selfhost-compile.mere</code> — DOM glue (textarea →
-        <code>parse_and_emit</code> → output)</li>
+        <code>compile_source_to_wat</code> → output), sharing the CLI's
+        checked entry in <code>contrib/codegen/compile.mere</code></li>
     </ol>
     <p>
       <code>codegen_wasm.mere</code> emits the Wasm Text Format
@@ -223,11 +225,9 @@
         but isn't wired into the demos yet.
       </li>
       <li>
-        <strong>No polymorphic monomorphization.</strong> Mere's
-        let-poly types `let id = fn x -> x in id 1, id "a"` need
-        type-driven monomorphization on the codegen side. The MVP
-        uses i32 uniform representation, so this works at runtime
-        but isn't type-correct.
+        <strong>Uniform value representation.</strong> The self-host
+        compiler type-checks polymorphic functions, including named variables
+        in annotations, and uses an i32 representation for their runtime values.
       </li>
       <li>
         <strong>No optimisation pass.</strong> Tail calls aren't
@@ -235,9 +235,9 @@
         only happens at the parser level.
       </li>
       <li>
-        <strong>Errors abort the Wasm instance.</strong> Unbound vars
-        and unsupported patterns surface as <code>fail</code> calls
-        that trap the host Wasm; reload to recover.
+        <strong>Compilation errors.</strong> A rejected program displays its
+        diagnostic in the output panel and clears any previous WAT. Edit the
+        source and press Compile again to retry.
       </li>
     </ul>
 
@@ -262,11 +262,19 @@
     const { glue, attach } = makeDomGlue();
 
     const resultEl = document.getElementById("result");
+    let memory;
+    const decoder = new TextDecoder();
 
     const stub = () => 0;
     const env = {
       ...glue,
-      puts: stub,
+      puts: ptr => {
+        const bytes = new Uint8Array(memory.buffer);
+        let end = ptr;
+        while (end < bytes.length && bytes[end] !== 0) end++;
+        resultEl.textContent += decoder.decode(bytes.subarray(ptr, end));
+        return 0;
+      },
       read_file: stub,
       write_file: stub,
       __lang_str_of_float: stub,
@@ -280,8 +288,17 @@
 
     try {
       const { instance } = await WebAssembly.instantiate(wasmBytes, { env });
+      memory = instance.exports.memory;
       attach(instance);
       instance.exports.main();
+      // The compiler's closures and immutable environment now live below this
+      // checkpoint. Each callback returns only copied DOM text, so its temporary
+      // arena can be reclaimed before the next compilation, including a retry.
+      const bump = instance.exports.__lang_bump;
+      const checkpoint = bump.value;
+      document.getElementById("compile-btn").addEventListener("click", () => {
+        bump.value = checkpoint;
+      }, { capture: true });
     } catch (e) {
       resultEl.textContent = "[runtime error] " + e.message;
     }

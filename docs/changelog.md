@@ -4,6 +4,34 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.717 — 2026-11-09
+
+The CLI and browser self-host compilers now share a checked source entry.
+Both reject invalid records, constructor arities, unknown constructors and
+incompatible nominal restatements before emitting WAT. Source type parameters
+must be explicitly declared; the final nominal schema checks earlier values
+without letting later aliases capture earlier type annotations or field bodies.
+
+Constructor resolution tracks declaration order, canonical parent identity and
+arity. Qualified constructors and patterns keep their original identity across
+same-named constructors in different types. Function and expression annotations
+freshen named type variables independently, sharing repeated variables within
+one annotation and retaining constraints from captured monomorphic values.
+
+Ten required runtime fixtures now provide 130 handwritten lines on five paths.
+The refusal gate checks 56 cases on three paths, including reference build
+refusals that a type-only query cannot establish. The actual optimized browser
+compiler executes the same 130 lines, refuses all 56 inputs, displays diagnostics
+without stale WAT and recovers after each failure on the same instance. Temporary
+compiler allocations are reclaimed before each click. The full-toolchain suite
+has 3,246 tests; 251 parity programs, 191 gates, nine groups and four build
+configurations remain required.
+
+The browser compiler grows from 166,357 to 225,683 bytes by adding the checked
+pipeline. Ordered constructor resolution also grows the formatter from 103,703
+to 105,240 bytes and the REPL from 122,096 to 125,989 bytes. These three bands
+retain the existing ±10% policy; the other twelve bands remain unchanged.
+
 ## v0.1.716 — 2026-11-08
 
 The self-host typer rejects field access and updates on non-record values,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require record/type refusals and logical tail calls from the self-host CLI."""
+"""Require source refusals and logical tail calls from the self-host CLI."""
 import argparse
 import json
 from pathlib import Path
@@ -38,22 +38,28 @@ def check(mere, compiler):
                  (ROOT / "test/selfhost/type_rejections.tsv").read_text().splitlines()]
     assert len(type_rows) == 19 and all(len(row) == 4 for row in type_rows), "type refusal inventory changed"
     assert len({row[0] for row in type_rows}) == 19
-    rows += type_rows
+    rows = [[name, "-t", ref, own, source] for name, ref, own, source in rows + type_rows]
+    declaration_rows = [line.split("\t") for line in
+                        (ROOT / "test/selfhost/declaration_rejections.tsv").read_text().splitlines()]
+    assert len(declaration_rows) == 28 and all(len(row) == 5 for row in declaration_rows), "declaration refusal inventory changed"
+    assert len({row[0] for row in declaration_rows}) == 28
+    assert all(row[1] in ("-t", "-w") for row in declaration_rows)
+    rows += declaration_rows
     host = ROOT / "scripts/run_wasm.js"
     with tempfile.TemporaryDirectory(prefix="mere-record-check-") as temporary:
         work = Path(temporary)
         source, bridge = work / "input.mere", work / "typer.mere"
-        for name, reference_reason, self_reason, text in rows:
+        for name, reference_mode, reference_reason, self_reason, text in rows:
             source.write_text(text + "\n")
             bridge.write_text("import " + quoted(ROOT / "contrib/typer/typer.mere")
                               + ";\nprint (parse_and_infer " + quoted(text) + ")\n")
-            checks = [(run([mere, "-t", source]), reference_reason),
+            checks = [(run([mere, reference_mode, source]), reference_reason),
                       (run([mere, bridge]), self_reason),
                       (run(["node", host, compiler, source]), self_reason)]
             for result, reason in checks:
                 assert refused(result, reason), (name, reason, result.returncode,
                                                  result.stdout[-500:], result.stderr[-500:])
-            print(f"  record refusal {name}: reference, interpreted typer and compiled typer passed", flush=True)
+            print(f"  source refusal {name}: reference, interpreted typer and compiled typer passed", flush=True)
         # An always-refusing tool cannot satisfy the gate. Also prove that the
         # CLI actually emits an executable module after its successful check.
         source.write_text("type R = { a: int, b: int }; (R { b = 23, a = 17 }).a\n")
@@ -75,7 +81,7 @@ def check(mere, compiler):
             succeeds(["wat2wasm", "--enable-tail-call", wat, "-o", wasm])
             assert succeeds(["node", host, wasm]) == "true\n", label
         print("  logical tail calls: 50000 steps on reference/self-host Wasm passed", flush=True)
-    print("selfhost_record_check: 28 refusals on three paths, positive compilation and tail calls passed")
+    print("selfhost_record_check: 56 refusals on three paths, positive compilation and tail calls passed")
 
 
 def self_test():

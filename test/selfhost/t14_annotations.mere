@@ -1,0 +1,30 @@
+// Each annotation freshens named variables while sharing repeated occurrences.
+let id = fn (x: 'a) -> x;
+let _ = print (show (id 7));
+let _ = print (show (id true));
+let _ = print (id "text");
+let expr_id = ((fn x -> x) : 'a -> 'a);
+let _ = print (show (expr_id 11));
+let _ = print (show (expr_id false));
+type 'a Box = { value: 'a };
+let get = fn (r: 'a Box) -> r.value;
+let _ = print (show (get (Box { value = 13 })));
+let _ = print (show (get (Box { value = true })));
+let _ = print (get (Box { value = "box" }));
+type 'a Identity = 'a -> 'a;
+let alias_id = ((fn x -> x) : 'a Identity);
+let _ = print (show (alias_id 17));
+let _ = print (show (alias_id true));
+let pair = fn (x: 'a) -> fn (y: 'a) -> (x, y);
+let _ = print (show (pair 19 false));
+let same_pair = ((23, 29) : 'a * 'a);
+let _ = print (show same_pair);
+let constrained = fn (x: 'a) -> x + 1;
+let _ = print (show (constrained 30));
+let capture = fn outer -> let use = fn (x: 'a) -> (outer, x) in (use 37, use true);
+let ((a, b), (c, d)) = capture 41;
+let _ = print (show a);
+let _ = print (show b);
+let _ = print (show c);
+let _ = print (show d);
+()

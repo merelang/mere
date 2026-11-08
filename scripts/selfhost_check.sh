@@ -81,7 +81,7 @@ check_one() {
 
   # Explicit answers must hold independently of agreement between compilers.
   oracle="${input%.mere}.expected"
-  case "$name" in t06_patterns|t07_pattern_visibility|t08_logic|t09_records|t10_aliases|t11_polymorphic_types|t12_type_modules|t13_type_scope) required=1 ;; *) required=0 ;; esac
+  case "$name" in t06_patterns|t07_pattern_visibility|t08_logic|t09_records|t10_aliases|t11_polymorphic_types|t12_type_modules|t13_type_scope|t14_annotations|t15_constructors) required=1 ;; *) required=0 ;; esac
   if [ "$required" -eq 1 ] && [ ! -f "$oracle" ]; then
     echo "  FAIL $name: missing required oracle" >&2
     return 1
@@ -160,6 +160,8 @@ else
     test/selfhost/t11_polymorphic_types.mere \
     test/selfhost/t12_type_modules.mere \
     test/selfhost/t13_type_scope.mere \
+    test/selfhost/t14_annotations.mere \
+    test/selfhost/t15_constructors.mere \
     examples/hello.mere \
     examples/fibonacci.mere \
   "

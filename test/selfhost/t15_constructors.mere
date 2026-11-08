@@ -1,0 +1,36 @@
+module A {
+  type Alpha = C of int | Empty;
+  let read = fn x -> match x with C n -> n | Empty -> 0;
+};
+let saved = A.C 7;
+let before_shadow = fn x -> match x with A.C n -> n | A.Empty -> 0;
+module B {
+  type Beta = C of bool | Empty;
+  let read = fn x -> match x with C b -> if b then 11 else 0 | Empty -> 0;
+};
+let _ = print (show (A.read saved));
+let _ = print (show (before_shadow (A.C 13)));
+let _ = print (show (B.read (B.C true)));
+let _ = print (show (A.read A.Empty));
+let _ = print (show (B.read B.Empty));
+let _ = print (show (match (A.C 17, B.C true) with (A.C n, B.C true) -> n | _ -> 0));
+type Holder = { value: Alpha };
+let _ = print (show (match Holder { value = A.C 19 } with Holder { value = A.C n } -> n | _ -> 0));
+let _ = print (show (match A.C 23 with (A.C n | A.C n) -> n | _ -> 0));
+let _ = print (show (match A.C 29 with ((A.C n) as whole) -> A.read whole + n | _ -> 0));
+module Original {
+  type Shared = Item of int | Stop;
+  let read = fn x -> match x with Item n -> n | Stop -> 0;
+};
+module Restated {
+  type Shared = Stop | Item of int;
+};
+let _ = print (show (Original.read (Restated.Item 31)));
+let _ = print (show (Original.read (Original.Item 37)));
+let _ = print (show (Original.read Restated.Stop));
+// Equivalent declarations preserve identity even when constructor order changes.
+type Order = First of int | Last;
+let earlier = First 43;
+type Order = Last | First of int;
+let _ = print (show (match earlier with First n -> n | Last -> 0));
+()

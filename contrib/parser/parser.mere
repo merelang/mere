@@ -70,6 +70,13 @@ let advance = fn (toks: pos_token list) ->
   | Cons (_, rest) -> rest
   | Nil -> Nil;
 
+let rec parse_constructor_path = fn name -> fn toks ->
+  match toks with
+  | Cons ((_, TDot), Cons ((_, TIdent part), rest)) ->
+    if is_upper_first_c part then parse_constructor_path (name ++ "." ++ part) rest
+    else (name, toks)
+  | _ -> (name, toks);
+
 let expect_rparen = fn (toks: pos_token list) ->
   match toks with
   | Cons (pt, rest) ->
@@ -585,18 +592,7 @@ and parse_atom_raw = fn (toks: pos_token list) ->
             // Uppercase and glue into one qualified constructor name.
             // Lowercase after `.` stays as a field access via the
             // existing flatten_and_resolve path.
-            let (ctor_name, after_qual) = (match peek_tok rest with
-              | TDot ->
-                (match rest with
-                  | Cons (_, r1) ->
-                    (match peek_tok r1 with
-                      | TIdent right ->
-                        if is_upper_first_c right then
-                          (name ++ "." ++ right, advance r1)
-                        else (name, rest)
-                      | _ -> (name, rest))
-                  | Nil -> (name, rest))
-              | _ -> (name, rest)) in
+            let (ctor_name, after_qual) = parse_constructor_path name rest in
             (match peek_tok after_qual with
               | TLParen ->
                 let (payload, rest2) = parse_paren_body (advance after_qual) in
@@ -781,18 +777,7 @@ and parse_pattern_base = fn (toks: pos_token list) ->
             // ident becomes one qualified constructor name. Matches
             // toml.mere's `| Toml.TInt n -> ...` shape. Falls back to
             // the bare-ctor rule otherwise.
-            let (ctor_name, after_qual) = (match peek_tok rest with
-              | TDot ->
-                (match rest with
-                  | Cons (_, r1) ->
-                    (match peek_tok r1 with
-                      | TIdent right ->
-                        if is_upper_first_c right then
-                          (name ++ "." ++ right, advance r1)
-                        else (name, rest)
-                      | _ -> (name, rest))
-                  | Nil -> (name, rest))
-              | _ -> (name, rest)) in
+            let (ctor_name, after_qual) = parse_constructor_path name rest in
             (match peek_tok after_qual with
               | TLParen ->
                 let (payload, rest2) = parse_paren_pattern (advance after_qual) in
@@ -1492,8 +1477,8 @@ let rec top_decl_to_str = fn (d: top_decl) ->
     let parts = list_map variants (fn (v: str * ty option) ->
       let (n, payload) = v in
       (match payload with
-        | None -> n
-        | Some t -> n ++ " of " ++ ty_to_str t)) in
+        | None -> constructor_label n
+        | Some t -> constructor_label n ++ " of " ++ ty_to_str t)) in
     "TopType(" ++ name ++ ", [" ++ str_join " | " parts ++ "])"
   | TopRecord (name, _params, fields) ->
     let parts = list_map fields (fn (f: str * ty) ->
@@ -1510,7 +1495,8 @@ let rec top_decl_to_str = fn (d: top_decl) ->
   | TopExternFn (name, sig_ty) ->
     "TopExternFn(" ++ name ++ " : " ++ ty_to_str sig_ty ++ ")"
   | TopExternType name ->
-    "TopExternType(" ++ name ++ ")";
+    "TopExternType(" ++ name ++ ")"
+  | TopCtorAlias (name, target) -> "TopCtorAlias(" ++ name ++ ", " ++ target ++ ")";
 
 let program_to_str = fn (p: program) ->
   let (decls, main) = p in
@@ -1531,14 +1517,17 @@ let program_to_str = fn (p: program) ->
 // dot-bearing identifiers as opaque strings, with no module-aware
 // logic of their own.
 
-let rec collect_module_names = fn (decls: top_decl list) -> fn (acc: str list) ->
+let rec collect_module_paths = fn prefix -> fn decls -> fn acc ->
   match decls with
   | Nil -> acc
   | Cons (d, rest) ->
-    let acc2 = (match d with
-      | TopModule (name, _) -> Cons (name, acc)
+    let acc1 = (match d with
+      | TopModule (name, inner) ->
+        let full = if str_eq prefix "" then name else prefix ++ "." ++ name in
+        collect_module_paths full inner (Cons (full, acc))
       | _ -> acc) in
-    collect_module_names rest acc2;
+    collect_module_paths prefix rest acc1;
+let collect_module_names = fn decls -> fn acc -> collect_module_paths "" decls acc;
 
 let rec is_module_name = fn (n: str) -> fn (names: str list) ->
   match names with
@@ -1646,7 +1635,8 @@ let prefix_decl = fn (m: str) -> fn (d: top_decl) ->
   | TopTypeAlias (n, params, ty) -> TopTypeAlias (n, params, ty)
   | TopModule _ -> d  // nested modules — flatten_decls handles recursion
   | TopExternFn _ -> d  // extern decls aren't prefixed; their host name matters
-  | TopExternType _ -> d;
+  | TopExternType _ -> d
+  | TopCtorAlias (name, target) -> TopCtorAlias (m ++ "." ++ name, target);
 
 let rec append_top_decls = fn (xs: top_decl list) -> fn (ys: top_decl list) ->
   match xs with
@@ -1749,7 +1739,10 @@ let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) ->
       let (fname, fv) = f in (fname, rename_expr fv renames)) in
     ERecordLit (name, fs2)
   | EFieldGet (recv, field) ->
-    EFieldGet (rename_expr recv renames, field)
+    let module_name = (match recv with EConstr (n, None) -> n | EVar n -> n | _ -> "") in
+    (match lookup_str_str (module_name ++ "." ++ field) renames with
+      | Some full -> EVar full
+      | None -> EFieldGet (rename_expr recv renames, field))
   | ERecordUpdate (base, fields) ->
     let fs2 = list_map fields (fn (f: str * expr) ->
       let (fname, fv) = f in (fname, rename_expr fv renames)) in
@@ -1765,6 +1758,23 @@ let rename_decl = fn (d: top_decl) -> fn (renames: (str * str) list) ->
     TopLetRec bs2
   | _ -> d;
 
+let rec module_constructor_aliases = fn m -> fn type_name -> fn ctors ->
+  match ctors with
+  | Nil -> Nil
+  | Cons (entry, rest) ->
+    let (name, _) = entry in
+    Cons (TopCtorAlias (m ++ "." ++ name, constructor_identity type_name name),
+      module_constructor_aliases m type_name rest);
+
+let rec prefix_module_decls = fn m -> fn decls ->
+  match decls with
+  | Nil -> Nil
+  | Cons (d, rest) ->
+    let aliases = (match d with
+      | TopType (name, _, ctors) -> module_constructor_aliases m name ctors
+      | _ -> Nil) in
+    Cons (prefix_decl m d, append_top_decls aliases (prefix_module_decls m rest));
+
 // Flatten the decl list: expand each TopModule into prefixed inner
 // decls. Recurse on inner decls so nested `module A { module B { ... }
 // }` flattens into `A.B.f` etc. Each module's sub-decls also go
@@ -1779,7 +1789,7 @@ let rec flatten_decls = fn (decls: top_decl list) ->
         let flat_sub = flatten_decls sub_decls in
         let renames = build_rename_map name flat_sub Nil in
         let renamed = list_map flat_sub (fn (sd: top_decl) -> rename_decl sd renames) in
-        list_map renamed (fn (sd: top_decl) -> prefix_decl name sd)
+        prefix_module_decls name renamed
       | _ -> Cons (d, Nil)) in
     append_top_decls expanded (flatten_decls rest);
 
@@ -1789,42 +1799,48 @@ let rec flatten_decls = fn (decls: top_decl list) ->
 // EApp(EConstr name None, arg) — it doesn't know that `Some` takes a
 // payload. The OCaml-side parser knows from the `type T = | C of ...`
 // declarations and emits `EConstr (name, Some arg)` directly. This
-// post-pass walks all top_decls' TopType bodies to build an arity map,
-// then rewrites every `EApp (EConstr name None, x)` (when arity[name] = 1)
+// post-pass registers each TopType in declaration order, then rewrites
+// `EApp (EConstr name None, x)` (when the visible constructor's arity is 1)
 // into `EConstr (name, Some x)`. Without this, `Some TLet` lowers to a
 // runtime call_indirect using the SomeTok cell's tag as env_ptr — trap.
 
-let rec lookup_arity = fn (name: str) -> fn (m: (str * int) list) ->
-  match m with
-  | Nil -> 0
-  | Cons (h, t) ->
-    let (n, a) = h in
-    // Phase 54.17: str_eq for content compare (wasm safety).
-    if str_eq n name then a else lookup_arity name t;
+// One table captures both the declaration identity and payload arity. Bare
+// names may be shadowed; qualified aliases and earlier AST uses retain the
+// original identity. Constructor identities depend on the canonical type.
+type ctor_refs = (str * (str * int)) list;
 
-let rec has_arity = fn (name: str) -> fn (m: (str * int) list) ->
-  match m with
-  | Nil -> false
-  | Cons (h, t) ->
-    let (n, _) = h in
-    if str_eq n name then true else has_arity name t;
+let rec lookup_ctor_ref = fn name -> fn (refs: ctor_refs) -> match refs with
+  | Nil -> None
+  | Cons (entry, rest) ->
+    let (n, info) = entry in
+    if str_eq n name then Some info else lookup_ctor_ref name rest;
+let resolved_constructor = fn name -> fn refs -> match lookup_ctor_ref name refs with
+  | Some (target, _) -> target | None -> name;
+let unary_constructor = fn name -> fn refs -> match lookup_ctor_ref name refs with
+  | Some (_, arity) -> arity == 1 | None -> false;
 
-let rec collect_arities_from_decls = fn (decls: top_decl list) ->
-  fn (acc: (str * int) list) ->
-  match decls with
-  | Nil -> acc
-  | Cons (d, rest) ->
-    let acc2 = (match d with
-      | TopType (_, _, variants) ->
-        list_fold variants acc (fn (m: (str * int) list)
-                              -> fn (v: str * ty option) ->
-          let (name, ty_opt) = v in
-          let ar = (match ty_opt with
-            | None -> 0
-            | Some _ -> 1) in
-          Cons ((name, ar), m))
-      | _ -> acc) in
-    collect_arities_from_decls rest acc2;
+let rec resolve_variant_declarations = fn type_name -> fn ctors -> fn refs ->
+  match ctors with
+  | Nil -> (Nil, refs)
+  | Cons (entry, rest) ->
+    let (name, payload) = entry in
+    let target = constructor_identity type_name name in
+    let arity = (match payload with None -> 0 | Some _ -> 1) in
+    let info = (target, arity) in
+    let refs1 = Cons ((target, info), Cons ((name, info), refs)) in
+    let (rest1, refs2) = resolve_variant_declarations type_name rest refs1 in
+    (Cons ((target, payload), rest1), refs2);
+
+let rec rewrite_ctor_pattern = fn p -> fn refs -> match p with
+  | PConstr (name, payload) ->
+    PConstr (resolved_constructor name refs, match payload with
+      | None -> None | Some sub -> Some (rewrite_ctor_pattern sub refs))
+  | PRecord (name, fields) -> PRecord (name, list_map fields (fn entry ->
+      let (n, sub) = entry in (n, rewrite_ctor_pattern sub refs)))
+  | PTuple ps -> PTuple (list_map ps (fn sub -> rewrite_ctor_pattern sub refs))
+  | PAs (sub, name) -> PAs (rewrite_ctor_pattern sub refs, name)
+  | POr (a, b) -> POr (rewrite_ctor_pattern a refs, rewrite_ctor_pattern b refs)
+  | _ -> p;
 
 // Phase 54.23: helper walkers using explicit recursion instead of
 // higher-order list_map. The compiled wasm from a higher-order
@@ -1832,7 +1848,7 @@ let rec collect_arities_from_decls = fn (decls: top_decl list) ->
 // Explicit tail-recursive walkers keep the code first-order and
 // avoid that compiled pattern entirely.
 let rec rewrite_constrs_arms = fn (arms: (pattern * expr option * expr) list)
-                        -> fn (m: (str * int) list) ->
+                        -> fn (m: ctor_refs) ->
   match arms with
   | Nil -> Nil
   | Cons (arm, rest) ->
@@ -1840,31 +1856,31 @@ let rec rewrite_constrs_arms = fn (arms: (pattern * expr option * expr) list)
     let g2 = (match g with
       | None -> None
       | Some ge -> Some (rewrite_constrs_expr ge m)) in
-    Cons ((p, g2, rewrite_constrs_expr b m), rewrite_constrs_arms rest m)
+    Cons ((rewrite_ctor_pattern p m, g2, rewrite_constrs_expr b m), rewrite_constrs_arms rest m)
 
 and rewrite_constrs_bindings = fn (bs: (str * expr) list)
-                            -> fn (m: (str * int) list) ->
+                            -> fn (m: ctor_refs) ->
   match bs with
   | Nil -> Nil
   | Cons (b, rest) ->
     let (n, v) = b in
     Cons ((n, rewrite_constrs_expr v m), rewrite_constrs_bindings rest m)
 
-and rewrite_constrs_exprs = fn (es: expr list) -> fn (m: (str * int) list) ->
+and rewrite_constrs_exprs = fn (es: expr list) -> fn (m: ctor_refs) ->
   match es with
   | Nil -> Nil
   | Cons (e, rest) ->
     Cons (rewrite_constrs_expr e m, rewrite_constrs_exprs rest m)
 
 and rewrite_constrs_fields = fn (fs: (str * expr) list)
-                          -> fn (m: (str * int) list) ->
+                          -> fn (m: ctor_refs) ->
   match fs with
   | Nil -> Nil
   | Cons (f, rest) ->
     let (fname, fv) = f in
     Cons ((fname, rewrite_constrs_expr fv m), rewrite_constrs_fields rest m)
 
-and rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
+and rewrite_constrs_expr = fn (e: expr) -> fn (m: ctor_refs) ->
   match e with
   | EInt _ -> e
   | EFloat _ -> e
@@ -1884,14 +1900,14 @@ and rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
     // constructor when the ctor's arity is 1.
     (match f2 with
       | EConstr (name, None) ->
-        if has_arity name m && lookup_arity name m == 1 then
+        if unary_constructor name m then
           EConstr (name, Some x2)
         else
           EApp (f2, x2)
       | _ -> EApp (f2, x2))
   | EFun (arg, ty_opt, body) -> EFun (arg, ty_opt, rewrite_constrs_expr body m)
   | ELet (pat, value, body) ->
-    ELet (pat, rewrite_constrs_expr value m, rewrite_constrs_expr body m)
+    ELet (rewrite_ctor_pattern pat m, rewrite_constrs_expr value m, rewrite_constrs_expr body m)
   | ELetRec (bindings, body) ->
     ELetRec (rewrite_constrs_bindings bindings m, rewrite_constrs_expr body m)
   | EIf (c, t, el) ->
@@ -1899,9 +1915,10 @@ and rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
   | EMatch (scrutinee, arms) ->
     EMatch (rewrite_constrs_expr scrutinee m, rewrite_constrs_arms arms m)
   | EConstr (name, payload_opt) ->
+    let target = resolved_constructor name m in
     (match payload_opt with
-      | None -> e
-      | Some p -> EConstr (name, Some (rewrite_constrs_expr p m)))
+      | None -> EConstr (target, None)
+      | Some p -> EConstr (target, Some (rewrite_constrs_expr p m)))
   | ETuple es -> ETuple (rewrite_constrs_exprs es m)
   | ERecordLit (name, fields) ->
     let fs2 = rewrite_constrs_fields fields m in
@@ -1912,9 +1929,9 @@ and rewrite_constrs_expr = fn (e: expr) -> fn (m: (str * int) list) ->
       let (fname, fv) = f in (fname, rewrite_constrs_expr fv m)) in
     ERecordUpdate (rewrite_constrs_expr base m, fs2);
 
-let rewrite_constrs_decl = fn (d: top_decl) -> fn (m: (str * int) list) ->
+let rewrite_constrs_decl = fn (d: top_decl) -> fn (m: ctor_refs) ->
   match d with
-  | TopLet (pat, e) -> TopLet (pat, rewrite_constrs_expr e m)
+  | TopLet (pat, e) -> TopLet (rewrite_ctor_pattern pat m, rewrite_constrs_expr e m)
   | TopLetRec bindings ->
     // Phase 54.23: use the explicit-recursion helper instead of
     // list_map + closure (see the note above rewrite_constrs_arms).
@@ -1930,10 +1947,24 @@ let rec rewrite_decls_with_mods = fn (ds: top_decl list) -> fn (mods: str list) 
   | Nil -> Nil
   | Cons (d, rest) -> Cons (rewrite_decl d mods, rewrite_decls_with_mods rest mods);
 
-let rec rewrite_constrs_decls = fn (ds: top_decl list) -> fn (m: (str * int) list) ->
-  match ds with
-  | Nil -> Nil
-  | Cons (d, rest) -> Cons (rewrite_constrs_decl d m, rewrite_constrs_decls rest m);
+// Resolve declarations in source order. Internal alias declarations disappear
+// here; none may reach inference, evaluation or emission.
+let rec rewrite_constrs_decls = fn ds -> fn refs -> match ds with
+  | Nil -> (Nil, refs)
+  | Cons (d, rest) ->
+    (match d with
+      | TopType (name, params, ctors) ->
+        let (ctors1, refs1) = resolve_variant_declarations name ctors refs in
+        let (rest1, refs2) = rewrite_constrs_decls rest refs1 in
+        (Cons (TopType (name, params, ctors1), rest1), refs2)
+      | TopCtorAlias (name, target) ->
+        (match lookup_ctor_ref target refs with
+          | None -> fail ("unresolved constructor alias: " ++ name)
+          | Some info -> rewrite_constrs_decls rest (Cons ((name, info), refs)))
+      | _ ->
+        let d1 = rewrite_constrs_decl d refs in
+        let (rest1, refs1) = rewrite_constrs_decls rest refs in
+        (Cons (d1, rest1), refs1));
 
 let flatten_and_resolve = fn (prog: program) ->
   let (decls, main) = prog in
@@ -1947,23 +1978,20 @@ let flatten_and_resolve = fn (prog: program) ->
   // that our typer's initial_type_env knows (Nil / Cons / None / Some
   // / Ok / Err). Without this seed, `Some 42` stays as
   // `EApp(EConstr("Some", None), 42)` — the typer then dispatches
-  // `EConstr(_, None)` to the fresh-meta permissive path and drops
-  // the payload's ty. With the seed, `Some 42` rewrites to
+  // `EConstr(_, None)` and refuses its missing payload. With the seed,
+  // `Some 42` rewrites to
   // `EConstr("Some", Some 42)` and typer unifies the payload against
   // 'a. User TopType decls (whose ctors collide) still take
-  // precedence because they're appended AFTER these built-ins and
-  // `lookup_arity` finds the last-added first.
+  // precedence because their references are prepended as they are declared.
   let builtin_arities =
-    Cons (("Nil", 0),
-    Cons (("None", 0),
-    Cons (("Cons", 1),
-    Cons (("Some", 1),
-    Cons (("Ok", 1),
-    Cons (("Err", 1),
-    Nil)))))) in
-  let arities = collect_arities_from_decls resolved_decls builtin_arities in
-  let decls2 = rewrite_constrs_decls resolved_decls arities in
-  let main2 = rewrite_constrs_expr resolved_main arities in
+    Cons (("Nil", ("Nil", 0)),
+    Cons (("None", ("None", 0)),
+    Cons (("Cons", ("Cons", 1)),
+    Cons (("Some", ("Some", 1)),
+    Cons (("Ok", ("Ok", 1)),
+    Cons (("Err", ("Err", 1)), Nil)))))) in
+  let (decls2, final_refs) = rewrite_constrs_decls resolved_decls builtin_arities in
+  let main2 = rewrite_constrs_expr resolved_main final_refs in
   ((decls2, main2) : program);
 
 let parse_str_program = fn (src: str) ->

@@ -226,6 +226,12 @@ else
   echo "behaviour: $agreed of $ran optimized module(s) answer what the interpreter does"
 fi
 
+# Use the exact HTML and optimized compiler from this build. A source-only
+# check would miss a browser that skips type checking or hides its diagnostics.
+if ! node "$ROOT/scripts/selfhost_browser_check.cjs" "$PG"; then
+  fails=$((fails + 1))
+fi
+
 echo
 if [ "$checked" -eq 0 ]; then
   echo "FAIL wasm_size_check: measured 0 files -- the build produced no .wasm"
