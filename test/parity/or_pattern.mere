@@ -113,3 +113,155 @@ let _ = print_int (vec_get rounds 2);
 let outer = fn x -> match (1, 2) with (x, y) | (y, x) when x + y < 0 -> 99 | _ -> x;
 let _ = print_int (outer 900);
 let _ = print_int (try_or (fn () -> match (1, 2) with (x, y) | (y, x) when fail "guard" -> x + y | _ -> 99) 55);
+
+// Prefix alternatives select the first match, then evaluate the user guard.
+let prefix_len = fn s -> match s with "a" <> r | "ab" <> r -> str_len r | _ -> 99;
+let _ = print_int (prefix_len "abc");
+let _ = print_int (prefix_len "ab");
+let _ = print_int (prefix_len "xyz");
+let mixed_prefix = fn s -> match s with "a" <> r | r -> str_len r;
+let _ = print_int (mixed_prefix "abc");
+let _ = print_int (mixed_prefix "xyz");
+let prefix_seen = vec_new ();
+let prefix_guard = fn s -> match s with
+  "a" <> r | "ab" <> r when (let _ = vec_push prefix_seen (str_len r) in str_len r == 1) -> 10
+  | _ -> 20;
+let _ = print_int (prefix_guard "abc");
+let _ = print_int (vec_len prefix_seen);
+let _ = print_int (vec_get prefix_seen 0);
+let _ = print_int (prefix_guard "ab");
+let _ = print_int (prefix_guard "xyz");
+let _ = print_int (vec_len prefix_seen);
+
+// Prefixes compose with tuples, records, constructors, lists and aliases.
+type TextRow = { text: str, tag: int };
+type TextValue = Text of str | NoText;
+let _ = print_int (match ("abc", 7) with ("a" <> r, n) -> str_len r + n | _ -> 99);
+let _ = print_int (match TextRow { text = "abc", tag = 7 } with
+  TextRow { tag = n, text = ("x" <> r | "ab" <> r) } -> str_len r + n | _ -> 99);
+let _ = print_int (match Text "abc" with Text ("a" <> r) -> str_len r | _ -> 99);
+let _ = print_int (match NoText with Text ("a" <> r) -> str_len r | _ -> 99);
+let _ = print_int (match ["ab", "abc"] with ["a" <> x, "ab" <> y] -> str_len x + str_len y | _ -> 99);
+let _ = print_int (match "abc" with ("a" <> r) as whole -> str_len r + str_len whole | _ -> 99);
+let _ = print_int (match "abc" with (("x" <> r | "a" <> r) as whole) -> str_len r + str_len whole | _ -> 99);
+
+// Prefix matching and suffixes use exact bytes, including UTF-8 and NUL.
+let _ = print_int (match "日本語" with "日本" <> r -> str_len r | _ -> 99);
+let _ = print_int (match "日本語" with "中国" <> r | "日本" <> r -> str_len r | _ -> 99);
+let _ = print_int (match "a\u0000b\u0000c" with "a\u0000" <> r -> str_len r | _ -> 99);
+let _ = print_int (match "a\u0000b\u0000c" with "a\u0000" <> r -> if r == "b\u0000c" then 1 else 0 | _ -> 99);
+let _ = print_int (match "abc" with "" <> r -> str_len r | _ -> 99);
+let _ = print_int (match "abc" with "a" <> _ -> 1 | _ -> 99);
+let _ = print_int (match "ab" with "abcd" <> r -> str_len r | _ -> 99);
+let _ = print_int (match "a\u0000c" with "a\u0000b" <> _ -> 1 | _ -> 99);
+
+// No generated source binding may capture an outer or a nested user name.
+let __pfx1 = "outer";
+let _ = print (match "ab" with "a" <> r -> __pfx1 ++ r | _ -> "miss");
+let hygiene = fn __pfx2 -> match "abc" with
+  "a" <> r when __pfx2 == "kept" ->
+    (match "xy" with "x" <> tail -> __pfx2 ++ r ++ tail | _ -> "inner miss")
+  | _ -> "outer miss";
+let _ = print (hygiene "kept");
+let _ = print (match "abc" with "a" <> __pfx1 -> __pfx1 | _ -> "miss");
+
+// Nested alternatives share bindings and preserve alias precedence.
+type Wrapped = Wrap of Value | Empty;
+let unwrap = fn v -> match v with Wrap (Left x | Right x | Third x) -> x | Empty -> 0;
+let _ = print_int (unwrap (Wrap (Right 7)));
+let _ = print_int (unwrap Empty);
+let _ = print_int (match ((0, 7), 8) with ((((x, 0) | (0, x)) as pair), n) -> x + fst pair + n | _ -> 99);
+let _ = print_int (match [Right 3, Left 4] with [(Left x | Right x), (Left y | Right y)] -> x * 10 + y | _ -> 99);
+let _ = print_int (match (Right 3, Left 4) with ((Left x | Right x), (Left y | Right y)) -> x * 10 + y | _ -> 99);
+let _ = print_int (match (Right 3, Third 4) with ((Left x | Right x), (Left y | Right y)) -> x * 10 + y | _ -> 99);
+let _ = print_int (match 2 with (1 | 2) -> 7 | _ -> 99);
+let ((let_or, _) | (_, let_or)) = (8, 9);
+let _ = print_int let_or;
+let ((let_nested | let_nested), let_rest) = (6, 7);
+let _ = print_int (let_nested + let_rest);
+
+// A nested decision never retries a matching alternative after a false guard.
+let nested_seen = vec_new ();
+let nested_guard = fn pair -> match (0, pair) with
+  (0, ((x, y) | (y, x))) when (let _ = vec_push nested_seen x in x > y) -> 99
+  | _ -> 77;
+let _ = print_int (nested_guard (1, 2));
+let _ = print_int (nested_guard (3, 2));
+let _ = print_int (vec_len nested_seen);
+let _ = print_int (vec_get nested_seen 0);
+let _ = print_int (vec_get nested_seen 1);
+let _ = print_int (try_or (fn () -> match (0, (1, 2)) with
+  (0, ((x, y) | (y, x))) when fail "nested guard" -> x + y | _ -> 99) 55);
+
+// Repeated bindings retain the last visible occurrence and its type.
+let _ = print_int (match (1, 2) with (x, x) -> x);
+let _ = print_int (match (1, "ab") with (x, x) -> str_len x);
+let (repeat, repeat) = (4, 5);
+let _ = print_int repeat;
+let ((repeat_nested, repeat_nested), repeat_nested) = ((1, 2), 3);
+let _ = print_int repeat_nested;
+let _ = print_int (match (1, 2) with (x, y) as x -> x);
+let _ = print_int (match TextRow { text = "ab", tag = 7 } with TextRow { tag = x, text = x } -> str_len x);
+let _ = print_int (match (1, 2) with (x, x) | (x, _) -> x);
+let repeated_capture = match (1, 2) with (x, x) -> fn () -> x;
+let _ = print_int (repeated_capture ());
+let _ = print_int (match (2, 3) with ((1 as x), x) -> x | _ -> 99);
+let _ = print_int (match (1, 3) with ((1 as x), x) -> x | _ -> 99);
+
+// Selections survive escaping closures, regions, loops and call arguments.
+let prefix_capture = fn s -> match s with "x" <> r | "a" <> r -> fn () -> str_len r | _ -> fn () -> 99;
+let captured_suffix = prefix_capture "abc";
+let _ = print_int (captured_suffix ());
+let _ = print_int (str_len (region Scratch { match "abc" with "a" <> r -> r | _ -> "miss" }));
+let nested_capture = fn v -> match v with Wrap (Left x | Right x | Third x) -> fn n -> x + n | Empty -> fn n -> n;
+let nested_closure = nested_capture (Wrap (Right 40));
+let _ = print_int (nested_closure 2);
+let rec nested_calls = fn n -> fn acc -> if n == 0 then acc else
+  nested_calls (n - 1) (acc + (match ((n, 1), 7) with (((x, 0) | (x, 1)), z) -> x + z | _ -> 0));
+let _ = print_int (nested_calls 300 0);
+let rec prefix_calls = fn n -> fn acc -> if n == 0 then acc else
+  prefix_calls (n - 1) (acc + (match ("abc", n) with (("x" <> r | "a" <> r), x) -> str_len r + x | _ -> 0));
+let _ = print_int (prefix_calls 300 0);
+let position = vec_new ();
+let _ = vec_push position 0;
+let _ = while vec_get position 0 < 3 do
+  let n = vec_get position 0 in
+  let answer = match (n, Right n) with (x, (Left y | Right y)) when x == y -> y | _ -> 99 in
+  let _ = print_int answer in vec_set position 0 (n + 1);
+let subject_calls = vec_new ();
+let subject = fn () -> let _ = vec_push subject_calls 1 in Wrap (Right 9);
+let _ = print_int (match subject () with Wrap (Left x | Right x | Third x) -> x | Empty -> 0);
+let _ = print_int (vec_len subject_calls);
+
+// Global pattern bindings retain source order, evaluate once and preserve shadows.
+let ((pattern_global, _) | (_, pattern_global)) = (7, 8);
+let pattern_first = fn () -> pattern_global;
+let ((pattern_global, _) | (_, pattern_global)) = (9, 10);
+let pattern_second = fn () -> pattern_global;
+let _ = print_int (pattern_first ());
+let _ = print_int (pattern_second ());
+let __pattern_result1 = 900;
+let global_subject_calls = vec_new ();
+let global_subject = fn () -> let _ = vec_push global_subject_calls 1 in
+  TextRow { text = "ab", tag = 7 };
+let TextRow { text = global_text, tag = global_tag } = global_subject ();
+let pattern_read = fn () -> str_len global_text + global_tag;
+let _ = print_int (pattern_read ());
+let _ = print_int (vec_len global_subject_calls);
+let _ = print_int __pattern_result1;
+let local_pattern_shadow = fn pair -> let ((pattern_global, _) | (_, pattern_global)) = pair in pattern_global;
+let _ = print_int (local_pattern_shadow (3, 4));
+let _ = print_int (pattern_second ());
+// Shared homes preserve non-integer values and instantiated record fields.
+type FloatValue = FloatLeft of float | FloatRight of float;
+type FloatWrap = FloatWrap of FloatValue;
+let _ = print (str_of_float (match FloatWrap (FloatRight 2.5) with FloatWrap (FloatLeft x | FloatRight x) -> x));
+type FnValue = FnLeft of (int -> int) | FnRight of (int -> int);
+let _ = print_int (match FnRight (fn n -> n + 40) with (FnLeft f | FnRight f) -> f 2);
+type 'a PolyRow = { value: 'a, tag: int };
+let poly_select = fn row -> match row with
+  PolyRow { value = x, tag = (0 | 1) } -> fn () -> str_len x | _ -> fn () -> 99;
+let poly_selected = poly_select (PolyRow { value = "ab", tag = 1 });
+let _ = print_int (poly_selected ());
+let _ = print_int (match ("a" ++ chr 128 ++ "z") with "a" <> r -> str_len r | _ -> 99);
+let _ = print_int (match ("a" ++ chr 128 ++ "z") with "a" <> r -> if char_at r 0 == chr 128 then 1 else 0 | _ -> 99);

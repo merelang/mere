@@ -4416,11 +4416,8 @@ and check_pattern (p : Ast.pattern) (expected : Ast.ty) : (string * Ast.ty) list
   | Ast.P_int _ -> unify p.ploc expected Ast.TyInt; []
   | Ast.P_bool _ -> unify p.ploc expected Ast.TyBool; []
   | Ast.P_str _ -> unify p.ploc expected Ast.TyStr; []
-  (* Reached only if the desugar did not run: it rewrites every prefix arm
-     before inference, so seeing one here is a pass having been skipped rather
-     than a program to type. Typed anyway, as what it is — the scrutinee is a
-     `str` and the binder is the rest of it — so the answer is right even on
-     the path that forgot. *)
+  (* Prefixes remain part of pattern selection, including under alternatives
+     and aggregates. Their binders have the string suffix's type. *)
   | Ast.P_str_prefix (_, name) ->
     unify p.ploc expected Ast.TyStr;
     if name = "_" then [] else [ (name, Ast.TyStr) ]

@@ -1188,7 +1188,8 @@ let pattern_vars_with_types (p : Ast.pattern) (scrut_ty : Ast.ty)
   let rec go p t =
     match p.Ast.pnode with
     | Ast.P_var n -> [(n, Ast.walk t)]
-    | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_str_prefix _ | Ast.P_unit -> []
+    | Ast.P_wild | Ast.P_int _ | Ast.P_bool _ | Ast.P_str _ | Ast.P_unit -> []
+    | Ast.P_str_prefix (_, n) -> if n = "_" then [] else [n, Ast.TyStr]
     | Ast.P_as (inner, n) -> (n, Ast.walk t) :: go inner t
     | Ast.P_or (a, _) -> go a t
     | Ast.P_tuple ps ->
@@ -1207,11 +1208,7 @@ let pattern_vars_with_types (p : Ast.pattern) (scrut_ty : Ast.ty)
        | Some pt -> go sub pt
        | None -> [])
     | Ast.P_record (_, fs) ->
-      (* Record field type lookup does not go through payload_ty_for_ctor, so
-         skip it. The minimum closure-capture fix doesn't need a precise
-         per-field type (the field value itself suffices), so conservatively
-         reuse scrut_ty. *)
-      List.concat_map (fun (_, sub) -> go sub t) fs
+      List.concat_map (fun (name, sub) -> go sub (field_ty t name)) fs
   in
   go p scrut_ty
 
@@ -4939,25 +4936,7 @@ let rec emit_expr (e : Ast.expr) : string =
       | Some t -> Ast.walk t
       | None -> Ast.TyInt
     in
-    (* Keep guard failure attached to the original arm. Once a pattern
-       matched, later alternatives must not run its guard again. *)
-    let rec expand_or pat =
-      match pat.Ast.pnode with
-      | Ast.P_or (a, b) -> expand_or a @ expand_or b
-      | _ -> [pat]
-    in
-    let selected_decls = ref [] in
-    let arms = List.concat_map (fun (pat, guard, body) ->
-      let alternatives = expand_or pat in
-      let selected = match guard, alternatives with
-        | Some _, _ :: _ :: _ ->
-          let name = fresh_bin_tmp () in
-          selected_decls := ("int " ^ name ^ " = 0; ") :: !selected_decls;
-          Some name
-        | _ -> None
-      in
-      List.map (fun pat -> pat, guard, body, selected) alternatives
-    ) arms in
+    let pattern_decls = ref [] in
     (* Phase 22.5 fix: non-exhaustive fallthrough — emit a value of the
        MATCH result type, not always `0` (int). Otherwise tuple/record
        returning matches break with "incompatible operand types".
@@ -4999,8 +4978,8 @@ let rec emit_expr (e : Ast.expr) : string =
        the guard (if any) and the body. *)
     let rec emit_arms = function
       | [] -> fallthrough_default
-      | (pat, guard, body, selected) :: rest ->
-        let (test, bindings) = compile_pattern pat "__scrut" scrut_ty in
+      | (pat, guard, body) :: rest ->
+        let (test, bindings) = compile_pattern pattern_decls pat "__scrut" scrut_ty in
         let next = emit_arms rest in
         (* Phase 28.1 (DEFERRED §1.9 fix): add pattern-bound names to
            current_var_types so nested closures emitted within the arm
@@ -5030,17 +5009,14 @@ let rec emit_expr (e : Ast.expr) : string =
           | None -> test
           | Some g ->
             let guard_c = with_pat (fun () -> emit_expr g) in
-            let test, mark = match selected with
-              | None -> test, ""
-              | Some name -> "!" ^ name ^ " && (" ^ test ^ ")", name ^ " = 1; "
-            in
-            Printf.sprintf "(%s) && ({ %s%s(%s); })" test mark bindings guard_c
+            Printf.sprintf "(%s) && ({ %s(%s); })" test bindings guard_c
         in
         Printf.sprintf "(%s) ? ({ %s%s; }) : (%s)" test bindings body_c next
     in
+    let arms_c = emit_arms arms in
     Printf.sprintf
       "({ __auto_type __scrut = %s; %s%s; })"
-      scrut_c (String.concat "" (List.rev !selected_decls)) (emit_arms arms)
+      scrut_c (String.concat "" (List.rev !pattern_decls)) arms_c
   | Ast.Tuple es ->
     (* Construction via C99 compound literal. Use the typer's recorded
        type to pick the right struct name. *)
@@ -5314,16 +5290,16 @@ let rec emit_expr (e : Ast.expr) : string =
    a (test, bindings) pair: a boolean C expression that's true iff the
    pattern matches, and a sequence of __auto_type binding statements
    for the names introduced by the pattern. *)
-and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
+and compile_pattern decls (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
     : string * string =
   match pat.Ast.pnode with
-  (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not run
-     on this path: it is rewritten into a guarded binding before inference, so
-     nothing below the typer should ever see one. Named rather than ignored --
-     a silent fallthrough here would compile a match that tests nothing. *)
-  | Ast.P_str_prefix _ ->
-    raise (Codegen_error (pat.Ast.ploc,
-      "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
+  | Ast.P_str_prefix (lit, name) ->
+    let test = Printf.sprintf "__lang_str_starts_with((%s), (__sl_%d.s))"
+        v_c (str_literal_id lit) in
+    let bindings = if name = "_" then "" else
+      Printf.sprintf "__auto_type %s = __lang_substring((%s), %d, __lang_str_size(%s)); "
+        (c_safe_name name) v_c (String.length lit) v_c in
+    (test, bindings)
   | Ast.P_wild -> ("1", "")
   | Ast.P_var n ->
     (* v0.1.56: bind under c_safe_name so the declaration matches the
@@ -5365,7 +5341,7 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
        let sub_v =
          if is_ptr then Printf.sprintf "%s__node(%s)->payload.%s" cty v_c cname
          else Printf.sprintf "(%s).payload.%s" v_c cname in
-       let (sub_test, sub_bind) = compile_pattern sub sub_v payload_ty in
+       let (sub_test, sub_bind) = compile_pattern decls sub sub_v payload_ty in
        let combined_test =
          if sub_test = "1" then tag_test
          else Printf.sprintf "((%s) && (%s))" tag_test sub_test
@@ -5381,7 +5357,7 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
       List.mapi (fun i p ->
         let sub_v = Printf.sprintf "(%s).f%d" v_c i in
         let sub_ty = try List.nth elem_tys i with _ -> Ast.TyInt in
-        compile_pattern p sub_v sub_ty) ps
+        compile_pattern decls p sub_v sub_ty) ps
     in
     let tests = List.map fst parts in
     let binds = List.map snd parts in
@@ -5396,7 +5372,7 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
       List.map (fun (fname, p) ->
         let sub_v = Printf.sprintf "(%s).%s" v_c (c_field_name fname) in
         let sub_ty = field_ty v_ty fname in
-        compile_pattern p sub_v sub_ty) fps
+        compile_pattern decls p sub_v sub_ty) fps
     in
     let tests = List.map fst parts in
     let binds = List.map snd parts in
@@ -5407,15 +5383,27 @@ and compile_pattern (pat : Ast.pattern) (v_c : string) (v_ty : Ast.ty)
     in
     (combined_test, String.concat "" binds)
   | Ast.P_as (inner, n) ->
-    let (test, bind) = compile_pattern inner v_c v_ty in
+    let (test, bind) = compile_pattern decls inner v_c v_ty in
     let as_bind = Printf.sprintf "__auto_type %s = %s; " (c_safe_name n) v_c in
     (test, bind ^ as_bind)
-  | Ast.P_or _ ->
-    (* Or-patterns are flattened to multiple arms BEFORE compile_pattern
-       is called by the Match emitter, so encountering one here means
-       it's nested inside another pattern — not yet supported. *)
-    unsupported pat.Ast.ploc
-      "or-pattern nested inside a constructor / tuple / record"
+  | Ast.P_or (a, b) ->
+    (* Select an alternative once, parking its bindings outside the tests.
+       The arm's guard and body are emitted once, after this decision. *)
+    let homes = List.map (fun (name, ty) ->
+      let home = fresh_bin_tmp () in
+      decls := (Printf.sprintf "%s %s; " (!c_type_of_fwd ty) home) :: !decls;
+      name, home) (pattern_vars_with_types a v_ty) in
+    let branch p =
+      let test, bindings = compile_pattern decls p v_c v_ty in
+      let stores = String.concat "" (List.map (fun (name, home) ->
+        Printf.sprintf "%s = %s; " home (c_safe_name name)) homes) in
+      Printf.sprintf "(%s) && ({ %s%s1; })" test bindings stores
+    in
+    let left = branch a in
+    let right = branch b in
+    let bindings = String.concat "" (List.map (fun (name, home) ->
+      Printf.sprintf "__auto_type %s = %s; " (c_safe_name name) home) homes) in
+    (Printf.sprintf "((%s) || (%s))" left right, bindings)
 
 type fn_decl = Monomorph.fn_decl = {
   name      : string;
@@ -16151,6 +16139,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     List.iter (fun v -> Hashtbl.replace fvs_used_in_skels v ()) (free_vars s.sbody [s.sparam]))
     skels;
   let needs_global name = Hashtbl.mem fvs_used_in_skels name in
+  let body_expr = Monomorph.lower_top_pattern_globals
+      ~needed:needs_global ~reserved:main_expr body_expr in
   (* Phase 36 (DEFERRED §1.18 fix): keep the Let bindings in body_expr
      so global init happens at the SOURCE-ORDER position (interleaved
      with side-effecting code in main_body), not pre-emitted upfront
@@ -16305,7 +16295,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   (* Tuple shape collection: walk the (now typer-annotated) AST plus the
      resolved fn signatures. *)
   let tuple_shapes =
-    let from_expr = collect_tuple_shapes main_expr in
+    let from_expr = collect_tuple_shapes main_expr @ collect_tuple_shapes body_expr in
     let from_fns = List.concat_map (fun f ->
       collect_tuple_shapes
         Ast.{ loc = Loc.dummy; ty = Some f.return_ty; node = Var "" }

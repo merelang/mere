@@ -480,6 +480,13 @@ compatible types. The first matching alternative supplies the bindings; a
 failed guard advances to the next arm. Nested aggregate patterns and aliases
 use the same bindings, including values captured by an escaping closure.
 
+Parenthesized alternatives can also appear inside other patterns, on all
+backends: `Box (A x | B x)`, `((A x | B x), n)` and
+`Row { value = (A x | B x) }`. Parenthesize an alternative before applying an
+alias to the whole choice: `(A x | B x) as whole`. Each choice selects its first
+matching alternative before the arm's guard runs; a false guard does not retry
+any choice in that arm.
+
 ### Block / side-effect sequencing
 ```
 { }                                 // → unit
@@ -522,22 +529,19 @@ match url with
 ```
 
 The scrutinee starts with the literal, and what is left is bound (`_` discards
-it). The literal's length is counted in **code points**, not bytes: `"ét" <>
-rest` on `"été"` binds `"é"`, where the prefix is two characters and three
-bytes.
+it). The test compares the literal's exact bytes and the suffix starts after
+those bytes. This preserves UTF-8 text: `"ét" <> rest` on `"été"` binds `"é"`.
+Embedded NUL and non-UTF-8 bytes follow the same rule.
 
-Lowered before inference into the guard and the slice the same code was writing
-by hand — `str_starts_with`, then `utf8_sub` — so no backend knows the syntax
-exists. Two consequences worth knowing:
+Prefix patterns work inside tuples, records, constructors, lists, aliases and
+or-patterns on all backends. For example, `"https://" <> rest | "http://" <> rest`
+selects the first matching prefix and binds its suffix. Prefix selection is
+separate from the user's guard, which may read the binder. If that guard is
+false, matching advances to the next source arm.
 
-- **A prefix arm does not make a match total.** It is a guarded arm, and a
-  guarded arm closes nothing, so a `match` on `str` still wants a catch-all.
-- **A guard may name the binder**: `| "ab" <> r when str_len r > 1 ->` works,
-  because the binding is made for the guard as well as for the body.
-
-⚠ `utf8_sub` walks the string. That is right for parsing and wrong for a hot
-loop; a byte-indexed slice would be a builtin on five backends, and waits for
-something measured to ask for it.
+A prefix alone does not close the string domain for exhaustiveness checking;
+include a catch-all when needed. The subject is evaluated once, and prefix
+matching introduces no source-level temporary name.
 
 
 | Kind | Syntax | Example |
@@ -554,6 +558,15 @@ something measured to ask for it.
 | Record | `Name { f1 = p1, f2 = p2 }` | `Point { x = 0, y = py }`; partial OK |
 | as | `pat as name` | `Cons (h, t) as whole` |
 | or | `p1 | p2` | `1 | 2 | 3`; both branches bind the same names + types |
+
+If one pattern binds a name more than once, the last occurrence in traversal
+order is visible, with its own type. For example, `(x, x)` on `(1, "ab")` binds
+`x` to `"ab"`; it does not test equality. Record fields follow the pattern's
+written order. An alias is bound before its inner pattern, so `(x, y) as x`
+leaves the inner `x` visible. Earlier occurrences retain their pattern tests.
+Alternatives have separate binding scopes and must offer the same names.
+Top-level pattern bindings can be referenced by subsequent functions, with
+the same source-order initialization and shadowing as ordinary named lets.
 
 ### Guards (in match)
 ```

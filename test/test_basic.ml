@@ -1550,6 +1550,52 @@ let () =
       "match x with | 1 | 2 -> 10 | _ -> 0"))
     "(match x with | (1 | 2) -> 10 | _ -> 0)";
 
+  check "parenthesized or-pattern"
+    (Pipeline.process "match 2 with (1 | 2) -> 7 | _ -> 9") "7";
+  check "nested or-pattern covers a finite constructor payload"
+    (Pipeline.process
+      "type T = A of int | B of int; type Box = Box of T;
+       match Box (B 7) with Box (A x | B x) -> x") "7";
+  check_raises "nested or-pattern refuses different binding names"
+    (fun () -> Pipeline.process
+      "type T = A of int | B of int;
+       match (B 7, 0) with ((A x | B y), n) -> n");
+  check_raises "nested or-pattern refuses incompatible visible types"
+    (fun () -> Pipeline.process
+      "type T = A of int | B of str; type Box = Box of T;
+       match Box (A 7) with Box (A x | B x) -> x");
+  check_raises "a hidden outer binding does not excuse different alternative names"
+    (fun () -> Pipeline.process
+      "type T = A of int | B of int;
+       match (A 1, 2, 3) with ((A x | B y), x, y) -> x + y");
+  check_raises "nested or-pattern retains finite missing-case errors"
+    (fun () -> Pipeline.process
+      "type T = A | B | C; type Box = Box of T;
+       match Box A with Box (A | B) -> 1");
+  check_raises "a finite refutable or-pattern let remains an error"
+    (fun () -> Pipeline.process "type T = A | B | C; let (A | B) = A in 7");
+  check "duplicate pattern names retain the last binding's type"
+    (Pipeline.process "match (1, \"ab\") with (x, x) -> str_len x") "2";
+  check "an alias precedes the inner pattern's bindings"
+    (Pipeline.process "match (1, 2) with (x, y) as x -> x") "1";
+  check "an or-pattern compares sets of visible names"
+    (Pipeline.process "match (1, 2) with (x, x) | (x, _) -> x") "2";
+  check "prefix alternatives select before the user guard"
+    (Pipeline.process
+      "match \"abc\" with \"a\" <> r | \"ab\" <> r when str_len r == 1 -> 7 | _ -> 9") "9";
+  check "prefix patterns preserve outer generated-looking names"
+    (Pipeline.process
+      "let __pfx1 = \"outer\" in match \"ab\" with \"a\" <> r -> __pfx1 ++ r | _ -> \"miss\"")
+    "\"outerb\"";
+  check "formatter preserves nested choices, aliases and or-pattern lets"
+    (let source = "type T = A of int | B of int; type R = { v: T };\n\
+       let ((a, _) | (_, a)) = (7, 8);\n\
+       let f = fn r -> let ((b, _) | (_, b)) = (1, 2) in match (r, 3) with (R { v = ((A x | B x) as whole) }, n) -> x + n + b;\n\
+       f (R { v = B 7 }) + a" in
+     let formatted = Pipeline.format_source source in
+     Pipeline.process formatted ^ ":" ^ string_of_bool (Pipeline.format_source formatted = formatted))
+    "18:true";
+
   (* --- polymorphic `fst` / `snd` for 2-tuples --- *)
   check "fst int/str"
     (Pipeline.process "fst (42, \"hi\")") "42";
@@ -2556,10 +2602,7 @@ let () =
     (Pipeline.process
        "module Store { let secret = fn (n: int) -> n * 7; pub let twice = fn (n: int) -> secret n + secret n; }\nStore.twice 1")
     "14";
-  (* v0.1.504: `"lit" <> rest`. The node exists only as far as the desugar,
-     which rewrites the arm into a guard and a binding over `str_starts_with`
-     and `utf8_sub` — the two calls every program doing this by hand already
-     makes. No backend knows the syntax exists. *)
+  (* Prefix tests and suffix bindings compose with the other patterns. *)
   check "v0.1.504: a prefix pattern binds the rest"
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> r -> r | _ -> \"no\" in f \"abcd\"")
@@ -2572,9 +2615,8 @@ let () =
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"ab\" <> _ -> \"yes\" | _ -> \"no\" in f \"abcd\"")
     "\"yes\"";
-  (* The literal is counted in CODE POINTS, because the slice is. Two
-     characters here and six bytes. *)
-  check "v0.1.504: a multibyte prefix slices by codepoint"
+  (* The suffix starts after the complete literal: two code points/six bytes. *)
+  check "v0.1.504: a multibyte prefix preserves the suffix"
     (Pipeline.process
        "let f = fn (s: str) -> match s with | \"\230\151\165\230\156\172\" <> r -> r | _ -> \"no\" in f \"\230\151\165\230\156\172\232\170\158\"")
     "\"\232\170\158\"";
@@ -4673,16 +4715,16 @@ let () =
     "__auto_type mu_all = __scrut";
 
   (* --- C codegen: or-pattern + match guard (Phase 4.15) --- *)
-  assert_c "codegen: or-pattern flattens into two arms"
+  assert_c "codegen: or-pattern tests both alternatives"
     (codegen_with_decls
       "type CgOr1 = OA | OB | OC;\n\
        match OB with | OA | OB -> 1 | OC -> 2")
     ".tag == 0";  (* both alternatives emit their own tag test *)
-  assert_c "codegen: or-pattern result correct via duplicated body"
+  assert_c "codegen: or-pattern shares its result body"
     (codegen_with_decls
       "type CgOr2 = OD | OE;\n\
        match OE with | OD | OE -> 99")
-    "{ 99LL; }";  (* body 99 duplicated for both alternatives *)
+    "{ 99LL; }";
   assert_c "codegen: guard emitted in bindings scope"
     (codegen "match 7 with | n when n < 5 -> 100 | _ -> 200")
     "n < 5";
@@ -5726,7 +5768,7 @@ let () =
       "type 'a LCgOpt5 = LCgN5 | LCgS5 of 'a;\n\
        match LCgS5 (LCgS5 7) with | LCgN5 -> 0 | LCgS5 LCgN5 -> 1 | LCgS5 (LCgS5 n) -> n")
     "and i1 ";
-  assert_llvm "llvm: or-pattern flattens to multiple arms"
+  assert_llvm "llvm: or-pattern selects before its arm"
     (llvm_with_decls
       "type LCgCol7 = LCg7A | LCg7B | LCg7C;\n\
        match LCg7B with | LCg7A | LCg7B -> 1 | LCg7C -> 2")
@@ -6317,7 +6359,7 @@ let () =
          | WCgS7 WCgN7 -> 1\n\
          | WCgS7 (WCgS7 n) -> n")
     "i64.eq";
-  assert_wasm "wasm: or-pattern flattens to multiple arms"
+  assert_wasm "wasm: or-pattern selects before its arm"
     (wasm_with_decls
       "type WCgCol9 = WCg9A | WCg9B | WCg9C;\n\
        match WCg9B with | WCg9A | WCg9B -> 1 | WCg9C -> 2")
@@ -17264,6 +17306,25 @@ let () =
      rather than a call, so the boundary must not wrap it. *)
   check "Q-164: a group holding a non-function still works"
     (Pipeline.process "let rec x = 1\nand f = fn (n: int) -> n + x;\nf 2") "3";
+
+  (* Independent nested choices must not expand into their Cartesian product.
+     Compare increments so the fixed runtime cannot hide exponential growth. *)
+  List.iter (fun (backend, emit) ->
+    let size n =
+      let tuple item = "(" ^ String.concat ", " (List.init n (fun _ -> item)) ^ ")" in
+      let source = "let f = fn v -> match v with " ^ tuple "(0 | 1)" ^
+        " -> 1234567 | _ -> 0; print_int (f " ^ tuple "1" ^ ")" in
+      let prog, main_ty = Pipeline.infer_program source in
+      String.length (emit main_ty prog)
+    in
+    let six = size 6 in
+    let twelve = size 12 in
+    let eighteen = size 18 in
+    check (backend ^ ": independent or-pattern output grows linearly")
+      (string_of_bool (eighteen - twelve <= 2 * (twelve - six) + 2048)) "true"
+  ) ["C", (fun main_ty prog -> Codegen_c.emit_program ~main_ty prog);
+     "LLVM", (fun main_ty prog -> Codegen_llvm.emit_program ~main_ty prog);
+     "Wasm", (fun main_ty prog -> Codegen_wasm.emit_program ~main_ty prog)];
 
   Printf.printf "\n%d passed, %d failed\n" !pass !fail;
   if !fail > 0 then exit 1

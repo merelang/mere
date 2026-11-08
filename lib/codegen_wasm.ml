@@ -525,6 +525,7 @@ let pattern_vars (p : Ast.pattern) : string list =
   let rec go p =
     match p.Ast.pnode with
     | Ast.P_var n -> [n]
+    | Ast.P_str_prefix (_, n) -> if n = "_" then [] else [n]
     | Ast.P_constr (_, Some sub) -> go sub
     | Ast.P_tuple ps -> List.concat_map go ps
     | Ast.P_record (_, fs) -> List.concat_map (fun (_, p) -> go p) fs
@@ -2162,7 +2163,7 @@ and emit_float_f64 (e : Ast.expr) : unit =
     emit_instr "i32.wrap_i64";
     emit_instr "f64.load offset=0 align=8"
 
-and emit_expr (e : Ast.expr) : unit =
+and emit_expr ?(let_body_top = false) (e : Ast.expr) : unit =
   (* Snapshot inbound tail-position + top-level-body flags. All
      descendant emit_expr calls default back to non-tail / non-top;
      tail-preserving nodes (If branches, Let body, Match arm bodies)
@@ -2749,7 +2750,8 @@ and emit_expr (e : Ast.expr) : unit =
           top-level flags so the synthesized match arm keeps tail position. *)
        wasm_tail_pos := saved_tail;
        wasm_in_top_level_body := saved_top;
-       emit_expr { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
+       emit_expr ~let_body_top:saved_top
+         { e with Ast.node = Ast.Match (value, [(pat, None, body)]) })
   | Ast.Let_rec (bindings, body) ->
     (* Phase 26.3: inner let-rec lifting. If all bindings are registered
        in inner_lifts_wasm (= lifted to top level), just emit body. *)
@@ -4695,13 +4697,27 @@ and emit_expr (e : Ast.expr) : unit =
     let rec compile_pat (pat : Ast.pattern) (v_slot : int) (v_ty : Ast.ty)
       : int * (string * int) list =
       match pat.Ast.pnode with
-      (* A prefix pattern reaching a backend means `Pipeline`'s desugar did not run
-         on this path: it is rewritten into a guarded binding before inference, so
-         nothing below the typer should ever see one. Named rather than ignored --
-         a silent fallthrough here would compile a match that tests nothing. *)
-      | Ast.P_str_prefix _ ->
-        raise (Codegen_error (pat.Ast.ploc,
-          "internal: a `\"lit\" <> rest` pattern reached codegen (the prefix desugar did not run)"))
+      | Ast.P_str_prefix (lit, name) ->
+        let cond = fresh_local_i32 () in
+        emit_instr (Printf.sprintf "local.get %d" v_slot);
+        emit_instr (Printf.sprintf "i64.const %d" (fresh_str_offset lit));
+        emit_instr "call $__lang_str_starts_with";
+        emit_instr "i32.wrap_i64";
+        emit_instr (Printf.sprintf "local.set %d" cond);
+        if name = "_" then cond, [] else begin
+          substring_used := true;
+          let rest = fresh_local () in
+          emit_instr (Printf.sprintf "local.get %d" cond);
+          emit_instr "if";
+          emit_instr (Printf.sprintf "local.get %d" v_slot);
+          emit_instr (Printf.sprintf "i64.const %d" (String.length lit));
+          emit_instr (Printf.sprintf "local.get %d" v_slot);
+          emit_instr "call $__lang_strlen";
+          emit_instr "call $__lang_substring";
+          emit_instr (Printf.sprintf "local.set %d" rest);
+          emit_instr "end";
+          cond, [name, rest]
+        end
       | Ast.P_wild -> (true_cond (), [])
       | Ast.P_var n -> (true_cond (), [(n, v_slot)])
       | Ast.P_unit -> (true_cond (), [])
@@ -4849,28 +4865,28 @@ and emit_expr (e : Ast.expr) : unit =
            unsupported pat.Ast.ploc
              ("pattern has payload but constructor `" ^ cname ^
               "` has no payload type"))
-      | Ast.P_or _ ->
-        unsupported pat.Ast.ploc "P_or should have been flattened"
+      | Ast.P_or (a, b) ->
+        let ca, ba = compile_pat a v_slot v_ty in
+        let homes = List.map (fun (name, _) -> name, fresh_local ()) ba in
+        let store bs = List.iter (fun (name, home) ->
+          emit_instr (Printf.sprintf "local.get %d" (List.assoc name bs));
+          emit_instr (Printf.sprintf "local.set %d" home)) homes in
+        let result = fresh_local_i32 () in
+        emit_instr (Printf.sprintf "local.get %d" ca);
+        emit_instr "if (result i32)";
+        store ba;
+        emit_instr "i32.const 1";
+        emit_instr "else";
+        let cb, bb = compile_pat b v_slot v_ty in
+        emit_instr (Printf.sprintf "local.get %d" cb);
+        emit_instr "if";
+        store bb;
+        emit_instr "end";
+        emit_instr (Printf.sprintf "local.get %d" cb);
+        emit_instr "end";
+        emit_instr (Printf.sprintf "local.set %d" result);
+        result, homes
     in
-    (* Guarded alternatives share a selection flag. Initialize it on each
-       evaluation of the match, including repeated evaluations in a loop. *)
-    let rec expand_or pat =
-      match pat.Ast.pnode with
-      | Ast.P_or (a, b) -> expand_or a @ expand_or b
-      | _ -> [pat]
-    in
-    let arms = List.concat_map (fun (pat, guard, body) ->
-      let alternatives = expand_or pat in
-      let selected = match guard, alternatives with
-        | Some _, _ :: _ :: _ ->
-          let slot = fresh_local_i32 () in
-          emit_instr "i32.const 0";
-          emit_instr (Printf.sprintf "local.set %d" slot);
-          Some slot
-        | _ -> None
-      in
-      List.map (fun pat -> pat, guard, body, selected) alternatives
-    ) arms in
     let rec emit_arms = function
       | [] ->
         (* v0.1.470: the named, catchable failure — not a bare `unreachable`.
@@ -4888,19 +4904,8 @@ and emit_expr (e : Ast.expr) : unit =
         emit_instr (Printf.sprintf "i64.const %d"
                       (intern_show_str "no matching arm in match"));
         emit_instr "call $__lang_fail"
-      | (pat, guard, body, selected) :: rest ->
+      | (pat, guard, body) :: rest ->
         let (cond_slot, bindings) = compile_pat pat scrut_slot scrut_ty in
-        let cond_slot = match selected with
-          | None -> cond_slot
-          | Some slot ->
-            let eligible = fresh_local_i32 () in
-            emit_instr (Printf.sprintf "local.get %d" cond_slot);
-            emit_instr (Printf.sprintf "local.get %d" slot);
-            emit_instr "i32.eqz";
-            emit_instr "i32.and";
-            emit_instr (Printf.sprintf "local.set %d" eligible);
-            eligible
-        in
         (* Guard: evaluate within arm-bindings scope, AND with cond. If
            cond is false, short-circuit (don't even evaluate guard). *)
         let final_cond =
@@ -4910,11 +4915,6 @@ and emit_expr (e : Ast.expr) : unit =
             let g_slot = fresh_local_i32 () in
             emit_instr (Printf.sprintf "local.get %d" cond_slot);
             emit_instr "if (result i32)";
-            (match selected with
-             | Some slot ->
-               emit_instr "i32.const 1";
-               emit_instr (Printf.sprintf "local.set %d" slot)
-             | None -> ());
             let prev = !locals in
             locals := bindings @ prev;
             (* v0.1.699: a guard is never in tail position. The arm before
@@ -4936,6 +4936,7 @@ and emit_expr (e : Ast.expr) : unit =
         let prev = !locals in
         locals := bindings @ prev;
         wasm_tail_pos := saved_tail;
+        wasm_in_top_level_body := let_body_top;
         emit_expr body;
         locals := prev;
         emit_instr "else";
@@ -11767,6 +11768,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
       [] skels
   in
   let needs_global_wasm name = List.mem name fvs_used_in_skels_wasm in
+  let body_expr = Monomorph.lower_top_pattern_globals
+      ~needed:needs_global_wasm ~reserved:main_expr body_expr in
   (* Phase 36 (DEFERRED §1.18 fix): keep Let bindings in body so global
      init happens at source-order position. emit_expr Let emits
      `global.set $name` for top_globals_wasm names. *)
