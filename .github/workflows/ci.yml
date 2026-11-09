@@ -716,7 +716,7 @@ jobs:
         run: sh scripts/dom_canvas_check.sh
 
       - name: parity (interp / C / LLVM / wasm agree)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/parity.sh
 
       - name: ctest (C backend end to end)

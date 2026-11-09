@@ -14,6 +14,7 @@ module CIGates
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   FIRST_RUN = "first_run_check (the README, executed)"
+  PARITY = "parity (interp / C / LLVM / wasm agree)"
   FORMATTERS = {
     "fmt_comments_check (the formatter keeps column-1 comments)" => "fmt_comments_check.sh",
     "fmt_roundtrip_check (what fmt writes is still the same program)" => "fmt_roundtrip_check.sh"
@@ -21,6 +22,7 @@ module CIGates
   RUNTIME_MOVES = {
     "examples_parity (the corpus prints the same on interp and C)" =>
       ["downstream", "sh scripts/examples_parity.sh\nsh scripts/examples_parity.sh --poison\n"],
+    PARITY => ["compiler", "sh scripts/parity.sh"],
     "softfloat (a double's bits, on a target with no float)" =>
       ["web", "sh scripts/softfloat_check.sh"]
   }.freeze
@@ -136,7 +138,7 @@ module CIGates
     require!(FORMATTERS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both formatter gates must run once")
     require!(RUNTIME_MOVES.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
-             "both balanced runtime gates must run once")
+             "all balanced runtime gates must run once")
     require!(RISCV_BOUNDARIES.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both balanced RISC-V boundary gates must run once")
     require!(checks.count { |s| s["name"] == FULL_TESTS } == 1, "the full toolchain unit suite must run once")
@@ -257,6 +259,11 @@ module CIGates
       "README back in containers" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["if"] = "${{ !cancelled() && matrix.group == 'containers' }}" },
       "empty README gate" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["run"] = "true" },
       "optional README gate" => ->(c) { c[:steps].find { |s| s["name"] == FIRST_RUN }["continue-on-error"] = true },
+      "missing parity gate" => ->(c) { c[:steps].reject! { |s| s["name"] == PARITY } },
+      "renamed parity gate" => ->(c) { c[:steps].find { |s| s["name"] == PARITY }["name"] = "parity renamed" },
+      "parity back in runtime" => ->(c) { c[:steps].find { |s| s["name"] == PARITY }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" },
+      "optional parity gate" => ->(c) { c[:steps].find { |s| s["name"] == PARITY }["continue-on-error"] = true },
+      "parity bypassed" => ->(c) { c[:steps].find { |s| s["name"] == PARITY }["run"] = "true" },
       "missing formatter gate" => ->(c) { c[:steps].reject! { |s| s["name"] == FORMATTERS.keys.first } },
       "renamed formatter gate" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.first }["name"] = "formatter renamed" },
       "formatter in wrong group" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.first }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" },
