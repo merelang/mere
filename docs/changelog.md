@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.721 — 2026-11-09
+
+C library hosts initialize the current thread's stack bounds before registering
+the root coroutine. A host does not run the generated executable entry point;
+without these bounds, scanning a suspended root missed native handles and could
+allow compaction to release storage still used by callers. Registration reads
+the bounds without installing signal handlers or changing host stack limits.
+
+Coroutine scans also skip sorting empty pin and span arrays, avoiding null
+arguments to `qsort` on the initial scan. A thread-exit destructor releases
+reusable coroutine bookkeeping and pooled stacks after its coroutines finish.
+The existing instance-lifetime gate
+checks repeated root scans from a C host on both its main thread and a pthread,
+under O2 with ASan/UBSan. The full-toolchain suite retains 3,300 tests and 196
+required integration checks across nine groups and four build configurations.
+
 ## v0.1.720 — 2026-11-09
 
 C-backend Maps remain usable when their first insertion runs out of memory and
