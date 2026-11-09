@@ -12196,12 +12196,13 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
         struct_name struct_name c_k c_v;
       "  __LANG_OWNED(m, \"Map\", \"map_set\");";
       "  if (m->cap == 0) {";
-      "    m->cap = 4;";
       Printf.sprintf "    m->keys = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_k c_k;
       Printf.sprintf "    m->values = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_v c_v;
       "    m->dead = (unsigned char*)__lang_region_alloc(m->region, 4);";
       "    memset(m->dead, 0, 4);";
       Printf.sprintf "    %s_reindex(m, 8);" struct_name;
+      (* A caught allocation failure must leave initialization retryable. *)
+      "    m->cap = 4;";
       "  }";
       (* v0.1.30 (copy-on-store): the map owns its contents, so a stored value
          never dangles when the storer's scope is reclaimed. But the deep-copy
