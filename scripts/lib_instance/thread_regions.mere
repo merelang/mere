@@ -1,0 +1,28 @@
+let saved = map_new ();
+let _ = map_set saved 0 (str_repeat "v" 64);
+let _ = map_compact saved;
+let values = vec_new ();
+let _ = vec_push values 0;
+let _ = vec_compact values;
+let observed = vec_new ();
+let _ = vec_push observed 0;
+let update = fn (n: int) ->
+ let root = coro_root () in
+ let child = coro_new (fn _me -> fn (_u: unit) ->
+  let held = map_get saved 0 in
+  let _ = coro_switch root in
+  let _ = vec_set observed 0 (if held == str_repeat "v" 64 then 1 else 0) in
+  coro_exit root ()) in
+ let _ = coro_switch child in
+ let rec overwrite = fn (i: int) ->
+  if i == 0 then ()
+  else let _ = map_set saved 0 (str_repeat "Z" 128) in overwrite (i - 1) in
+ let _ = overwrite 16 in
+ let _ = map_compact saved in
+ let _ = vec_set values 0 n in
+ let _ = vec_compact values in
+ let _ = coro_switch child in
+ let length = str_len (map_get saved 0) in
+ let _ = map_set saved 0 (str_repeat "v" 64) in
+ vec_get values 0 + n + vec_get observed 0 - 1 + length - 128;
+()

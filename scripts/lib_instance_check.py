@@ -65,6 +65,13 @@ for mode in ['ordinary','instance']:
  binary=out/(mode+'-threads')
  run(mode+'-threads-build',flags+['-I',out,fixtures/'thread_lifetime_host.c',cfile,'-pthread','-o',binary])
  assert run(mode+'-threads',[binary])=='host pthread temporary regions released\n'
+ header=run(mode+'-regions-header',[compiler,*extra,'--header',fixtures/'thread_regions.mere'])
+ (out/'thread_regions.h').write_text(header)
+ cfile=out/(mode+'-regions.c')
+ cfile.write_text(run(mode+'-regions-emit',[compiler,'-c',*(extra or ['--lib']),fixtures/'thread_regions.mere']))
+ binary=out/(mode+'-regions')
+ run(mode+'-regions-build',flags+['-I',out,'-DMERE_REGION_TEST_SOURCE='+json.dumps(str(cfile)),fixtures/'thread_regions_host.c','-pthread','-o',binary])
+ assert run(mode+'-regions',[binary])=='module arenas and retired generations survive thread handoff and are released\n'
 (out/'coroutine_shutdown.h').write_text(run('shutdown-header',[compiler,'--lib-instance','--header',fixtures/'coroutine_shutdown.mere']))
 (out/'coroutine_shutdown.c').write_text(run('shutdown-emit',[compiler,'-c','--lib-instance',fixtures/'coroutine_shutdown.mere']))
 run('shutdown-build',flags+['-I',out,fixtures/'coroutine_shutdown_host.c',out/'coroutine_shutdown.c','-pthread','-o',out/'shutdown_host'])

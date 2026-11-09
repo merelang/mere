@@ -1004,8 +1004,14 @@ initializes fresh module state.
 
 Both ordinary and instance libraries release a host thread's cached temporary
 regions when that thread exits. Successful shutdown also releases the calling
-thread's idle caches and coroutine bookkeeping. Other host threads release their
-own caches when they exit or successfully call shutdown. Before unloading a
+thread's idle caches, coroutine bookkeeping and retired arena generations.
+Compacted module-owned Map/Vec arenas follow the module lifetime. Serialized
+calls may move module state between host threads; the block registry, scan
+bounds and allocation epochs preserve coroutine pins across that handoff. On
+macOS, the pthread cleanup value keeps a snapshot of idle resources because
+image TLS can be discarded before ordinary pthread key destructors run.
+Other host threads release their own caches when they exit or successfully
+call shutdown. Before unloading a
 shared library, finish all calls and coroutines, release each participating
 thread's caches by shutdown or thread exit, and perform final shutdown. Module
 unload unregisters the runtime's TLS callbacks so no callback can subsequently
@@ -1019,8 +1025,9 @@ application code. C is the only supported output for this experiment.
 
 `python3 scripts/lib_instance_check.py --output /tmp/lib-instance-check`
 checks queue reuse, retained strings, discarded-input allocation stability,
-failure recovery, overlap rejection and
-shutdown/reinitialization with an ASan/UBSan C host. `scripts/lib_check.sh`
+failure recovery, overlap rejection, unfinished-coroutine shutdown requests,
+module-state handoff between host threads, arena reclamation and repeated
+module unloading with ASan/UBSan C hosts. `scripts/lib_check.sh`
 continues to check the ordinary library boundary.
 
 ## 7. Public implementation references
