@@ -801,6 +801,10 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: python3 scripts/string_vec_compact_check.py
 
+      - name: Joined strings build into their owning vector
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: python3 scripts/string_vec_join_check.py
+
       - name: region_slack_check (capacity tracks allocation)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/region_slack_check.sh
