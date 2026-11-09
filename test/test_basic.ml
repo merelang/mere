@@ -12639,6 +12639,34 @@ let () =
     "module opaque before alias", "extern type H; extern fn make: unit -> H; module M { let read = fn (h: H) -> 7; type H = int; }; M.read (make ())";
     "module recursive nominal type", "module M { type 'a Chain = End | Next of 'a * 'a Chain; let read = fn (c: int Chain) -> match c with Next (n, _) -> n | End -> 0; }; M.read (Next (7, End))";
   ];
+  List.iter (fun (name, input) -> cross_type name input) [
+    "named annotation id", "let id = fn (x: 'a) -> x; (id 7, id true)";
+    "expression annotation id", "let id = ((fn x -> x) : 'a -> 'a); (id 7, id true)";
+    "alias annotation id", "type 'a Identity = 'a -> 'a; let id = ((fn x -> x) : 'a Identity); (id 7, id true)";
+    "generic record annotation", "type 'a Box = { value: 'a }; let get = fn (r: 'a Box) -> r.value; (get (Box { value = 7 }), get (Box { value = true }))";
+    "independent annotations", "let f = fn (x: 'a) -> fn (y: 'a) -> (x, y); f 7 true";
+    "annotation variable sharing", "((7, 11) : 'a * 'a)";
+    "annotation constrained variable", "let f = fn (x: 'a) -> x + 1; f 7";
+    "annotation monomorphic capture", "(fn x -> let f = fn (y: 'a) -> x y in f 7 + f 11) (fn n -> n)";
+    "qualified payload constructor", "module M { type T = C of int; }; match M.C 7 with M.C x -> x";
+    "qualified nullary constructor", "module M { type T = C | D; }; match M.C with M.C -> 7 | M.D -> 0";
+    "constructor parent identity", "module A { type Alpha = C of int; let get = fn x -> match x with C n -> n; }; module B { type Beta = C of bool; }; A.get (A.C 7)";
+    "record schema order", "type R = { a: int, b: bool }; type R = { b: bool, a: int }; (R { a = 7, b = true }).a";
+  ];
+  let declaration_rows = In_channel.with_open_bin (project_root ^ "/test/selfhost/declaration_rejections.tsv") In_channel.input_all in
+  String.split_on_char '\n' declaration_rows |> List.filter (fun s -> s <> "")
+    |> List.iter (fun row -> match String.split_on_char '\t' row with
+      | [name; mode; _; _; input] ->
+        check_raises ("reference source refusal: " ^ name) (fun () ->
+          if mode = "-w" then ignore (Pipeline.infer_program input)
+          else begin
+            ignore (Pipeline.type_of input);
+            (* The CLI's -t also consults build notes; conflicting nominal
+               declarations are raised there rather than by type_of alone. *)
+            ignore (Pipeline.type_notes input)
+          end);
+        check_raises ("self-host source refusal: " ^ name) (fun () -> self_host_type input)
+      | _ -> failwith "invalid declaration refusal inventory");
   let refusal_rows = In_channel.with_open_bin (project_root ^ "/test/selfhost/type_rejections.tsv") In_channel.input_all in
   String.split_on_char '\n' refusal_rows |> List.filter (fun s -> s <> "")
     |> List.iter (fun row -> match String.split_on_char '\t' row with

@@ -235,6 +235,18 @@ let rec lookup_scheme_opt = fn (name: str) -> fn (env: type_env) ->
     else lookup_scheme_opt name rest
   ;
 
+// Parsed source uses strict validation; direct AST experiments retain their
+// existing compatibility behavior when this unlexable marker is absent.
+let strict_source = fn env -> match lookup_scheme_opt "@source:strict" env with
+  | Some _ -> true | None -> false;
+let frozen_nominals = fn env -> match lookup_scheme_opt "@source:nominals" env with
+  | Some _ -> true | None -> false;
+let require_visible_record = fn name -> fn env ->
+  if strict_source env then
+    (match lookup_scheme_opt ("@source:record:" ++ name) env with
+      | Some _ -> () | None -> fail ("unknown record type: " ++ name))
+  else ();
+
 // Free-meta collection ------------------------------------------------------
 //
 // `collect_metas` walks a `ty` and accumulates its `TyMeta n` ids.
@@ -542,6 +554,15 @@ let rec resolve_type = fn env -> fn t ->
       | _ -> TyCon (name, args2))
   | _ -> t;
 
+// Freshen written variables once per annotation, sharing repeated names
+// within it. Separate annotations have independent variables, as in the
+// reference typer's freshen_annot.
+let instantiate_annotation = fn env -> fn s -> fn written ->
+  let t = resolve_type env written in
+  let names = collect_tyvars_in_ty t Nil in
+  let (ids, s1) = alloc_fresh_ids_n (list_len_names names) s in
+  (subst_tyvars_in_ty (zip_params_ids names ids) t, s1);
+
 let register_alias = fn name -> fn params -> fn body -> fn env ->
   let param_tys = list_map params (fn n -> TyVar n) in
   let entry = mono (TyArrow (TyTuple param_tys, resolve_type env body)) in
@@ -650,7 +671,7 @@ let validate_record_fields = fn (name: str) -> fn fields -> fn complete -> fn en
                     || not (record_fields_unique fields Nil)) then
       fail ("record " ++ name ++ ": field set mismatch")
     else ()
-  | _ -> (); // Preserve the existing unregistered-record AST compatibility.
+  | _ -> if strict_source env then fail ("unknown record type: " ++ name) else ();
 
 // Phase 55c: register a list of constructors into the env. Each ctor
 // gets a scheme quantified over the parent type's param ids, so
@@ -877,20 +898,18 @@ and check_visible_pattern = fn (p: pattern) -> fn (expected: ty)
             let s2 = unify_state s1 expected ret_ty in
             check_visible_pattern sub_p payload_ty env s2
           | (_, None) ->
-            // Ctor declared with payload but used nullary — permissive
-            (Nil, s1)
+            fail ("constructor pattern " ++ constructor_label name ++ " requires a sub-pattern")
           | (_, Some sub_p) ->
-            // Ctor declared nullary but used with payload — permissive
-            let (a, s2) = fresh_meta s1 in
-            check_visible_pattern sub_p a env s2)
+            fail ("constructor pattern " ++ constructor_label name ++ " takes no sub-pattern"))
       | None ->
-        // Undeclared ctor — pre-55c-3 permissive path
-        (match sub_opt with
+        if strict_source env then fail ("unknown constructor: " ++ constructor_label name)
+        else (match sub_opt with
           | None -> (Nil, s)
           | Some sub_p ->
             let (a, s1) = fresh_meta s in
             check_visible_pattern sub_p a env s1))
   | PRecord (name, field_pats) ->
+    let _ = require_visible_record name env in
     let _ = validate_record_fields name field_pats false env in
     let (receiver, s1) = instantiate_record name env s in
     let s2 = unify_state s1 expected receiver in
@@ -1012,7 +1031,9 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let (arg_ty, s1) = fresh_meta s in
     let s2 = (match ty_opt with
       | None -> s1
-      | Some t -> unify_state s1 arg_ty (resolve_type env t)) in
+      | Some t ->
+        let (ann, s2) = instantiate_annotation env s1 t in
+        unify_state s2 arg_ty ann) in
     let env2 = Cons ((arg, mono arg_ty), env) in
     let (body_ty, s3) = infer env2 s2 body in
     (apply_subst (subst_of s3) (TyArrow (arg_ty, body_ty)), s3)
@@ -1051,10 +1072,10 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let s4 = unify_state s3 tf (TyArrow (tx, result_ty)) in
     (apply_subst (subst_of s4) result_ty, s4)
   | EAnnot (inner, t) ->
-    let (te, s1) = infer env s inner in
-    let resolved = resolve_type env t in
-    let s2 = unify_state s1 te resolved in
-    (apply_subst (subst_of s2) resolved, s2)
+    let (ann, s1) = instantiate_annotation env s t in
+    let (te, s2) = infer env s1 inner in
+    let s3 = unify_state s2 te ann in
+    (apply_subst (subst_of s3) ann, s3)
   | ETuple es ->
     let (tys, s1) = infer_list env s es in
     (apply_subst (subst_of s1) (TyTuple tys), s1)
@@ -1071,24 +1092,16 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
           // Nullary ctor, no payload — return type directly.
           | (TyCon _, None) -> (apply_subst (subst_of s1) ct, s1)
           | (_, None) ->
-            // Ctor was declared with a payload but used nullary. Fall
-            // through to fresh meta; user will get a downstream mismatch.
-            let (a, s2) = fresh_meta s1 in
-            (a, s2)
+            fail ("constructor " ++ constructor_label name ++ " requires an argument")
           | (TyArrow (payload_ty, ret_ty), Some payload) ->
             let (pt, s2) = infer env s1 payload in
             let s3 = unify_state s2 pt payload_ty in
             (apply_subst (subst_of s3) ret_ty, s3)
           | (_, Some payload) ->
-            // Ctor was declared nullary but used with a payload. Still
-            // infer the payload to catch nested errors, then return
-            // permissive fresh meta.
-            let (_pt, s2) = infer env s1 payload in
-            let (a, s3) = fresh_meta s2 in
-            (a, s3))
+            fail ("constructor " ++ constructor_label name ++ " takes no argument"))
       | None ->
-        // Undeclared ctor — permissive fallback (pre-55c behaviour).
-        (match payload_opt with
+        if strict_source env then fail ("unknown constructor: " ++ constructor_label name)
+        else (match payload_opt with
           | None ->
             let (a, s1) = fresh_meta s in
             (a, s1)
@@ -1102,6 +1115,7 @@ let rec infer = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr) ->
     let s3 = infer_arms env arms ts result_ty s2 in
     (apply_subst (subst_of s3) result_ty, s3)
   | ERecordLit (name, fields) ->
+    let _ = require_visible_record name env in
     let _ = validate_record_fields name fields true env in
     let (receiver, s1) = instantiate_record name env s in
     let s2 = infer_record_fields_strict env name receiver fields s1 in
@@ -1428,6 +1442,7 @@ let initial_type_env =
    //   map_set : Map R K V -> K -> V -> unit
    //   map_get : Map R K V -> K -> V
    //   map_has : Map R K V -> K -> bool
+   //   map_head : Map R K V -> (K * V) list
    Cons (("map_new", ((Cons (1021, Cons (1022, Cons (1023, Nil))),
      TyArrow (TyUnit,
        TyCon ("Map", Cons (TyMeta 1021, Cons (TyMeta 1022, Cons (TyMeta 1023, Nil)))))) : scheme)),
@@ -1441,7 +1456,48 @@ let initial_type_env =
    Cons (("map_has", ((Cons (1030, Cons (1031, Cons (1032, Nil))),
      TyArrow (TyCon ("Map", Cons (TyMeta 1030, Cons (TyMeta 1031, Cons (TyMeta 1032, Nil)))),
        TyArrow (TyMeta 1031, TyBool))) : scheme)),
-   Nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
+   Cons (("map_head", ((Cons (1035, Cons (1036, Cons (1037, Nil))),
+     TyArrow (TyCon ("Map", Cons (TyMeta 1035, Cons (TyMeta 1036, Cons (TyMeta 1037, Nil)))),
+       TyCon ("list", Cons (TyTuple (Cons (TyMeta 1036, Cons (TyMeta 1037, Nil))), Nil)))) : scheme)),
+   Nil))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) : type_env);
+
+let nominal_shape_key = fn name -> "@nominal_shape:" ++ name;
+let rec variant_shape = fn ctors -> match ctors with
+  | Nil -> Nil
+  | Cons (entry, rest) ->
+    let (name, payload) = entry in
+    let args = (match payload with None -> Nil | Some _ -> Cons (TyUnit, Nil)) in
+    Cons (TyCon (constructor_label name, args), variant_shape rest);
+
+let same_shape_entry = fn a -> fn b -> match (a, b) with
+  | (TyCon (n, xs), TyCon (m, ys)) -> str_eq n m && type_args_count xs == type_args_count ys
+  | _ -> false;
+let rec remove_shape_entry = fn entry -> fn entries -> match entries with
+  | Nil -> None
+  | Cons (h, rest) ->
+    if same_shape_entry entry h then Some rest
+    else (match remove_shape_entry entry rest with
+      | None -> None | Some tail -> Some (Cons (h, tail)));
+let rec equal_shapes = fn a -> fn b -> match a with
+  | Nil -> (match b with Nil -> true | _ -> false)
+  | Cons (h, rest) -> (match remove_shape_entry h b with
+      | None -> false | Some tail -> equal_shapes rest tail);
+
+let register_nominal_shape = fn name -> fn kind -> fn shape -> fn env ->
+  if strict_source env then
+    let _ = (match lookup_scheme_opt (nominal_shape_key name) env with
+      | Some (_, TyCon (previous_kind, previous_shape)) ->
+        if type_args_count shape > 0 && type_args_count previous_shape > 0 then
+          if not (str_eq kind previous_kind) then
+            fail ("type " ++ name ++ " is declared both as a variant and as a record")
+          else if not (equal_shapes shape previous_shape) then
+            fail ("type " ++ name ++ " is declared twice with different " ++
+              (if str_eq kind "variant" then "constructors" else "fields"))
+          else ()
+        else ()
+      | _ -> ()) in
+    Cons ((nominal_shape_key name, mono (TyCon (kind, shape))), env)
+  else env;
 
 let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
                   -> fn (s: infer_state) ->
@@ -1462,10 +1518,12 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let final_env = generalize_rec_bindings bindings pre_env (subst_of s2) env in
     (final_env, s2)
   | TopType (name, params, ctors) ->
+    if frozen_nominals env then (env, s) else
+    let env = register_nominal_shape name "variant" (variant_shape ctors) env in
     // Declared parameters, including phantom parameters, appear in the
     // result type. Retain implicit TyVar collection for hand-built ASTs.
     let ctor_tyvars = collect_tyvars_in_ctors ctors Nil in
-    let all_params = union_str_names params ctor_tyvars in
+    let all_params = if strict_source env then params else union_str_names params ctor_tyvars in
     let n_params = list_len_names all_params in
     let (param_ids, s1) = alloc_fresh_ids_n n_params s in
     let param_map = zip_params_ids all_params param_ids in
@@ -1474,15 +1532,20 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let env2 = register_ctors ctors param_ids param_map ret_ty env in
     (env2, s1)
   | TopRecord (name, params, fields) ->
+    if frozen_nominals env then
+      (Cons (("@source:record:" ++ name, mono TyUnit), env), s)
+    else
+    let env = register_nominal_shape name "record" (record_shape fields) env in
     // All field schemes link their variables to the receiver's arguments.
     let field_tyvars = collect_tyvars_in_fields fields Nil in
-    let all_params = union_str_names params field_tyvars in
+    let all_params = if strict_source env then params else union_str_names params field_tyvars in
     let n_params = list_len_names all_params in
     let (param_ids, s1) = alloc_fresh_ids_n n_params s in
     let param_map = zip_params_ids all_params param_ids in
     let env2 = register_record_definition fields name param_ids param_map env in
     (env2, s1)
   | TopTypeAlias (name, params, body) -> (register_alias name params body env, s)
+  | TopCtorAlias _ -> fail "typer: unresolved constructor alias"
   | TopModule _ -> fail "typer: TopModule reached typer — parser flatten missing?"
   // Phase 54.2: extern fn — bind name with its declared scheme so
   // downstream EVar references type-check. Permissive: no scheme
@@ -1498,6 +1561,41 @@ and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
     let (env1, s1) = infer_decl d env s in
     infer_decls rest env1 s1
   ;
+
+// Pre-register final nominal schemas like the native build. Alias bodies are
+// expanded at their declaration point, then alias bindings are removed before
+// ordinary inference replays them in source order. This checks earlier values
+// against a later same-shape schema without capturing earlier annotations.
+let rec collect_source_nominals = fn decls -> fn env -> fn s -> match decls with
+  | Nil -> (env, s)
+  | Cons (d, rest) ->
+    let (env1, s1) = (match d with
+      | TopType _ -> infer_decl d env s
+      | TopRecord _ -> infer_decl d env s
+      | TopTypeAlias _ -> infer_decl d env s
+      | TopExternType _ -> infer_decl d env s
+      | _ -> (env, s)) in
+    collect_source_nominals rest env1 s1;
+
+let rec without_source_aliases = fn env -> match env with
+  | Nil -> Nil
+  | Cons (entry, rest) ->
+    let (name, _) = entry in
+    if str_len name >= 12 && str_eq (substring name 0 12) "@type_alias:" then
+      without_source_aliases rest
+    else Cons (entry, without_source_aliases rest);
+
+let prepare_source_env = fn decls ->
+  let env0 = Cons (("@source:strict", mono TyUnit), initial_type_env) in
+  let cons = Cons (TyUnit, Nil) in
+  let env1 = register_nominal_shape "list" "variant"
+    (Cons (TyCon ("Nil", Nil), Cons (TyCon ("Cons", cons), Nil))) env0 in
+  let env2 = register_nominal_shape "option" "variant"
+    (Cons (TyCon ("None", Nil), Cons (TyCon ("Some", cons), Nil))) env1 in
+  let env3 = register_nominal_shape "result" "variant"
+    (Cons (TyCon ("Ok", cons), Cons (TyCon ("Err", cons), Nil))) env2 in
+  let (env4, s) = collect_source_nominals decls env3 initial_state in
+  (Cons (("@source:nominals", mono TyUnit), without_source_aliases env4), s);
 
 // === Stage 55a: annotate pass ============================================
 //
@@ -1573,8 +1671,11 @@ let rec annotate_expr = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr
     let (x_r, s2) = annotate_expr env s1 x in
     (EApp (f_r, x_r), s2)
   | EAnnot (inner, t) ->
-    let (inner_r, s1) = annotate_expr env s inner in
-    (EAnnot (inner_r, resolve_type env t), s1)
+    let (ann, s1) = instantiate_annotation env s t in
+    let (inner_ty, s2) = infer env s1 inner in
+    let s3 = unify_state s2 ann inner_ty in
+    let (inner_r, s4) = annotate_expr env s3 inner in
+    (EAnnot (inner_r, apply_subst (subst_of s4) ann), s4)
   | ELet (pat, v, body) ->
     // Mirror `infer`'s env-extension logic for ELet.
     let (vt, s1) = infer env s v in
@@ -1600,11 +1701,13 @@ let rec annotate_expr = fn (env: type_env) -> fn (s: infer_state) -> fn (e: expr
     let (arg_ty, s1) = fresh_meta s in
     let s2 = (match ty_opt with
       | None -> s1
-      | Some t -> unify_state s1 arg_ty (resolve_type env t)) in
+      | Some t ->
+        let (ann, s2) = instantiate_annotation env s1 t in
+        unify_state s2 arg_ty ann) in
     let env2 = Cons ((arg, mono arg_ty), env) in
     let (body_r, s3) = annotate_expr env2 s2 body in
     (EFun (arg, (match ty_opt with
-      | None -> None | Some t -> Some (resolve_type env t)), body_r), s3)
+      | None -> None | Some _ -> Some (apply_subst (subst_of s3) arg_ty)), body_r), s3)
   | EMatch (scrut, arms) ->
     let (ts, s1) = infer env s scrut in
     let (scrut_r, s2) = annotate_expr env s1 scrut in
@@ -1719,7 +1822,8 @@ let parse_and_annotate = fn (src: str) ->
   let toks = tokenize src in
   let (prog, _rest) = parse_decls Nil toks in
   let (decls, main_expr) = flatten_and_resolve prog in
-  let (decls_r, env1, s1) = annotate_decls decls initial_type_env initial_state in
+  let (source_env, source_state) = prepare_source_env decls in
+  let (decls_r, env1, s1) = annotate_decls decls source_env source_state in
   let (main_expr_r, _s2) = annotate_expr env1 s1 main_expr in
   ((decls_r, main_expr_r) : program);
 
@@ -1730,7 +1834,8 @@ let parse_and_infer = fn (src: str) ->
   let (prog, _rest) = parse_decls Nil toks in
   // Phase 54.1: flatten any `module M { ... }` decls.
   let (decls, main_expr) = flatten_and_resolve prog in
-  let (env1, s1) = infer_decls decls initial_type_env initial_state in
+  let (source_env, source_state) = prepare_source_env decls in
+  let (env1, s1) = infer_decls decls source_env source_state in
   let (t, s2) = infer env1 s1 main_expr in
   ty_to_str (apply_subst (subst_of s2) t);
 

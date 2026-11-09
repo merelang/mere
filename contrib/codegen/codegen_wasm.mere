@@ -2857,7 +2857,7 @@ let rec build_show_variant_cases = fn (entries: (str * int) list)
   | Nil -> "    (unreachable)\n"
   | Cons (e, rest) ->
     let (name, tag) = e in
-    let name_off = (match lookup_assoc name offsets with
+    let name_off = (match lookup_assoc (constructor_label name) offsets with
       | Some o -> o
       | None -> 0) in
     let payload_ty = lookup_payload_ty name payload_tys in
@@ -3011,7 +3011,7 @@ let rec register_ctor_tags = fn (ctors: (str * ty option) list)
     // Phase 55d: pre-allocate the ctor name string in the data
     // segment so `$show_variant` (which is generated at emit_program
     // finalization) has stable offsets baked-in.
-    let (_off, s2) = alloc_str_literal name s1 in
+    let (_off, s2) = alloc_str_literal (constructor_label name) s1 in
     // Phase 55d-2: track payload ty so show_variant can render
     // `Some(42)`-style output for int payloads. Nullary ctors keep
     // their `None` here and render as name-only.
@@ -3041,6 +3041,7 @@ let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
   | TopType (_name, _vars, ctors) -> register_ctor_tags ctors s
   | TopRecord (_name, _vars, _fields) -> s
   | TopTypeAlias (_name, _vars, _ty) -> s
+  | TopCtorAlias _ -> fail "codegen_wasm: unresolved constructor alias"
   | TopModule _ ->
     // Phase 54.1: the parser's `flatten_and_resolve` collapses
     // modules into flat decls before they reach codegen. If a
@@ -3116,16 +3117,14 @@ let emit_program = fn (prog: program) ->
 // Cons / None / Some / Ok / Err, so the monomorphic types would
 // shadow those and force everything to `list int` etc.
 let selfhost_prelude_types =
-  // Phase 54.13: type decls so the parser's constructor-arity rewrite
-  // (collect_arities_from_decls / rewrite_constrs_expr) knows that
-  // Some/Ok/Err/Cons take a payload. Without these the post-pass sees
-  // an empty arity map and leaves `Some x` as `EApp(EConstr Some, x)`,
-  // which traps at runtime. Non-parametric form is intentional — the
-  // self-host parser doesn't support `'a` parameters in decl heads
-  // yet, and the codegen treats all payloads uniformly as i32 anyway.
-  "type __list_t = Nil | Cons of int;\n" ++
-  "type __option_t = None | Some of int;\n" ++
-  "type __result_t = Ok of int | Err of int;\n";
+  // The unchecked bootstrap needs runtime tag and payload registrations for
+  // builtins. Canonical list/option/result names preserve their established
+  // constructor identities. Monomorphic stubs suffice for this low-level API:
+  // codegen represents payloads as i32, and the checked source entry instead
+  // uses the typer's polymorphic builtin schemes.
+  "type list = Nil | Cons of int;\n" ++
+  "type option = None | Some of int;\n" ++
+  "type result = Ok of int | Err of int;\n";
 
 let selfhost_prelude_fns =
   "let rec list_map = fn xs -> fn f ->\n" ++

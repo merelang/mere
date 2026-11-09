@@ -196,8 +196,8 @@ let rec fmt_pattern = fn (p: pattern) -> match p with
   | PStr s -> escape_string_for_fmt s
   | PStrPrefix (s, n) -> escape_string_for_fmt s ++ " <> " ++ n
   | PUnit -> "()"
-  | PConstr (c, None) -> c
-  | PConstr (c, Some sub) -> c ++ " " ++ fmt_pattern_atom sub
+  | PConstr (c, None) -> constructor_label c
+  | PConstr (c, Some sub) -> constructor_label c ++ " " ++ fmt_pattern_atom sub
   | PTuple ps ->
     let parts = list_map ps fmt_pattern_component in
     "(" ++ str_join ", " parts ++ ")"
@@ -264,7 +264,7 @@ let rec fmt_expr = fn (p: int) -> fn (ind: int) -> fn (e: expr) -> match e with
   | EUnit -> "()"
   | EVar n -> n
   | EConstr ("Nil", None) -> "[]"
-  | EConstr (c, None) -> c
+  | EConstr (c, None) -> constructor_label c
   // List literal (Cons/Nil chain that terminates in Nil)
   | EConstr ("Cons", Some _) ->
     (match try_match_list_literal e with
@@ -279,7 +279,7 @@ let rec fmt_expr = fn (p: int) -> fn (ind: int) -> fn (e: expr) -> match e with
             wrap (p > prec_range) s
           | None -> "<cons?>"))
   | EConstr (c, Some arg) ->
-    let s = c ++ " " ++ fmt_expr (prec_app + 1) ind arg in
+    let s = constructor_label c ++ " " ++ fmt_expr (prec_app + 1) ind arg in
     wrap (p > prec_app) s
   // Negation
   | ENeg a ->
@@ -526,8 +526,8 @@ let fmt_top_type = fn (name: str) -> fn (params: str list)
   let var_strs = list_map variants (fn (v: str * ty option) ->
     let (c, payload) = v in
     match payload with
-    | None -> c
-    | Some t -> c ++ " of " ++ fmt_ty 0 t) in
+    | None -> constructor_label c
+    | Some t -> constructor_label c ++ " of " ++ fmt_ty 0 t) in
   "type " ++ fmt_type_params params ++ name ++ " = "
   ++ str_join " | " var_strs ++ ";";
 
@@ -556,6 +556,7 @@ let fmt_top_decl = fn (d: top_decl) ->
   | TopRecord (name, params, fields) -> fmt_top_record name params fields
   | TopTypeAlias (name, params, aliased) ->
     fmt_top_type_alias name params aliased
+  | TopCtorAlias _ -> fail "fmt: unresolved constructor alias"
   | TopModule (_name, _sub_decls) ->
     // Phase 54.1: fmt for modules is a placeholder. The parser's
     // `flatten_and_resolve` collapses modules into flat decls before

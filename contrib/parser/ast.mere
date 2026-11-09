@@ -1,6 +1,6 @@
 // contrib/parser/ast.mere — shared Mere AST for the self-host pipeline.
 //
-// Type definitions only. No functions, no demos. The point is that this
+// Shared type definitions and constructor-name helpers, without demos. This
 // file can be `import`-ed by both contrib/parser/parser.mere (which
 // also pulls in lexer.mere's token type) AND contrib/fmt/fmt.mere
 // (which doesn't), without either declaration colliding with the
@@ -123,6 +123,24 @@ type top_decl =
   // as i32 regardless. The typer's permissive `TyCon name []` handling
   // means the type name isn't validated either.
   | TopExternType of str
+  // Internal flattening metadata, consumed before any typer/evaluator/emitter.
+  | TopCtorAlias of str * str
   ;
 
 type program = top_decl list * expr;
+
+// Constructor identities are internal, unlexable names. Builtin list/option/
+// result constructors retain the runtime's established names.
+let constructor_identity = fn type_name -> fn name ->
+  if str_eq type_name "list" || str_eq type_name "option" || str_eq type_name "result" then name
+  else "@ctor:" ++ type_name ++ ":" ++ name;
+
+let constructor_label = fn name ->
+  let n = str_len name in
+  if n >= 6 && str_eq (substring name 0 6) "@ctor:" then
+    let rec find = fn i ->
+      if i < 0 then name
+      else if char_at name i == ":" then substring name (i + 1) n
+      else find (i - 1)
+    in find (n - 1)
+  else name;

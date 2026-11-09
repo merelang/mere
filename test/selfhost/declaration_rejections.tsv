@@ -1,0 +1,28 @@
+ctor-missing	-t	constructor C requires an argument	constructor C requires an argument	type T = C of int; let x = C; 7
+ctor-extra	-t	expected a function (`'a -> 'b`), got `T`	constructor C takes no argument	type T = | C; let x = C (1); 7
+pattern-missing	-t	constructor pattern C requires a sub-pattern	constructor pattern C requires a sub-pattern	type T = C of int; match C 7 with C -> 9
+pattern-extra	-t	expected '->' in match arm	constructor pattern C takes no sub-pattern	type T = | C; match C with C (x) -> x
+unknown-ctor	-t	unknown constructor: Missing	unknown constructor: Missing	let x = Missing (1); 7
+unknown-pattern	-t	expected '->' in match arm	unknown constructor: Missing	match 7 with Missing x -> x | _ -> 0
+forward-ctor	-t	constructor C requires an argument	unknown constructor: C	let x = C 7; type T = C of int; 7
+forward-record	-t	expected ';' or '}' in block	unknown record type: R	let x = R { a = 7 }; type R = { a: int }; x.a
+unknown-record	-t	expected ';' or '}' in block	unknown record type: Missing	let x = Missing { a = 7 }; 7
+record-shape	-t	type `R` is declared twice with different fields (`{ a }` and `{ b }`) (first declared on line 1)	type R is declared twice with different fields	type R = { a: int }; type R = { b: int }; 7
+variant-shape	-t	type `T` is declared twice with different constructors (`A of _` and `B of _`) (first declared on line 1)	type T is declared twice with different constructors	type T = A of int; type T = B of bool; 7
+variant-arity	-t	type `T` is declared twice with different constructors (`C of _` and `C`) (first declared on line 1)	type T is declared twice with different constructors	type T = C of int; type T = | C; 7
+variant-record	-t	type `R` is declared both as a variant (`C of _`) and as a record (`{ a }`) (first declared on line 1)	type R is declared both as a variant and as a record	type R = C of int; type R = { a: int }; 7
+record-variant	-t	type `R` is declared both as a variant (`C of _`) and as a record (`{ a }`) (first declared on line 1)	type R is declared both as a variant and as a record	type R = { a: int }; type R = C of int; 7
+record-schema	-w	expected `bool`, got `int`	type mismatch — cannot unify the two operand types	type R = { a: int }; let r = R { a = 7 }; type R = { a: bool }; r.a
+variant-schema	-w	expected `bool`, got `int`	type mismatch — cannot unify the two operand types	type T = C of int; let x = C 7; type T = C of bool; 7
+implicit-record-param	-t	expected `'a`, got `int`	type mismatch — cannot unify the two operand types	type Box = { value: 'a }; (Box { value = 1 }).value
+implicit-variant-param	-t	expected `'a`, got `int`	type mismatch — cannot unify the two operand types	type Box = C of 'a; C 7
+annotation-sharing	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	((7, true) : 'a * 'a)
+annotation-alias-sharing	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	type 'a Pair = 'a * 'a; ((7, true) : 'a Pair)
+annotation-function-sharing	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	let f = fn (x: 'a * 'a) -> x; f (7, true)
+annotation-constrained	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	let f = fn (x: 'a) -> x + 1; f true
+annotation-capture	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	fn x -> let f = fn (y: 'a) -> x y in (f 7, f true)
+qualified-missing	-t	constructor M.C requires an argument	constructor C requires an argument	module M { type T = C of int; }; M.C
+qualified-extra	-t	expected a function (`'a -> 'b`), got `T`	type mismatch — cannot unify the two operand types	module M { type T = | C; }; M.C 7
+qualified-pattern-missing	-t	constructor pattern M.C requires a sub-pattern	constructor pattern C requires a sub-pattern	module M { type T = C of int; }; match M.C 7 with M.C -> 9
+qualified-wrong-parent	-t	expected `Alpha`, got `Beta`	type mismatch — cannot unify the two operand types	module A { type Alpha = C of int; }; module B { type Beta = C of int; }; match A.C 7 with B.C n -> n
+qualified-unknown	-t	unbound variable: M.Missing	unknown constructor: M.Missing	module M { type T = | C; }; M.Missing
