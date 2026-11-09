@@ -34,13 +34,32 @@
 # Usage:
 #   sh scripts/coro_check.sh            # check
 #   sh scripts/coro_check.sh --poison   # check that it can go red
+#   CORO_TIMINGS=/tmp/coro.tsv MEMU=... sh scripts/coro_check.sh --poison
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "coro: $MERE not built" >&2; exit 2; }
 CC="${CC:-clang}"; command -v "$CC" >/dev/null 2>&1 || CC=cc
 command -v "$CC" >/dev/null 2>&1 || { echo "coro: no C compiler — skipping"; exit 2; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+command -v perl >/dev/null 2>&1 || { echo "coro: perl is required" >&2; exit 2; }
+T=$(mktemp -d) || exit 2
+rv_launcher=
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [ -n "$rv_launcher" ]; then
+    kill -TERM "$rv_launcher" 2>/dev/null || true
+    wait "$rv_launcher" 2>/dev/null || true
+  fi
+  rm -rf "$T"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ -n "${CORO_TIMINGS:-}" ]; then
+  printf 'phase\tcase\tseconds\tstatus\n' > "$CORO_TIMINGS" || exit 2
+fi
 MODE="${1:-}"
 LIMIT="${LIMIT:-60}"
 FX="$ROOT/test/coro"
@@ -260,14 +279,14 @@ scan_outer|r|all found;200880;0|0'
 RV_LIMIT="${RV_LIMIT:-300}"
 have_rv=0
 if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
-  mkdir -p "$T/rv"
+  mkdir -p "$T/rv/64" "$T/rv/32"
   if "$MERE" -c "$MEMU/riscv-runc/rv64i_run.mere" > "$T/rv/r64.c" 2>/dev/null \
      && "$CC" -O2 -w -o "$T/rv/rvrun64" "$T/rv/r64.c" -lm 2>/dev/null \
      && "$MERE" -c "$MEMU/riscv-runc/rv32i_run.mere" > "$T/rv/r32.c" 2>/dev/null \
      && "$CC" -O2 -w -o "$T/rv/rvrun32" "$T/rv/r32.c" -lm 2>/dev/null; then have_rv=1
   else printf '  FAIL  %s\n' "RISC-V: the emulator under MEMU=$MEMU did not build"; fail=1; fi
 fi
-run_rv() {  # $1 = fixture, $2 = 32|64 -> "output|exit" (MERE_RV_PRELUDE_FILE passes through)
+rv_prepare() {  # $1 = fixture, $2 = 32|64 (MERE_RV_PRELUDE_FILE passes through)
   flag=-rv64; [ "$2" = 32 ] && flag=-rv
   # `sized` asks for a 64 MB stack and recurses 300,000 deep in it
   extra=""; [ "$1" = sized ] && extra="--coro-stack 64"
@@ -275,19 +294,51 @@ run_rv() {  # $1 = fixture, $2 = 32|64 -> "output|exit" (MERE_RV_PRELUDE_FILE pa
   # read runs out and 10 MB of its own does not
   ram=256; [ "$1" = release_walk ] && ram=32
   # shellcheck disable=SC2086
-  if ! "$MERE" "$flag" --ram "$ram" $extra "$FX/$1.mere" > "$T/rv/prog.bin" 2>"$T/rv/emit.err"; then
-    printf 'EMITFAIL %s|x' "$(grep -v '^warning\|^ *-->\|^ *|\|^ *[0-9]* |\|^ *= \|^$' "$T/rv/emit.err" | head -1)"; return
+  if ! "$MERE" "$flag" --ram "$ram" $extra "$FX/$1.mere" > "$T/rv/$2/prog.bin" 2>"$T/rv/$2/emit.err"; then
+    printf 'EMITFAIL %s\n' "$(head -1 "$T/rv/$2/emit.err")" >&2
+    return 1
   fi
-  ( cd "$T/rv" && perl -e 'alarm shift; exec @ARGV' "${RV_LIMIT_NOW:-$RV_LIMIT}" ./rvrun"$2" "$ram" > out 2>&1 ); rc=$?
+}
+rv_launch() {  # limit, then (width, fixture, directory, runner, RAM) once or twice
+  perl "$ROOT/scripts/coro_rv_runner.pl" "$@" &
+  rv_launcher=$!
+  wait "$rv_launcher"; rv_status=$?
+  rv_launcher=
+  return "$rv_status"
+}
+rv_read() {  # $1 = 32|64; emulator exit status remains diagnostic, as before
+  [ -f "$T/rv/$1/status" ] && [ -f "$T/rv/$1/out" ] || return 1
+  rc=$(cat "$T/rv/$1/status")
   [ "$rc" = 142 ] && { echo "TIMEOUT|142"; return; }
-  printf '%s' "$(grep -av '^rvrun' "$T/rv/out" | norm)"
+  printf '%s' "$(grep -av '^rvrun' "$T/rv/$1/out" | norm)"
+}
+run_rv() {  # A poison runs alone; infrastructure failures cannot count as red.
+  rv_prepare "$1" "$2" || return 1
+  rv_launch "${RV_LIMIT_NOW:-$RV_LIMIT}" "$2" "$1" "$T/rv/$2" "$T/rv/rvrun$2" "$ram" || return 1
+  rv_read "$2"
 }
 if [ "$have_rv" = 1 ]; then
   printf '%s\n' "$RV_CASES" > "$T/rvcases"
   while IFS='|' read -r f b w rc; do
+    # Emit serially, then execute at most two independent virtual machines.
+    # Native RSS measurements above and all poison probes below stay serial.
+    set -- "$RV_LIMIT"
+    prepared=
     for width in 64 32; do
       [ "$b" = q ] && [ "$width" = 32 ] && continue
-      got=$(run_rv "$f" "$width")
+      if rv_prepare "$f" "$width"; then
+        set -- "$@" "$width" "$f" "$T/rv/$width" "$T/rv/rvrun$width" "$ram"
+        prepared="$prepared $width"
+      else printf '  FAIL  %s\n' "RV$width $f: emission failed"; fail=1; fi
+    done
+    [ "$#" -gt 1 ] || continue
+    if ! rv_launch "$@"; then
+      printf '  FAIL  %s\n' "RISC-V $f: runner infrastructure failed"; fail=1; continue
+    fi
+    for width in $prepared; do
+      if ! got=$(rv_read "$width"); then
+        printf '  FAIL  %s\n' "RV$width $f: missing runner result"; fail=1; continue
+      fi
       if [ "$got" = "$w" ]; then printf '  ok    %s\n' "RV$width $f"
       else printf '  FAIL  %s\n' "RV$width $f: got [$got] wanted [$w]"; fail=1; fi
     done
@@ -380,14 +431,19 @@ if [ "$MODE" = "--poison" ]; then
   rv_poison() {  # $1 = label, $2 = sed expression, $3... = fixtures that must go red
     label="$1"; ex="$2"; shift 2
     [ "$have_rv" = 1 ] || { printf '  SKIP  %s\n' "POISON $label (no MEMU)"; return; }
-    "$MERE" --rv-prelude > "$T/rv/prelude.mere"
+    if ! "$MERE" --rv-prelude > "$T/rv/prelude.mere"; then
+      printf '  FAIL  %s\n' "POISON $label: prelude emission failed"; pfail=1; return
+    fi
     sed "$ex" "$T/rv/prelude.mere" > "$T/rv/poisoned.mere"
     if cmp -s "$T/rv/prelude.mere" "$T/rv/poisoned.mere"; then
       printf '  FAIL  %s\n' "POISON $label: the prelude no longer has the shape this poison removes"; pfail=1; return
     fi
     for f in "$@"; do
       want=$(printf '%s\n' "$RV_CASES" | while IFS='|' read -r g b w rc; do [ "$g" = "$f" ] && printf '%s' "$w"; done)
-      got=$(MERE_RV_PRELUDE_FILE="$T/rv/poisoned.mere" run_rv "$f" 64)
+      if ! MERE_RV_PRELUDE_FILE="$T/rv/poisoned.mere" run_rv "$f" 64 > "$T/rv/result"; then
+        printf '  FAIL  %s\n' "POISON $label: $f: runner infrastructure failed"; pfail=1; continue
+      fi
+      got=$(cat "$T/rv/result")
       if [ "$got" != "$want" ]; then printf '  ok    %s\n' "POISON $label: $f goes red ([$got])"
       else printf '  FAIL  %s\n' "POISON $label: $f still green -- the fixture does not measure it"; pfail=1; fi
     done

@@ -15,6 +15,12 @@ module CIGates
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   FIRST_RUN = "first_run_check (the README, executed)"
   PARITY = "parity (interp / C / LLVM / wasm agree)"
+  COROUTINES = "coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)"
+  COROUTINE_COMMAND = <<~'SH'.freeze
+    python3 scripts/coro_runner_test.py
+    CORO_TIMINGS="$RUNNER_TEMP/coro-rv-timings.tsv" MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/coro_check.sh --poison
+    awk -F '\t' 'NR > 1 { count[$1]++; seconds[$1] += $3 } END { for (phase in count) printf "coro timings: %s %d runs %.3f worker-seconds\n", phase, count[phase], seconds[phase] }' "$RUNNER_TEMP/coro-rv-timings.tsv"
+  SH
   FORMATTERS = {
     "fmt_comments_check (the formatter keeps column-1 comments)" => "fmt_comments_check.sh",
     "fmt_roundtrip_check (what fmt writes is still the same program)" => "fmt_roundtrip_check.sh"
@@ -135,6 +141,7 @@ module CIGates
     require!(RV_EXEC.keys.all? { |n| checks.count { |s| s["name"] == n } == 1 },
              "all three RISC-V execution partitions must run once")
     require!(checks.count { |s| s["name"] == FIRST_RUN } == 1, "the README execution gate must run once")
+    require!(checks.count { |s| s["name"] == COROUTINES } == 1, "the coroutine gate must run once")
     require!(FORMATTERS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both formatter gates must run once")
     require!(RUNTIME_MOVES.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
@@ -165,6 +172,11 @@ module CIGates
                  "the README gate must retain the executed transcript and full test-count check")
         require!(!step["continue-on-error"], "README execution failures must fail runtime")
         assigned.fetch("runtime") << name
+      when COROUTINES
+        require!(selected == ["coroutines"], "the coroutine gate belongs to coroutines")
+        require!(step["run"] == COROUTINE_COMMAND && !step["continue-on-error"],
+                 "coroutines must retain runner controls, both widths, poison probes and timings")
+        assigned.fetch("coroutines") << name
       when *FORMATTERS.keys
         require!(selected == ["downstream"], "formatter corpus gates belong to downstream")
         script = FORMATTERS.fetch(name)
@@ -294,6 +306,16 @@ module CIGates
       "always successful result" => ->(c) { c[:final]["steps"].first["run"] = "true" },
       "ignored assignment result" => ->(c) { c[:final]["steps"].first["run"] = '[ "$GATE_SHARDS_RESULT" = success ]' }
     }
+    mutations["missing coroutine gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == COROUTINES } }
+    mutations["renamed coroutine gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["name"] = "coroutines renamed" }
+    mutations["coroutines in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" }
+    mutations["optional coroutines"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["continue-on-error"] = true }
+    ["python3 scripts/coro_runner_test.py\n", " --poison", 'MEMU="$RUNNER_TEMP/downstream/memu" ',
+     'CORO_TIMINGS="$RUNNER_TEMP/coro-rv-timings.tsv" '].each do |part|
+      mutations["coroutine command missing #{part.strip}"] = ->(c) {
+        c[:steps].find { |s| s["name"] == COROUTINES }["run"].sub!(part, "")
+      }
+    end
     RISCV_BOUNDARIES.each_key do |name|
       mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }
       mutations["renamed #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["name"] = "boundary renamed" }
