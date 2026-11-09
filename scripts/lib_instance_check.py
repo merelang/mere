@@ -47,4 +47,7 @@ assert text=='1000 lifecycles, 100000 queue reuses, failure recovery and overlap
 (out/'stateless.c').write_text(run('stateless-emit',[compiler,'-c','--lib-instance',fixtures/'stateless.mere']))
 run('stateless-build',flags+['-I',out,fixtures/'stateless_host.c',out/'stateless.c','-pthread','-o',out/'stateless_host'])
 assert run('stateless-host',[out/'stateless_host'])=='stateless overlap rejection and same-thread reentry passed\n'
+(out/'retained_strings.c').write_text(run('strings-emit',[compiler,'-c','--lib-instance',fixtures/'retained_strings.mere']))
+run('strings-build',flags+['-I',out,fixtures/'retained_strings_host.c','-pthread','-o',out/'strings_host'])
+assert run('strings-host',[out/'strings_host'])=='temporary string inputs, retained copies, failure and reentry passed\n'
 print('instance-lifetime library checks passed')

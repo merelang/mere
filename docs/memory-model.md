@@ -980,6 +980,13 @@ release their storage at block exit and still reject escaping references.
 Temporary-region arguments remain polymorphic; instance lifetime does not
 force every function argument into the default region.
 
+Immutable `str` inputs are copied into a temporary region for each exported
+call. Retaining an input in instance-owned state copies it into that state
+before the temporary region is released, including when the call fails.
+Mutable `bytes` inputs keep instance lifetime so their existing aliasing
+semantics are preserved. Nested calls on the same thread use separate input
+regions.
+
 All exported calls are serialized by rejection of overlapping calls from
 another thread, even when the entry file has no mutable top-level binding.
 Calls on the same thread can reenter. The host must not race init/shutdown
@@ -995,7 +1002,8 @@ It does not provide a Ruby embedding API or change process-exit behavior in
 application code. C is the only supported output for this experiment.
 
 `python3 scripts/lib_instance_check.py --output /tmp/lib-instance-check`
-checks queue reuse, retained state, failure recovery, overlap rejection and
+checks queue reuse, retained strings, discarded-input allocation stability,
+failure recovery, overlap rejection and
 shutdown/reinitialization with an ASan/UBSan C host. `scripts/lib_check.sh`
 continues to check the ordinary library boundary.
 
