@@ -67,7 +67,8 @@ def bounded(name, values):
             raise RuntimeError(f"suffix probe lost its values or storage meter: {values}")
         return after <= before * 2 + 4096
     held, answer = values
-    if answer != 500500 or held < 512000:
+    # One thousand nonempty maps retain at least one 256-byte block each.
+    if answer != 500500 or held < 256000:
         raise RuntimeError(f"compact probe lost its values or storage meter: {values}")
     return held <= 1536000
 
@@ -88,8 +89,9 @@ def main():
                 poisoned, count = re.subn(pattern, b"", code)
             else:
                 # Restore the former minimum block size for compacted maps.
-                poisoned = code.replace(b"size_t __seed = 512;", b"size_t __seed = 4096;")
-                count = code.count(b"size_t __seed = 512;")
+                seed = b"size_t __seed = m->live <= 3 ? 256 : 512;"
+                poisoned = code.replace(seed, b"size_t __seed = 4096;")
+                count = code.count(seed)
             if count != 1:
                 raise RuntimeError(f"{name} control lost its single mutation site: {count}")
             old_values = measure(poisoned, directory)
