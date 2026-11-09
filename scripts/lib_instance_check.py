@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import platform
 from pathlib import Path
 import shlex
 import subprocess
@@ -55,4 +56,9 @@ assert run('strings-host',[out/'strings_host'])=='temporary string inputs, retai
 run('coroutine-roots-build',flags+['-I',out,fixtures/'coroutine_roots_host.c',out/'coroutine_roots.c','-pthread','-o',out/'coroutine_roots_host'])
 for mode in ['main','worker']:
  assert run('coroutine-roots-'+mode,[out/'coroutine_roots_host',mode])=='host root handles survive coroutine scans\n'
+shared_flag='-dynamiclib' if platform.system()=='Darwin' else '-shared'
+shared=out/'libcoroutine_roots.so'
+run('coroutine-roots-shared',flags+['-fPIC',shared_flag,out/'coroutine_roots.c','-pthread','-o',shared])
+run('coroutine-roots-dynamic-build',flags+['-I',out,fixtures/'coroutine_roots_dynamic.c','-pthread','-ldl','-o',out/'coroutine_roots_dynamic'])
+assert run('coroutine-roots-dynamic',[out/'coroutine_roots_dynamic',shared])=='host roots can shut down and unload before worker exit\n'
 print('instance-lifetime library checks passed')
