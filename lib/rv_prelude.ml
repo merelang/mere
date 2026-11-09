@@ -3206,6 +3206,11 @@ let __cwalk = fn (s: int) -> fn (budget: int) -> fn (visit: int -> unit) ->
       drain (i + 2) in
   let _ = drain 0 in
   budget == 0 || __rv_rtw 70 < budget;
+// Keep all candidates on this backend until its string-address walk is available.
+let rec rvcoro_scan_strings = fn (c: int) -> fn (xs: str list) -> fn (f: str -> unit) ->
+  match xs with
+  | Nil -> ()
+  | Cons (s, rest) -> let _ = f s in rvcoro_scan_strings c rest f;
 // coro_scan_ints: every word in [lo, hi) the coroutine's stack can still
 // reach, reported to f -- conservatively: a number that is not a handle may be
 // reported, a held one may not be missed. f is called after the whole walk, as

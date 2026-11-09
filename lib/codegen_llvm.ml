@@ -5526,6 +5526,43 @@ let rec emit_expr ?(let_body_top = false) (env : env) (e : Ast.expr) : string =
     scan_used_llvm := true;
     emit_instr (Printf.sprintf "  call void @__lang_coro_scan(i64 %s, i64 %s, i64 %s, ptr %s, ptr %s)" cv l b envr fnr);
     "0"  (* unit *)
+  | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_strings"; _ }, c_e); _ }, names); _ }, clos) ->
+    (* This backend conservatively keeps every candidate. The list is
+       immutable and the callback runs outside any native stack walk. *)
+    coro_used_llvm := true;
+    ignore (emit_expr env c_e);
+    let xs = emit_expr env names in
+    let cl = emit_expr env clos in
+    let ce = fresh_reg () and cf = fresh_reg () and cursor = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = extractvalue %%closure_str_unit %s, 0" ce cl);
+    emit_instr (Printf.sprintf "  %s = extractvalue %%closure_str_unit %s, 1" cf cl);
+    emit_instr (Printf.sprintf "  %s = alloca ptr" cursor);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" xs cursor);
+    let loop = fresh_label "scan_strings" and body = fresh_label "scan_strings_body"
+    and done_ = fresh_label "scan_strings_done" in
+    emit_instr (Printf.sprintf "  br label %%%s" loop);
+    emit_instr (loop ^ ":");
+    let p = fresh_reg () and tp = fresh_reg () and tag = fresh_reg () and yes = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" p cursor);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%list_str_node, ptr %s, i32 0, i32 0" tp p);
+    emit_instr (Printf.sprintf "  %s = load i32, ptr %s" tag tp);
+    emit_instr (Printf.sprintf "  %s = icmp eq i32 %s, 1" yes tag);
+    emit_instr (Printf.sprintf "  br i1 %s, label %%%s, label %%%s" yes body done_);
+    emit_instr (body ^ ":");
+    let pp = fresh_reg () and payload = fresh_reg () and hp = fresh_reg ()
+    and head = fresh_reg () and tailp = fresh_reg () and tail = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = getelementptr %%list_str_node, ptr %s, i32 0, i32 1" pp p);
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" payload pp);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%tuple_str_list_str, ptr %s, i32 0, i32 0" hp payload);
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" head hp);
+    emit_instr (Printf.sprintf "  %s = getelementptr %%tuple_str_list_str, ptr %s, i32 0, i32 1" tailp payload);
+    emit_instr (Printf.sprintf "  %s = load ptr, ptr %s" tail tailp);
+    emit_instr (Printf.sprintf "  store ptr %s, ptr %s" tail cursor);
+    let result = fresh_reg () in
+    emit_instr (Printf.sprintf "  %s = call i64 %s(ptr %s, ptr %s)" result cf ce head);
+    emit_instr (Printf.sprintf "  br label %%%s" loop);
+    emit_instr (done_ ^ ":");
+    "0"
   (* v0.1.561 (Q-184): the values, one word in the runtime -- see coro_word_llvm *)
   | Ast.App ({ node = Ast.Var "coro_root"; _ }, u) ->
     coro_used_llvm := true;

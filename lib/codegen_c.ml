@@ -311,6 +311,7 @@ let source_name_of (iname : string) : string =
 (* Distinct string literals, in the order first seen: each becomes one static
    constant carrying the length header this backend's strings expect. Reset per
    compilation unit by [generate]. *)
+let uses_coro_strings = ref false
 let str_literals : (string, int) Hashtbl.t = Hashtbl.create 512
 
 let str_literal_id (s : string) : int =
@@ -337,6 +338,12 @@ let str_literal_decls () =
            "static const struct { size_t l; char s[%d]; } __sl_%d = { %d, %s };"
            (String.length s + 1) i (String.length s) (Ast.escape_string s))
        items)
+  ^ (if not !uses_coro_strings then "" else
+       "\nstatic const char* const __lang_literal_strings[] = { "
+       ^ (if items = [] then "NULL" else String.concat ", "
+           (List.map (fun (i, _) -> Printf.sprintf "__sl_%d.s" i) items))
+       ^ " };\nstatic const size_t __lang_literal_string_count = "
+       ^ string_of_int (List.length items) ^ ";")
 
 let rec ty_concrete (t : Ast.ty) : bool =
   match Ast.walk t with
@@ -3268,6 +3275,19 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.Var "coro_switch" when not (user_shadows "coro_switch") ->
        uses_coro := true;
        "({ __lang_coro_switch(" ^ emit_expr arg ^ "); 0; })"
+     (* Candidate strings are immutable; collect before invoking callbacks. *)
+     | Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_strings"; _ }, c_e); _ }, names)
+       when not (user_shadows "coro_scan_strings") ->
+       uses_coro := true;
+       uses_coro_strings := true;
+       "({ __lang_coro_h __cs = " ^ emit_expr c_e ^ "; list_str __xs = " ^ emit_expr names ^ "; \
+           __auto_type __cl = " ^ emit_expr arg ^ "; size_t __n = 0; \
+           for (list_str __p = __xs; list_str__tag(__p) == 1; __p = list_str__node(__p)->payload.Cons.f1) __n++; \
+           const char** __a = (const char**)__lang_region_alloc(__lang_current_region, (__n ? __n : 1) * sizeof(char*)); \
+           size_t __i = 0; \
+           for (list_str __p = __xs; list_str__tag(__p) == 1; __p = list_str__node(__p)->payload.Cons.f1) \
+             __a[__i++] = list_str__node(__p)->payload.Cons.f0; \
+           __lang_coro_scan_strings(__cs, __a, __n, (void*)__cl.env, (void*)__cl.fn); 0; })"
      (* coro_scan_ints c lo hi f -- see __lang_coro_scan_ints *)
      | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_ints"; _ }, c_e); _ }, l_e); _ }, h_e)
        when not (user_shadows "coro_scan_ints") ->
@@ -13439,6 +13459,95 @@ let coro_runtime ~(stack_bytes : int) =
       "  free(st.found);";
       "}";
       "";
+      (if !uses_coro_strings then String.concat "\n" [
+        "/* Match candidate string VALUES, including independently promoted copies.";
+        "   Only registered live allocation spans are read. Arbitrary machine words";
+        "   may conservatively match bytes; they are never treated as unchecked C strings.";
+        "   Literal values are always retained. Callbacks run after the entire walk. */";
+        "typedef struct { const char* text; size_t len, next; uint64_t hash; int found; } __lang_string_candidate;";
+        "typedef struct {";
+        "  __lang_string_candidate* entries; size_t* heads; size_t cap, maxlen;";
+        "  __lang_span* spans; size_t nsp;";
+        "} __lang_string_scan;";
+        "static uint64_t __lang_string_root_hash(const char* p, size_t n) {";
+        "  uint64_t h = UINT64_C(1469598103934665603);";
+        "  for (size_t i = 0; i < n; i++) h = (h ^ (unsigned char)p[i]) * UINT64_C(1099511628211);";
+        "  return h;";
+        "}";
+        "static void __lang_string_root_match(__lang_string_scan* s, const char* p, size_t n) {";
+        "  if (n > s->maxlen) return;";
+        "  uint64_t h = __lang_string_root_hash(p, n);";
+        "  for (size_t i = s->heads[h & (s->cap - 1)]; i != SIZE_MAX; i = s->entries[i].next) {";
+        "    __lang_string_candidate* e = s->entries + i;";
+        "    if (e->hash == h && e->len == n && (!n || memcmp(e->text, p, n) == 0)) e->found = 1;";
+        "  }";
+        "}";
+        "#ifdef __LANG_CORO_ASAN";
+        "__attribute__((no_sanitize_address))";
+        "#endif";
+        "static void __lang_string_root_word(void* ctx, uintptr_t w) {";
+        "  __lang_string_scan* s = (__lang_string_scan*)ctx;";
+        "  uintptr_t a = w & ~(uintptr_t)7;";
+        "  size_t lo = 0, hi = s->nsp;";
+        "  while (lo < hi) { size_t m = lo + (hi - lo) / 2; if (s->spans[m].hi <= a) lo = m + 1; else hi = m; }";
+        "  if (lo == s->nsp || a < s->spans[lo].lo) return;";
+        "  __lang_span* sp = s->spans + lo;";
+        "  uintptr_t used = sp->hi;";
+        "  if (sp->b->owner && sp->b->owner->blocks == sp->b) used = (uintptr_t)sp->b->owner->top;";
+        "  if (a > used) return;";
+        "  /* Optimizers may keep a string's header or an interior/end pointer.";
+        "     Match any sized string containing this address, including its header. */";
+        "  uintptr_t begin = a > s->maxlen ? a - s->maxlen : 0;";
+        "  if (begin < sp->lo + sizeof(size_t)) begin = sp->lo + sizeof(size_t);";
+        "  begin = (begin + 7) & ~(uintptr_t)7;";
+        "  uintptr_t end = a <= UINTPTR_MAX - sizeof(size_t) ? a + sizeof(size_t) : a;";
+        "  if (end > used) end = used;";
+        "  for (uintptr_t p = begin; p <= end; p += 8) {";
+        "    size_t n; memcpy(&n, (const void*)(p - sizeof(size_t)), sizeof n);";
+        "    if (n <= s->maxlen && n <= used - p && (p > a || a - p <= n))";
+        "      __lang_string_root_match(s, (const char*)p, n);";
+        "    if (end - p < 8) break;";
+        "  }";
+        "}";
+        "static void __lang_coro_scan_strings(__lang_coro_h ch, const char* const* names, size_t n, void* env, void* fn) {";
+        "  if (!n) return;";
+        "  __lang_coro* c = __lang_coro_of(ch);";
+        "  if (!c || (c != __lang_coro_cur && c->state != 2)) return;";
+        "  if (n > SIZE_MAX / sizeof(__lang_string_candidate) || n > SIZE_MAX / 4) __lang_fail_impl(\"out of memory\");";
+        "  __lang_string_scan s;";
+        "  memset(&s, 0, sizeof s);";
+        "  s.cap = 16;";
+        "  while (s.cap < n * 2) { if (s.cap > SIZE_MAX / 2) __lang_fail_impl(\"out of memory\"); s.cap *= 2; }";
+        "  s.entries = (__lang_string_candidate*)__lang_region_alloc(__lang_current_region, n * sizeof(*s.entries));";
+        "  s.heads = (size_t*)__lang_region_alloc(__lang_current_region, s.cap * sizeof(size_t));";
+        "  memset(s.heads, 255, s.cap * sizeof(size_t));";
+        "  for (size_t i = 0; i < n; i++) {";
+        "    __lang_string_candidate* e = s.entries + i;";
+        "    e->len = __lang_str_size(names[i]);";
+        "    char* saved = __lang_str_alloc(__lang_current_region, e->len);";
+        "    memcpy(saved, names[i], e->len);";
+        "    e->text = saved;";
+        "    e->hash = __lang_string_root_hash(saved, e->len);";
+        "    e->found = c == __lang_coro_cur;";
+        "    size_t bucket = e->hash & (s.cap - 1);";
+        "    e->next = s.heads[bucket]; s.heads[bucket] = i;";
+        "    if (e->len > s.maxlen) s.maxlen = e->len;";
+        "  }";
+        "  if (c != __lang_coro_cur) {";
+        "    for (size_t i = 0; i < __lang_literal_string_count; i++) {";
+        "      const char* p = __lang_literal_strings[i];";
+        "      __lang_string_root_match(&s, p, __lang_str_size(p));";
+        "    }";
+        "    /* The pin set already records this stopped stack's reachable pointers.";
+        "       Reuse it when integer-root discovery or compaction gathered it. */";
+        "    if (!c->x->pgot) __lang_pin_gather(c);";
+        "    __lang_scan_spans(); s.spans = __lang_scan_sp; s.nsp = __lang_scan_nsp;";
+        "    for (size_t i = 0; i < c->x->pn; i++) __lang_string_root_word(&s, c->x->pw[i]);";
+        "  }";
+        "  int (*f)(void*, const char*) = (int (*)(void*, const char*))fn;";
+        "  for (size_t i = 0; i < n; i++) if (s.entries[i].found) f(env, s.entries[i].text);";
+        "}";
+      ] else "");
       "static void __lang_coro_swap(void** save_sp, void* new_sp);";
       "static void __lang_coro_boot(void);";
       "#if defined(__APPLE__)";
@@ -16157,6 +16266,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
      OpenSSL at build time. *)
   env_var_used := false;
   uses_coro := false;
+  uses_coro_strings := false;
   (let f = native_ffi_flags (Hashtbl.mem extern_fn_decls) in
    uses_tls := f.ff_tls; uses_midi := f.ff_midi; uses_window := f.ff_window;
    uses_audio := f.ff_audio; uses_filestat := f.ff_filestat; uses_fdio := f.ff_fdio;

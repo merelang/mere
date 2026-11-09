@@ -2716,11 +2716,17 @@ let coro_scan_ints_scheme =
       Ast.TyArrow (Ast.TyArrow (Ast.TyInt, Ast.TyUnit), Ast.TyUnit))))
     | _ -> assert false) 1
 
+let coro_scan_strings_scheme =
+  _coro_poly (function [m] ->
+    Ast.TyArrow (coro_ty m, Ast.TyArrow (Ast.TyCon ("list", [Ast.TyStr]),
+      Ast.TyArrow (Ast.TyArrow (Ast.TyStr, Ast.TyUnit), Ast.TyUnit)))
+    | _ -> assert false) 1
+
 (* Every coroutine builtin, for the backends that refuse them by name, and the name
    a program wrote for each (the two internal ones come from rewriting coro_new). *)
 let coro_builtins =
   [ "coro_new"; "__coro_new_raw"; "__coro_msg"; "coro_transfer"; "coro_exit";
-    "coro_root"; "coro_switch"; "coro_scan_ints"; "coro_new_sized"; "__coro_new_sized_raw" ]
+    "coro_root"; "coro_switch"; "coro_scan_ints"; "coro_scan_strings"; "coro_new_sized"; "__coro_new_sized_raw" ]
 let coro_source_name (n : string) : string =
   if n = "__coro_new_raw" || n = "__coro_msg" then "coro_new"
   else if n = "__coro_new_sized_raw" then "coro_new_sized" else n
@@ -3030,6 +3036,7 @@ let initial_env : env =
     ("coro_root",    coro_root_scheme);
     ("coro_switch",  coro_switch_scheme);
     ("coro_scan_ints", coro_scan_ints_scheme);
+    ("coro_scan_strings", coro_scan_strings_scheme);
     ("channel_new",  channel_new_scheme);
     ("channel_send", channel_send_scheme);
     ("channel_recv", channel_recv_scheme);

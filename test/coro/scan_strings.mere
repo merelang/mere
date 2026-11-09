@@ -1,0 +1,32 @@
+let assert_true = fn (ok: bool) -> if ok then () else fail "missing string root";
+let root = coro_root ();
+let make_worker = fn (parent: Coro[unit]) ->
+  coro_new (fn _me -> fn (_u: unit) ->
+    region Held {
+      let text = "temporary-class-" ++ str_of_int 4721 ++ chr 0 ++ "tail" in
+      let _ = coro_switch parent in
+      let _ = assert_true (str_eq text ("temporary-class-" ++ str_of_int 4721 ++ chr 0 ++ "tail")) in
+      coro_exit parent ()
+    });
+let worker = make_worker root;
+let _ = coro_switch worker;
+// Construct an independently allocated copy after the target stopped. The
+// candidate registry itself is never reachable from the worker's stack.
+let _ = region Scan {
+  let expected = "temporary-class-" ++ str_of_int 4721 ++ chr 0 ++ "tail" in
+  let literal = "literal value" in
+  let names = Cons (expected, Cons (literal, Nil)) in
+  let found = map_new () in
+  let _ = coro_scan_strings worker names (fn (s: str) ->
+    let v = vec_new () in
+    let _ = vec_push v (s ++ "-callback-allocation") in
+    let _ = vec_compact v in
+    map_set found s 1) in
+  let _ = assert_true (map_has found expected) in
+  let _ = assert_true (map_has found literal) in
+  let _ = coro_scan_strings root names (fn (s: str) -> map_set found s 1) in
+  ()
+};
+let _ = coro_switch worker;
+let _ = print "string roots passed";
+()

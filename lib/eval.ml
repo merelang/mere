@@ -3591,6 +3591,23 @@ let builtin_coro_scan_ints =
             V_unit)))
     | _ -> failwith "coro_scan_ints: expected a Coro")
 
+(* The interpreter cannot inspect an OCaml continuation. Keeping every
+   candidate is conservative, as for coro_scan_ints. *)
+let builtin_coro_scan_strings =
+  V_builtin ("coro_scan_strings", fun c ->
+    match c with
+    | V_coro _ ->
+      V_builtin ("coro_scan_strings_p1", fun xs ->
+        V_builtin ("coro_scan_strings_p2", fun f ->
+          let rec give = function
+            | V_constr ("Nil", None) -> ()
+            | V_constr ("Cons", Some (V_tuple [v; tail])) ->
+              ignore (!apply_value_ref f v); give tail
+            | _ -> failwith "coro_scan_strings: expected a string list"
+          in give xs;
+          V_unit))
+    | _ -> failwith "coro_scan_strings: expected a Coro")
+
 let builtin_channel_new =
   V_builtin ("channel_new", fun _ ->
     V_channel (Queue.create (), Mutex.create (), Condition.create (), ref false, ref []))
@@ -4229,6 +4246,7 @@ let initial_env : env =
     ("coro_root", ref builtin_coro_root);
     ("coro_switch", ref builtin_coro_switch);
     ("coro_scan_ints", ref builtin_coro_scan_ints);
+    ("coro_scan_strings", ref builtin_coro_scan_strings);
     ("channel_new", ref builtin_channel_new);
     ("channel_send", ref builtin_channel_send);
     ("channel_recv", ref builtin_channel_recv);

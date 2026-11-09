@@ -1,0 +1,26 @@
+let ensure = fn (yes: bool) -> if yes then () else fail "string registry became a root";
+let salt = fn (u: unit) -> match env_var "MERE_CORO_ROOT_VALUE" with Some s -> s | None -> "";
+let root = coro_root ();
+let worker = coro_new (fn _me -> fn (_u: unit) ->
+  region Held {
+    let text = "held-class-" ++ str_of_int 4721 in
+    let _ = coro_switch root in
+    let _ = ensure (str_len text > 10) in
+    coro_exit root ()
+  });
+let _ = coro_switch worker;
+let _ = region Scan {
+  let expected = "held-class-" ++ str_of_int 4721 in
+  let rec candidates = fn (i: int) -> fn (xs: str list) ->
+    if i == 1000 then xs
+    else candidates (i + 1) (Cons ("unheld-class-" ++ str_of_int i, xs)) in
+  let names = candidates 0 (Cons (expected, Nil)) in
+  let found = map_new () in
+  let _ = coro_scan_strings worker names (fn (s: str) -> map_set found s 1) in
+  let _ = (if map_has found expected then () else fail "live candidate missed") in
+  let _ = (if map_len found < 8 then () else fail ("too many candidates: " ++ str_of_int (map_len found))) in
+  ()
+};
+let _ = coro_switch worker;
+let _ = print "header string root passed";
+()
