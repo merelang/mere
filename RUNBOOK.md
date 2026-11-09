@@ -247,6 +247,15 @@ check and every group succeed. Failed, cancelled or skipped groups fail it.
 The coroutine and both RISC-V groups require a memu checkout with the RV32
 and RV64 runners; a missing oracle fails the group instead of reducing it to
 native-only checks. Only the downstream group writes the compile cache.
+The coroutine gate executes each positive fixture on RV64 and RV32 concurrently,
+with at most two emulator processes and separate binaries, output and status
+files. Fixtures, virtual RAM sizes and per-process deadlines are unchanged.
+Native RSS measurements and all poison probes remain serial. The runner kills
+each process family on completion, timeout or cancellation; its orchestration
+tests run before the full gate. Emission, launch or result-file failures fail
+the gate, including during a poison probe. Set `CORO_TIMINGS` to a writable TSV
+path to record RISC-V execution times and statuses. CI prints totals in worker
+seconds; concurrent worker times must not be mistaken for elapsed gate time.
 Run `ruby scripts/ci_gate_check.rb --self-test` to validate assignments and
 failure propagation after editing the workflow. Both `ci.yml` and `pages.yml`
 must be green before a release.
@@ -272,13 +281,13 @@ durations and cache-hit messages when measuring changes: a cache hit does not
 avoid the action's system-package installation. All 196 gates and all four
 build configurations remain required.
 
-The README execution gate runs in the containers group. It still forces the
+The README execution gate runs in the runtime group. It still forces the
 full unit suite to derive the README's test count, executes the transcript,
 and builds a newcomer's program outside the checkout. The separate full
 unit-suite step remains in compiler. Moving the README gate changes where
 these checks run; it does not remove either execution or reuse cached output.
 The assignment validator pins its name, command and destination, and the
-containers preflight requires dune for it.
+runtime preflight requires dune for it.
 
 The parity harness treats a plain `test/parity/<case>.expected` as a required
 runtime oracle. Interpreter, C, LLVM and Wasm must execute successfully and
@@ -309,7 +318,7 @@ The two formatter corpus gates, `fmt_comments_check` and `fmt_roundtrip_check`,
 run in downstream. Each retains both its complete corpus run and poison run.
 The assignment validator pins their names, commands and destination, and the
 downstream preflight requires Perl for comment counts. The full unit suite
-remains in compiler and README execution remains in containers.
+remains in compiler and README execution remains in runtime.
 All 196 gates, nine groups and four build configurations remain required.
 
 ## Self-host semantic verification
