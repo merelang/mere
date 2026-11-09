@@ -17158,6 +17158,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          its own region and failure buffer). A call from inside a call, on the
          same thread, is not an overlap. *)
       let lib_has_state =
+        !Typer.lib_instance ||
         List.exists (fun (_, _, t) -> Typer.ty_mentions_mutable_container t) top_globals_list in
       let wrapper ((name, ptys, rty, call) as e) =
         let enter, leave =
@@ -17172,12 +17173,29 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
               \  }\n" !lib_stem name,
            "  if (__lib_outer) __atomic_store_n(&__mere_lib_busy, 0, __ATOMIC_RELEASE);\n")
         in
+        let scoped_str_inputs = !Typer.lib_instance && List.exists is_str ptys in
         let call_args =
           List.mapi (fun i t ->
             if is_unit t then "0"
-            else if is_str t then Printf.sprintf "__mere_lib_str_in(__a%d)" i
+            else if is_str t then
+              if scoped_str_inputs then Printf.sprintf "__str_in_%d" i
+              else Printf.sprintf "__mere_lib_str_in(__a%d)" i
             else if is_bytes t then Printf.sprintf "__mere_lib_bytes_in(__a%d)" i
             else Printf.sprintf "__a%d" i) ptys
+        in
+        (* Immutable input strings need live only through this call. Stores
+           into persistent state promote them through the normal region copy.
+           Mutable bytes retain the instance contract; do not silently change
+           their aliasing by treating them as temporary values. *)
+        let input_setup, input_release =
+          if not scoped_str_inputs then "", "" else
+          ("  __lang_region* __input_region = __lang_region_block_acquire(\"lib inputs\");\n" ^
+           "  __lang_current_region = __input_region;\n" ^
+           String.concat "" (List.mapi (fun i t ->
+             if is_str t then Printf.sprintf "  const char* __str_in_%d = __mere_lib_str_in(__a%d);\n" i i
+             else "") ptys) ^
+           "  __lang_current_region = __call_region;\n",
+           "  __lang_region_block_release(__input_region);\n")
         in
         let body =
           if is_unit rty then Printf.sprintf "  (void)(%s);" (call call_args)
@@ -17203,6 +17221,11 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
            arm's unwind releases it on failure too). The marshalling copies
            the result out to malloc BEFORE the release, so nothing the host
            receives points into reclaimed memory. *)
+        let acquire = if !Typer.lib_instance then "&__lang_default_region"
+          else "__lang_region_block_acquire(\"lib call\")" in
+        let release = if !Typer.lib_instance then
+          "/* Instance allocations are released by mere_lib_shutdown. */"
+          else "__lang_region_block_release(__call_region);" in
         Printf.sprintf
           "%s {\n\
           \  mere_lib_init();\n\
@@ -17226,17 +17249,18 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           %s\
           \    return MERE_FAIL;\n\
           \  }\n\
-          \  __lang_region* __call_region = __lang_region_block_acquire(\"lib call\");\n\
+          \  __lang_region* __call_region = %s;\n\
           \  __lang_current_region = __call_region;\n\
-          %s\n\
+          %s%s\n\
           \  __lang_current_region = __saved_cur;\n\
-          \  __lang_region_block_release(__call_region);\n\
+          %s\
+          \  %s\n\
           \  __lang_fail_jmpbuf_set = __saved_set;\n\
           \  memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf));\n\
           %s\
           \  return MERE_OK;\n\
           }"
-          (wrapper_sig e) enter leave body leave
+          (wrapper_sig e) enter leave acquire input_setup body input_release release leave
       in
       let uses_str_bnd =
         List.exists (fun (_, ptys, rty, _) ->

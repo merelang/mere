@@ -1,0 +1,3 @@
+let pool = vec_new ();
+let store = fn (n: int) -> region TEMP { let child = vec_new () in let _ = vec_push child n in vec_push pool child };
+()

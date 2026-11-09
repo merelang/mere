@@ -1019,6 +1019,10 @@ let views : (string, view_info) Hashtbl.t = Hashtbl.create 8
    `Codegen_c.lib_mode` is this ref under its old name. *)
 let lib_boundary = ref false
 
+(* Opt-in instance lifetime: heap containers survive exported calls until
+   shutdown. Explicit source regions still retain their normal escape checks. *)
+let lib_instance = ref false
+
 (* Q-168: how much stack the program asked for, in bytes, from `stack = "512MB"`
    in the nearest `mere.toml`. `None` means "take what the host gives", which is
    what every program did before v0.1.520.

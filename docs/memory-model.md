@@ -966,6 +966,47 @@ The milestones below record the original C implementation. Current compiled targ
 
 ---
 
+### Experimental C library instance lifetime
+
+`mere -c --lib-instance source.mere` uses one default allocation region for
+the loaded library, released by `mere_lib_shutdown`. Generate its matching
+header with `mere --lib-instance --header source.mere`. This experimental
+mode is for long-lived state such as an interpreter's reusable queues.
+Ordinary `--lib` keeps its per-call regions and escape checks.
+
+In instance mode, a function can allocate a Vec or Map and retain it in
+module state for subsequent calls. Explicit `region R { ... }` blocks still
+release their storage at block exit and still reject escaping references.
+Temporary-region arguments remain polymorphic; instance lifetime does not
+force every function argument into the default region.
+
+Immutable `str` inputs are copied into a temporary region for each exported
+call. Retaining an input in instance-owned state copies it into that state
+before the temporary region is released, including when the call fails.
+Mutable `bytes` inputs keep instance lifetime so their existing aliasing
+semantics are preserved. Nested calls on the same thread use separate input
+regions.
+
+All exported calls are serialized by rejection of overlapping calls from
+another thread, even when the entry file has no mutable top-level binding.
+Calls on the same thread can reenter. The host must not race init/shutdown
+against an active call. There is one state per loaded library, not a public
+multi-instance context API. Failure returns status and unwinds temporary
+regions, but does not roll back mutations to instance state. Output buffers
+remain owned by the host and are released with `mere_lib_free`.
+
+Unreferenced default-region allocations also remain until shutdown. Use
+explicit temporary regions and the application's own reclamation policy;
+this mode does not add tracing GC or make unbounded allocation bounded.
+It does not provide a Ruby embedding API or change process-exit behavior in
+application code. C is the only supported output for this experiment.
+
+`python3 scripts/lib_instance_check.py --output /tmp/lib-instance-check`
+checks queue reuse, retained strings, discarded-input allocation stability,
+failure recovery, overlap rejection and
+shutdown/reinitialization with an ASan/UBSan C host. `scripts/lib_check.sh`
+continues to check the ordinary library boundary.
+
 ## 7. Public implementation references
 
 - [Type inference and borrow checks](https://github.com/merelang/mere/blob/v0.1.679/lib/typer.ml).

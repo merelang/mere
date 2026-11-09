@@ -27,6 +27,9 @@ let usage () =
   print_endline "                        emit C for a shared library instead of a program:";
   print_endline "                        no main; exports mere_<stem>_<fn> wrappers plus";
   print_endline "                        mere_lib_init / mere_lib_shutdown / mere_lib_free";
+  print_endline "  mere -c --lib-instance <file.mere> (experimental)";
+  print_endline "                        keep heap allocations until library shutdown;";
+  print_endline "                        serialize calls; also available with --header";
   print_endline "  mere -c --region-sites <file.mere>";
   print_endline "                        emit C that, run with MERE_REGION_STATS=1, names the";
   print_endline "                        source lines whose containers went to the default region";
@@ -877,6 +880,8 @@ let preprocess_argv () : string array =
     | "-I" :: d :: rest -> walk kept (d :: dirs) rest
     | "--component" :: rest -> component_flag := true; walk kept dirs rest
     | "--lib" :: rest -> Mere.Codegen_c.lib_mode := true; walk kept dirs rest
+    | "--lib-instance" :: rest ->
+      Mere.Codegen_c.lib_mode := true; Mere.Typer.lib_instance := true; walk kept dirs rest
     | "--region-sites" :: rest -> Mere.Codegen_c.region_sites := true; walk kept dirs rest
     | "--allow-nonexhaustive" :: rest ->
       Mere.Exhaustive.allow := true; walk kept dirs rest
@@ -885,6 +890,10 @@ let preprocess_argv () : string array =
     | tok :: rest -> walk (tok :: kept) dirs rest
   in
   let (kept, dashI_dirs) = walk [] [] argv in
+  (if !Mere.Typer.lib_instance then
+     match kept with
+     | [_; ("-c" | "--header"); _] -> ()
+     | _ -> prerr_endline "--lib-instance requires -c or --header with one source file"; exit 2);
   search_paths := dashI_dirs @ path_from_env;
   Array.of_list kept
 

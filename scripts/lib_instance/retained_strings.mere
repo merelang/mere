@@ -1,0 +1,10 @@
+let saved = map_new ();
+let _ = map_compact saved;
+let remember = fn (text: str) -> map_set saved "value" text;
+let recall = fn (u: unit) -> map_get saved "value";
+let measure = fn (text: str) -> str_len text;
+let roundtrip_text = fn (text: str) -> text;
+let remember_and_fail = fn (text: str) -> let _ = map_set saved "value" text in let _ = fail "expected string failure" in ();
+extern fn host_reenter: unit -> unit;
+let reenter = fn (text: str) -> let _ = host_reenter () in text;
+()

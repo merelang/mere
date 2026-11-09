@@ -1,0 +1,50 @@
+let qv_pool = vec_new ();
+let qv_quar = vec_new ();
+// 0: in the pool, 1: in quarantine, 2: queues with an arena of their own,
+// 3: bytes charged for the queues made since the last collection
+let qv_ctr = vec_new ();
+let _ = vec_push qv_ctr 0;
+let _ = vec_push qv_ctr 0;
+let _ = vec_push qv_ctr 0;
+let _ = vec_push qv_ctr 0;
+let qv_cap = 65536;
+let qv_take = fn (u: unit) ->
+  let _ = vec_set qv_ctr 3 (vec_get qv_ctr 3 + 512) in
+  let n = vec_get qv_ctr 0 in
+  if n > 0 then (let _ = vec_set qv_ctr 0 (n - 1) in vec_get qv_pool (n - 1))
+  else vec_new ();
+let qv_drop = fn v ->
+  let n = vec_get qv_ctr 1 in
+  let _ = (if n < vec_len qv_quar then vec_set qv_quar n v else vec_push qv_quar v) in
+  vec_set qv_ctr 1 (n + 1);
+// (gc_collect, where it compacts)
+let qv_drain = fn (u: unit) ->
+  let rec go = fn (i: int) ->
+    if i >= vec_get qv_ctr 1 then ()
+    else
+      (let v = vec_get qv_quar i in
+       let own = vec_bytes v > 0 in
+       let _ = (if own || vec_get qv_ctr 2 < qv_cap then
+                  (let _ = (if own then () else vec_set qv_ctr 2 (vec_get qv_ctr 2 + 1)) in
+                   let _ = vec_recycle v in
+                   let n = vec_get qv_ctr 0 in
+                   let _ = (if n < vec_len qv_pool then vec_set qv_pool n v else vec_push qv_pool v) in
+                   vec_set qv_ctr 0 (n + 1))
+                else ()) in
+       go (i + 1)) in
+  let _ = go 0 in
+  vec_set qv_ctr 1 0;
+let live = map_new ();
+let reserve = fn (id: int) -> let _ = map_set live id (qv_take ()) in ();
+let append = fn (id: int) -> fn (n: int) -> vec_push (map_get live id) n;
+let overwrite = fn (id: int) -> fn (i: int) -> fn (n: int) -> vec_set (map_get live id) i n;
+let read = fn (id: int) -> fn (i: int) -> vec_get (map_get live id) i;
+let length = fn (id: int) -> vec_len (map_get live id);
+let release = fn (id: int) -> let _ = qv_drop (map_get live id) in map_delete live id;
+let drain = fn (u: unit) -> qv_drain ();
+let pooled = fn (u: unit) -> vec_get qv_ctr 0;
+let quarantined = fn (u: unit) -> vec_get qv_ctr 1;
+let failing = fn (u: unit) -> region TEMP { let values = vec_new () in let _ = vec_push values 99 in let _ = fail "expected failure" in () };
+extern fn host_hold: unit -> unit;
+let blocking = fn (u: unit) -> host_hold ();
+()
