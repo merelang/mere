@@ -2328,8 +2328,11 @@ let rec emit_expr (e : Ast.expr) : string =
     let v, sep, xs = Option.get (vec_join_store e) in
     str_join_used := true;
     vec_join_used := true;
-    Printf.sprintf "__lang_vec_push_join(%s, %s, %s)"
-      (emit_expr v) (emit_expr sep) (emit_expr xs)
+    let vt = fresh_bin_tmp () in
+    let st = fresh_bin_tmp () in
+    let xt = fresh_bin_tmp () in
+    Printf.sprintf "({ mere_vec_str* %s = %s; const char* %s = %s; list_str %s = %s; __lang_vec_push_join(%s, %s, %s); })"
+      vt (emit_expr v) st (emit_expr sep) xt (emit_expr xs) vt st xt
   | Ast.Let (pat0, value0, _) when
       (* Q-128: A CHAIN OF `let`s BECOMES ONE STATEMENT EXPRESSION, NOT A TOWER OF THEM.
 
@@ -4351,8 +4354,11 @@ let rec emit_expr (e : Ast.expr) : string =
              ordinary composition of the existing builtins. *)
           str_join_used := true;
           vec_join_used := true;
-          Printf.sprintf "__lang_vec_push_join(%s, %s, %s)"
-            (emit_expr vec_e) (emit_expr sep) (emit_expr xs)
+          let vt = fresh_bin_tmp () in
+          let st = fresh_bin_tmp () in
+          let xt = fresh_bin_tmp () in
+          Printf.sprintf "({ mere_vec_str* %s = %s; const char* %s = %s; list_str %s = %s; __lang_vec_push_join(%s, %s, %s); })"
+            vt (emit_expr vec_e) st (emit_expr sep) xt (emit_expr xs) vt st xt
         | _ -> Printf.sprintf "mere_vec_%s_push(%s, %s)"
                  elem_tag (emit_expr vec_e) (emit_expr arg))
      | Ast.Var "f64x2_splat" -> Printf.sprintf "mere_f64x2_splat(%s)" (emit_expr arg)
@@ -13979,7 +13985,7 @@ let str_list_helpers () =
       "  return r;";
       "}";
       "";
-            "static const char* __lang_str_join(const char* sep, list_str xs) {";
+      "static const char* __lang_str_join(const char* sep, list_str xs) {";
       "  return __lang_str_join_at(__lang_current_region, sep, xs);";
       "}";
       "";
