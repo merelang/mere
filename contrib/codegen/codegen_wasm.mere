@@ -540,7 +540,8 @@ let rec list_length_variants = fn (xs: (str * int) list) ->
   | Cons (_, t) -> 1 + list_length_variants t
   ;
 
-let lookup_or_alloc_variant_tag = fn (name: str) -> fn (s: EmitState) ->
+let lookup_or_alloc_variant_tag = fn (reference: str) -> fn (s: EmitState) ->
+  let name = constructor_runtime_ref reference in
   match lookup_assoc name s.variant_tags with
   | Some t -> ((t, s) : (int * EmitState))
   | None ->
@@ -3041,7 +3042,7 @@ let emit_decl = fn (d: top_decl) -> fn (s: EmitState) ->
   | TopType (_name, _vars, ctors) -> register_ctor_tags ctors s
   | TopRecord (_name, _vars, _fields) -> s
   | TopTypeAlias (_name, _vars, _ty) -> s
-  | TopCtorAlias _ -> fail "codegen_wasm: unresolved constructor alias"
+  | TopCtorAlias _ -> s // Typing metadata; constructor tags are canonical.
   | TopModule _ ->
     // Phase 54.1: the parser's `flatten_and_resolve` collapses
     // modules into flat decls before they reach codegen. If a

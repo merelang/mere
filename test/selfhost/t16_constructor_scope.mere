@@ -1,0 +1,62 @@
+// A later canonical restatement cannot change qualified constructor schemes.
+module A {
+  type T = C of int;
+  let make = fn n -> C n;
+  let read = fn x -> match x with C n -> n;
+};
+type T = C of bool;
+let _ = print (show (A.read (A.make 7)));
+let _ = print (show (match A.C 11 with A.C n -> n));
+module BeforeOther {
+  type Other = Item of int;
+  let make = fn n -> Item n;
+  let read = fn x -> match x with Item n -> n;
+};
+module AfterOther { type Other = Item of bool; };
+let _ = print (show (BeforeOther.read (BeforeOther.make 13)));
+type Count = int;
+module Aliased {
+  type AliasT = Wrapped of Count;
+  let make = fn n -> Wrapped n;
+  let read = fn x -> match x with Wrapped n -> n;
+};
+type Count = bool;
+type AliasT = Wrapped of Count;
+let _ = print (show (Aliased.read (Aliased.make 17)));
+module Poly {
+  type 'a PolyT = Boxed of 'a;
+  let make = fn x -> Boxed x;
+  let read = fn x -> match x with Boxed n -> n;
+};
+type PolyT = Boxed of bool;
+let _ = print (show (Poly.read (Poly.make 19)));
+let _ = print (show (Poly.read (Poly.make true)));
+let _ = print (Poly.read (Poly.make "text"));
+module Outer {
+  module Inner {
+    type Nested = NestedC of int;
+    let make = fn n -> NestedC n;
+    let read = fn x -> match x with NestedC n -> n;
+  };
+};
+type Nested = NestedC of bool;
+let _ = print (show (Outer.Inner.read (Outer.Inner.make 23)));
+module Patterns {
+  type PatternT = PatternC of int;
+  let make = fn n -> PatternC n;
+  let read = fn value -> match value with
+    (PatternC n | PatternC n) ->
+      let ((PatternC m) as whole) = value in
+      let PatternC _ = whole in n + m;
+};
+type PatternT = PatternC of bool;
+let _ = print (show (Patterns.read (Patterns.make 29)));
+module Records {
+  type RecordItem = RecordC of int;
+  type Holder = { value: RecordItem };
+  let make = fn n -> Holder { value = RecordC n };
+  let read = fn (h: Holder) -> match h with Holder { value = RecordC n } -> n;
+};
+type RecordItem = RecordC of bool;
+let _ = print (show (Records.read (Records.make 31)));
+()

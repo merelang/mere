@@ -161,7 +161,7 @@ let rec match_pattern = fn (p: pattern) -> fn (v: value) ->
     (match v with
       | VConstr (vname, sub_v_opt) ->
         // Phase 54.17: str_eq — see lookup_env note.
-        if str_eq cname vname then
+        if str_eq (constructor_runtime_ref cname) (constructor_runtime_ref vname) then
           (match (sub_p_opt, sub_v_opt) with
             | (None, None) -> Some Nil
             | (Some sub_p, Some sub_v) -> match_pattern sub_p sub_v
@@ -332,7 +332,8 @@ let rec eval = fn (e: expr) -> fn (env: env) ->
       | Some bindings -> eval body (extend_env bindings env))
   | EMatch (scrutinee, arms) ->
     try_match_arms arms (eval scrutinee env) env
-  | EConstr (name, payload_expr) ->
+  | EConstr (reference, payload_expr) ->
+    let name = constructor_runtime_ref reference in
     (match payload_expr with
       | None -> VConstr (name, None)
       | Some pe -> VConstr (name, Some (eval pe env)))
@@ -514,7 +515,7 @@ let apply_decl = fn (d: top_decl) -> fn (env: env) ->
   | TopType _ -> env
   | TopRecord _ -> env
   | TopTypeAlias _ -> env
-  | TopCtorAlias _ -> fail "eval: unresolved constructor alias"
+  | TopCtorAlias _ -> env // Typing metadata; values use canonical names.
   | TopModule _ -> fail "eval: TopModule reached eval — parser flatten missing?"
   // Phase 54.2: extern fns aren't executable in the self-host eval
   // (they need a wasm host). Treat as no-op so files with extern
