@@ -12143,8 +12143,11 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          entries -- mere-ruby's frame that a closure keeps -- held a 4 KB
          block for a few hundred bytes, 5.6 KB a map with the rest; it grows
          by doubling like any other when it needs to. *)
-      "  size_t __seed = 512;";
-      "  while (__seed < 4096 && __seed < (size_t)m->live * 64 + 256) __seed <<= 1;";
+      (* Up to three small entries fit in 256 bytes, including the index.
+         This halves slack for captured frames. Larger copied payloads grow
+         normally; no payload-size bound or ownership rule changes. *)
+      "  size_t __seed = m->live <= 3 ? 256 : 512;";
+      "  while (m->live > 3 && __seed < 4096 && __seed < (size_t)m->live * 64 + 256) __seed <<= 1;";
       "  __lang_region_init(fresh, __seed);";
       "  __lang_region_dep_link(m->home, fresh);";
       "  __lang_region* old = m->region;";
