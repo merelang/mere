@@ -41,8 +41,8 @@ def check(mere, compiler):
     rows = [[name, "-t", ref, own, source] for name, ref, own, source in rows + type_rows]
     declaration_rows = [line.split("\t") for line in
                         (ROOT / "test/selfhost/declaration_rejections.tsv").read_text().splitlines()]
-    assert len(declaration_rows) == 28 and all(len(row) == 5 for row in declaration_rows), "declaration refusal inventory changed"
-    assert len({row[0] for row in declaration_rows}) == 28
+    assert len(declaration_rows) == 33 and all(len(row) == 5 for row in declaration_rows), "declaration refusal inventory changed"
+    assert len({row[0] for row in declaration_rows}) == 33
     assert all(row[1] in ("-t", "-w") for row in declaration_rows)
     rows += declaration_rows
     host = ROOT / "scripts/run_wasm.js"
@@ -120,7 +120,7 @@ def check(mere, compiler):
             succeeds(["wat2wasm", "--enable-tail-call", wat, "-o", wasm])
             assert succeeds(["node", host, wasm]) == "true\n", label
         print("  logical tail calls: 50000 steps on reference/self-host Wasm passed", flush=True)
-    print("selfhost_record_check: 56 refusals on three paths, positive compilation and tail calls passed")
+    print("selfhost_record_check: 61 refusals on three paths, positive compilation and tail calls passed")
 
 
 def self_test():

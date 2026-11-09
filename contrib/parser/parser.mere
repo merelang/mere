@@ -1675,6 +1675,21 @@ let decl_binding_name = fn (d: top_decl) ->
   | TopTypeAlias (n, _, _) -> Some n
   | _ -> None;
 
+let constructor_rename_key = fn name -> "@rename_ctor:" ++ name;
+
+let rec rename_ctor_pattern = fn pat -> fn renames -> match pat with
+  | PConstr (name, payload) ->
+    let target = (match lookup_str_str (constructor_rename_key name) renames with
+      | Some full -> full | None -> name) in
+    PConstr (target, match payload with
+      | None -> None | Some sub -> Some (rename_ctor_pattern sub renames))
+  | PTuple ps -> PTuple (list_map ps (fn p -> rename_ctor_pattern p renames))
+  | PRecord (name, fields) -> PRecord (name, list_map fields (fn field ->
+      let (key, sub) = field in (key, rename_ctor_pattern sub renames)))
+  | PAs (sub, name) -> PAs (rename_ctor_pattern sub renames, name)
+  | POr (a, b) -> POr (rename_ctor_pattern a renames, rename_ctor_pattern b renames)
+  | _ -> pat;
+
 // Build the `bare → M.bare` rename map for one module's decls. For
 // TopLetRec each binding name contributes its own entry.
 let rec build_rename_map = fn (m: str) -> fn (decls: top_decl list)
@@ -1687,6 +1702,12 @@ let rec build_rename_map = fn (m: str) -> fn (decls: top_decl list)
         list_fold bindings acc (fn (a: (str * str) list)
                              -> fn (b: str * expr) ->
           let (n, _) = b in Cons ((n, m ++ "." ++ n), a))
+      | TopType (name, _, ctors) ->
+        list_fold ctors (Cons ((name, m ++ "." ++ name), acc)) (fn entries -> fn entry ->
+          let (ctor, _) = entry in
+          Cons ((constructor_rename_key ctor, m ++ "." ++ ctor), entries))
+      | TopCtorAlias (name, _) ->
+        Cons ((constructor_rename_key name, m ++ "." ++ name), acc)
       | _ ->
         (match decl_binding_name d with
           | Some n -> Cons ((n, m ++ "." ++ n), acc)
@@ -1714,7 +1735,7 @@ let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) ->
   | EApp (f, x) -> EApp (rename_expr f renames, rename_expr x renames)
   | EFun (arg, ty_opt, body) -> EFun (arg, ty_opt, rename_expr body renames)
   | ELet (pat, value, body) ->
-    ELet (pat, rename_expr value renames, rename_expr body renames)
+    ELet (rename_ctor_pattern pat renames, rename_expr value renames, rename_expr body renames)
   | ELetRec (bindings, body) ->
     let bs2 = list_map bindings (fn (b: str * expr) ->
       let (n, v) = b in (n, rename_expr v renames)) in
@@ -1727,12 +1748,14 @@ let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) ->
       let g2 = (match g with
         | None -> None
         | Some ge -> Some (rename_expr ge renames)) in
-      (p, g2, rename_expr b renames)) in
+      (rename_ctor_pattern p renames, g2, rename_expr b renames)) in
     EMatch (rename_expr scrutinee renames, arms2)
   | EConstr (name, payload_opt) ->
+    let target = (match lookup_str_str (constructor_rename_key name) renames with
+      | Some full -> full | None -> name) in
     (match payload_opt with
-      | None -> e
-      | Some p -> EConstr (name, Some (rename_expr p renames)))
+      | None -> EConstr (target, None)
+      | Some p -> EConstr (target, Some (rename_expr p renames)))
   | ETuple es -> ETuple (list_map es (fn (e2: expr) -> rename_expr e2 renames))
   | ERecordLit (name, fields) ->
     let fs2 = list_map fields (fn (f: str * expr) ->
@@ -1751,7 +1774,7 @@ let rec rename_expr = fn (e: expr) -> fn (renames: (str * str) list) ->
 // Apply rename_expr to all expressions inside a top_decl.
 let rename_decl = fn (d: top_decl) -> fn (renames: (str * str) list) ->
   match d with
-  | TopLet (pat, e) -> TopLet (pat, rename_expr e renames)
+  | TopLet (pat, e) -> TopLet (rename_ctor_pattern pat renames, rename_expr e renames)
   | TopLetRec bindings ->
     let bs2 = list_map bindings (fn (b: str * expr) ->
       let (n, v) = b in (n, rename_expr v renames)) in
@@ -1947,8 +1970,8 @@ let rec rewrite_decls_with_mods = fn (ds: top_decl list) -> fn (mods: str list) 
   | Nil -> Nil
   | Cons (d, rest) -> Cons (rewrite_decl d mods, rewrite_decls_with_mods rest mods);
 
-// Resolve declarations in source order. Internal alias declarations disappear
-// here; none may reach inference, evaluation or emission.
+// Resolve declarations in source order. Qualified aliases keep a separate
+// typing key and declaration-time scheme; runtime tags remain canonical.
 let rec rewrite_constrs_decls = fn ds -> fn refs -> match ds with
   | Nil -> (Nil, refs)
   | Cons (d, rest) ->
@@ -1960,7 +1983,11 @@ let rec rewrite_constrs_decls = fn ds -> fn refs -> match ds with
       | TopCtorAlias (name, target) ->
         (match lookup_ctor_ref target refs with
           | None -> fail ("unresolved constructor alias: " ++ name)
-          | Some info -> rewrite_constrs_decls rest (Cons ((name, info), refs)))
+          | Some (canonical, arity) ->
+            let scoped = constructor_scope_ref name canonical in
+            let refs1 = Cons ((name, (scoped, arity)), Cons ((scoped, (scoped, arity)), refs)) in
+            let (rest1, refs2) = rewrite_constrs_decls rest refs1 in
+            (Cons (TopCtorAlias (scoped, canonical), rest1), refs2))
       | _ ->
         let d1 = rewrite_constrs_decl d refs in
         let (rest1, refs1) = rewrite_constrs_decls rest refs in

@@ -461,7 +461,11 @@ The CLI and browser self-host compilers share `compile_source_to_wat` in
 constructors, missing or extra constructor payloads and invalid constructor
 patterns are refused. Module-qualified constructors such as `M.C` retain their
 canonical parent type, payload arity and runtime identity even when another type
-uses the same constructor label. Source declarations quantify only explicitly
+uses the same constructor label. A qualified constructor retains the payload
+scheme visible at its declaration, including inside module functions and
+patterns, when a later same-shape declaration changes the canonical payload.
+Bare constructor uses still check against the final nominal schema.
+Source declarations quantify only explicitly
 declared parameters. Nonempty nominal restatements must have the same record
 fields or variant constructors and arities; a record/variant kind collision is
 also refused. The final nominal schema checks earlier values, while aliases

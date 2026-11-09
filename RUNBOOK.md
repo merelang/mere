@@ -262,7 +262,7 @@ This covers direct source entries and the runner's `apt-mirrors.txt` or
 Repository suites, components, signing keys and other mirrors are preserved.
 The setup action's opam cache remains enabled. Compare actual setup step
 durations and cache-hit messages when measuring changes: a cache hit does not
-avoid the action's system-package installation. All 191 gates and all four
+avoid the action's system-package installation. All 192 gates and all four
 build configurations remain required.
 
 The README execution gate runs in the containers group. It still forces the
@@ -303,20 +303,21 @@ run in downstream. Each retains both its complete corpus run and poison run.
 The assignment validator pins their names, commands and destination, and the
 downstream preflight requires Perl for comment counts. The full unit suite
 remains in compiler and README execution remains in containers.
-All 191 gates, nine groups and four build configurations remain required.
+All 192 gates, nine groups and four build configurations remain required.
 
 ## Self-host semantic verification
 
 `scripts/selfhost_check.sh` rebuilds the CLI compiler in an isolated temporary
 directory on every run. The pattern, pattern-visibility, logic and record
 fixtures, plus aliases, polymorphic types, modules, annotations and qualified
-constructors, require their `.expected` companions. Their combined 130 handwritten
+constructors and declaration-time constructor scope, require their `.expected`
+companions. Their combined 140 handwritten
 lines must match the reference interpreter and Wasm, the self-host evaluator
 under the interpreter and Wasm, and programs emitted by the self-host compiler
 running on Wasm. Emission, assembly, runtime and missing-oracle failures fail
 the gate, including when several paths agree on the same wrong output.
 
-`scripts/selfhost_record_check.py` requires 56 invalid-source cases to fail
+`scripts/selfhost_record_check.py` requires 61 invalid-source cases to fail
 with the specified diagnostics on the reference, interpreted self-host typer
 and compiled self-host typer. Same-shape schema replacement uses the reference
 build check, since `-t` can answer a type while noting that the build refuses it.
@@ -324,12 +325,12 @@ A valid reordered record must still compile and
 execute. Unrelated parse errors, successful commands printing an error, signals
 and bare traps cannot satisfy a refusal. Both compiled routes also execute
 50,000 logical tail calls without increasing stack or memory limits. This runs
-inside the existing compiler-group gate; all 191 gates, nine groups and four
+inside the existing compiler-group gate; all 192 gates, nine groups and four
 build configurations remain required.
 
 The existing Wasm-size gate also runs `scripts/selfhost_browser_check.cjs` on
 the actual generated HTML, DOM glue and optimized compiler. It executes all
-130 oracle lines, refuses the same 56 inputs, clears stale WAT and recompiles
+140 oracle lines, refuses the same 61 inputs, clears stale WAT and recompiles
 valid input after each failure on the same instance, with default memory and
 stack limits. Host imports are explicit: missing imports cannot become stubs.
 The CLI and browser gates also execute the standard-helper fixture and all
@@ -343,7 +344,7 @@ verification against the setup action's expected primary key. The completion
 marker is written only after verification and an atomic executable replacement.
 The existing assignment gate checks bootstrap ordering and runs signature,
 digest, interrupted-download and cache-publication controls. Compiler caching,
-all 191 gates and all build configurations remain required.
+all 192 gates and all build configurations remain required.
 
 Pinned Wasm, protobuf and gRPC oracle archives also use the release API. The
 shared downloader checks release identity, size and SHA-256 before atomically

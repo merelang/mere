@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.718 — 2026-11-09
+
+Qualified constructors in the self-host typer retain their declaration-time
+payload schemes. A module that declares `C of int` can still construct and match
+that value after a later same-shape declaration changes the canonical payload
+to `bool`. This fixes a regression in v0.1.717. Bare constructor uses continue
+to check against the final nominal schema, and runtime tags keep their shared
+canonical parent identity. Alias expansion remains in declaration order.
+
+Eleven required self-host fixtures provide 140 handwritten output lines on five
+paths. Five added refusals bring the rejection inventory to 61 cases on three
+paths. The optimized browser runs the same oracles and refusals, including
+recovery after each diagnostic on the same instance. The full-toolchain suite
+has 3,264 tests. The browser helper inventory remains at 17 cases, with default
+memory and stack limits.
+
+The C runtime also skips string-Vec compaction when its arena has not changed.
+Writes, derived allocations and deferred retired arenas still trigger the
+required work; O2 and AddressSanitizer checks cover those cases. This adds a
+runtime gate, bringing the required CI inventory to 192 gates across nine
+groups; all four build configurations remain required.
+
 ## v0.1.717 — 2026-11-09
 
 The CLI and browser self-host compilers now share a checked source entry.

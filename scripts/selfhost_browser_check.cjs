@@ -60,7 +60,7 @@ async function check(playground) {
     };
     const fixtures = ['t06_patterns', 't07_pattern_visibility', 't08_logic', 't09_records',
       't10_aliases', 't11_polymorphic_types', 't12_type_modules', 't13_type_scope',
-      't14_annotations', 't15_constructors'];
+      't14_annotations', 't15_constructors', 't16_constructor_scope'];
     let lines = 0;
     for (const name of fixtures) {
       console.log(`  browser oracle ${name}`);
@@ -83,7 +83,7 @@ async function check(playground) {
     let refusals = 0;
     for (const [inventory, columns] of [['record_rejections', 4], ['type_rejections', 4], ['declaration_rejections', 5]]) {
       const rows = fs.readFileSync(path.join(root, 'test/selfhost', inventory + '.tsv'), 'utf8').trimEnd().split('\n');
-      assert.equal(rows.length, { record_rejections: 9, type_rejections: 19, declaration_rejections: 28 }[inventory]);
+      assert.equal(rows.length, { record_rejections: 9, type_rejections: 19, declaration_rejections: 33 }[inventory]);
       for (const row of rows) {
         const fields = row.split('\t'); assert.equal(fields.length, columns);
         const name = fields[0], reason = fields[columns - 2], source = fields[columns - 1];
@@ -97,8 +97,8 @@ async function check(playground) {
         refusals++;
       }
     }
-    assert.equal(refusals, 56);
-    console.log(`selfhost_browser_check: ${lines} oracle lines, 56 refusals and same-instance recovery passed`);
+    assert.equal(refusals, 61);
+    console.log(`selfhost_browser_check: ${lines} oracle lines, 61 refusals and same-instance recovery passed`);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

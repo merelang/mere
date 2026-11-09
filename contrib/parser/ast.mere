@@ -123,7 +123,7 @@ type top_decl =
   // as i32 regardless. The typer's permissive `TyCon name []` handling
   // means the type name isn't validated either.
   | TopExternType of str
-  // Internal flattening metadata, consumed before any typer/evaluator/emitter.
+  // A typing-only qualified alias. Runtime consumers use its canonical name.
   | TopCtorAlias of str * str
   ;
 
@@ -135,7 +135,23 @@ let constructor_identity = fn type_name -> fn name ->
   if str_eq type_name "list" || str_eq type_name "option" || str_eq type_name "result" then name
   else "@ctor:" ++ type_name ++ ":" ++ name;
 
-let constructor_label = fn name ->
+// Qualified aliases retain a declaration-time typing key while sharing the
+// canonical runtime constructor. Neither prefix is lexable as a source name.
+let constructor_scope_ref = fn qualified -> fn canonical ->
+  "@ctor_alias:" ++ qualified ++ ":" ++ canonical;
+
+let constructor_runtime_ref = fn name ->
+  let n = str_len name in
+  if n >= 12 && str_eq (substring name 0 12) "@ctor_alias:" then
+    let rec find = fn i ->
+      if i >= n then name
+      else if char_at name i == ":" then substring name (i + 1) n
+      else find (i + 1)
+    in find 12
+  else name;
+
+let constructor_label = fn reference ->
+  let name = constructor_runtime_ref reference in
   let n = str_len name in
   if n >= 6 && str_eq (substring name 0 6) "@ctor:" then
     let rec find = fn i ->

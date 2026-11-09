@@ -157,7 +157,7 @@ let rec free_decls = fn (ds: top_decl list) -> fn (bound: str list) -> fn (acc: 
       | TopType _ -> free_decls rest bound acc
       | TopRecord _ -> free_decls rest bound acc
       | TopTypeAlias _ -> free_decls rest bound acc
-      | TopCtorAlias _ -> fail "free_names: unresolved constructor alias"
+      | TopCtorAlias _ -> free_decls rest bound acc // No value-level names.
       | TopExternType _ -> free_decls rest bound acc
       // See the header: declaring an extern is asking, not defining.
       | TopExternFn (n, _) -> free_decls rest bound (add_name n acc)

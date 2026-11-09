@@ -1545,7 +1545,11 @@ let rec infer_decl = fn (d: top_decl) -> fn (env: type_env)
     let env2 = register_record_definition fields name param_ids param_map env in
     (env2, s1)
   | TopTypeAlias (name, params, body) -> (register_alias name params body env, s)
-  | TopCtorAlias _ -> fail "typer: unresolved constructor alias"
+  | TopCtorAlias (name, target) ->
+    if frozen_nominals env then (env, s) else
+    (match lookup_scheme_opt target env with
+      | Some scheme -> (Cons ((name, scheme), env), s)
+      | None -> fail ("typer: unresolved constructor alias " ++ constructor_label name))
   | TopModule _ -> fail "typer: TopModule reached typer — parser flatten missing?"
   // Phase 54.2: extern fn — bind name with its declared scheme so
   // downstream EVar references type-check. Permissive: no scheme
@@ -1566,6 +1570,8 @@ and infer_decls = fn (decls: top_decl list) -> fn (env: type_env)
 // expanded at their declaration point, then alias bindings are removed before
 // ordinary inference replays them in source order. This checks earlier values
 // against a later same-shape schema without capturing earlier annotations.
+// Qualified constructor aliases copy the scheme visible at their declaration;
+// later canonical restatements cannot change earlier module functions.
 let rec collect_source_nominals = fn decls -> fn env -> fn s -> match decls with
   | Nil -> (env, s)
   | Cons (d, rest) ->
@@ -1573,6 +1579,7 @@ let rec collect_source_nominals = fn decls -> fn env -> fn s -> match decls with
       | TopType _ -> infer_decl d env s
       | TopRecord _ -> infer_decl d env s
       | TopTypeAlias _ -> infer_decl d env s
+      | TopCtorAlias _ -> infer_decl d env s
       | TopExternType _ -> infer_decl d env s
       | _ -> (env, s)) in
     collect_source_nominals rest env1 s1;

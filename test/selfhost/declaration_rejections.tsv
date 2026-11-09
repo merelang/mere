@@ -26,3 +26,8 @@ qualified-extra	-t	expected a function (`'a -> 'b`), got `T`	type mismatch — c
 qualified-pattern-missing	-t	constructor pattern M.C requires a sub-pattern	constructor pattern C requires a sub-pattern	module M { type T = C of int; }; match M.C 7 with M.C -> 9
 qualified-wrong-parent	-t	expected `Alpha`, got `Beta`	type mismatch — cannot unify the two operand types	module A { type Alpha = C of int; }; module B { type Beta = C of int; }; match A.C 7 with B.C n -> n
 qualified-unknown	-t	unbound variable: M.Missing	unknown constructor: M.Missing	module M { type T = | C; }; M.Missing
+bare-function-schema	-w	expected `bool`, got `int`	type mismatch — cannot unify the two operand types	type T = C of int; let make = fn n -> C n; let read = fn x -> match x with C n -> n; type T = C of bool; read (make 7)
+bare-late-schema	-t	expected `bool`, got `int`	type mismatch — cannot unify the two operand types	module A { type T = C of int; }; type T = C of bool; C 7
+qualified-ctor-schema	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	module A { type T = C of int; }; type T = C of bool; A.C true
+qualified-function-schema	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	module A { type T = C of int; let make = fn n -> C n; }; type T = C of bool; A.make true
+qualified-pattern-schema	-t	expected `int`, got `bool`	type mismatch — cannot unify the two operand types	module A { type T = C of int; }; type T = C of bool; match A.C 7 with A.C true -> 1 | _ -> 0

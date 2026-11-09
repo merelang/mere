@@ -12653,6 +12653,16 @@ let () =
     "constructor parent identity", "module A { type Alpha = C of int; let get = fn x -> match x with C n -> n; }; module B { type Beta = C of bool; }; A.get (A.C 7)";
     "record schema order", "type R = { a: int, b: bool }; type R = { b: bool, a: int }; (R { a = 7, b = true }).a";
   ];
+  List.iter (fun (name, input) -> cross_type name input) [
+    "module constructor declaration snapshot", "module A { type T = C of int; let make = fn n -> C n; let read = fn x -> match x with C n -> n; }; type T = C of bool; A.read (A.make 7)";
+    "qualified constructor declaration snapshot", "module A { type T = C of int; }; type T = C of bool; match A.C 7 with A.C n -> n";
+    "other module constructor snapshot", "module A { type T = C of int; let make = fn n -> C n; let read = fn x -> match x with C n -> n; }; module B { type T = C of bool; }; A.read (A.make 7)";
+    "constructor alias payload snapshot", "type N = int; module A { type T = C of N; let make = fn n -> C n; let read = fn x -> match x with C n -> n; }; type N = bool; type T = C of N; A.read (A.make 7)";
+    "polymorphic constructor snapshot", "module A { type 'a T = C of 'a; let make = fn x -> C x; let read = fn x -> match x with C n -> n; }; type T = C of bool; (A.read (A.make 7), A.read (A.make true), A.read (A.make \"text\"))";
+    "nested constructor snapshot", "module O { module I { type T = C of int; let make = fn n -> C n; let read = fn x -> match x with C n -> n; }; }; type T = C of bool; O.I.read (O.I.make 7)";
+    "composed constructor pattern snapshot", "module A { type T = C of int; let make = fn n -> C n; let read = fn x -> match x with (C n | C n) -> let ((C m) as whole) = x in let C _ = whole in n + m; }; type T = C of bool; A.read (A.make 7)";
+    "record constructor pattern snapshot", "module A { type T = C of int; type H = { value: T }; let make = fn n -> H { value = C n }; let read = fn (h: H) -> match h with H { value = C n } -> n; }; type T = C of bool; A.read (A.make 7)";
+  ];
   let declaration_rows = In_channel.with_open_bin (project_root ^ "/test/selfhost/declaration_rejections.tsv") In_channel.input_all in
   String.split_on_char '\n' declaration_rows |> List.filter (fun s -> s <> "")
     |> List.iter (fun row -> match String.split_on_char '\t' row with
