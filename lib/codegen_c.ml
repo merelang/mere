@@ -733,6 +733,7 @@ let metrics_used = ref false
    bodies. *)
 let str_split_used = ref false
 let str_join_used = ref false
+let vec_join_used = ref false
 let list_dir_used = ref false   (* Phase 44 *)
 let args_used = ref false       (* native CLI: argv → str list *)
 
@@ -1863,6 +1864,18 @@ let emit_bin_apply (op : Ast.binop) (node : Ast.expr) (l : string) (r : string) 
 (* set just before emitting a lambda that is `coro_new`'s argument (v0.1.558) *)
 let coro_env_owned_next = ref false
 
+(* Evaluation-order normalization binds a join before its consuming push.
+   Fuse only an immediately consumed local, with a previously evaluated
+   vector. The temporary cannot escape or be used by any other expression. *)
+let vec_join_store (e : Ast.expr) =
+  match e.Ast.node with
+  | Ast.Let ({ pnode = Ast.P_var tmp; _ },
+      { node = Ast.App ({ node = Ast.App ({ node = Ast.Var "str_join"; _ }, sep); _ }, xs); _ },
+      { node = Ast.App ({ node = Ast.App ({ node = Ast.Var "vec_push"; _ },
+          ({ node = Ast.Var vn; _ } as v)); _ }, { node = Ast.Var used; _ }); _ })
+      when tmp = used && vn <> tmp && not (Hashtbl.mem top_globals tmp) -> Some (v, sep, xs)
+  | _ -> None
+
 let rec emit_expr (e : Ast.expr) : string =
   if !region_sites && e.loc.Loc.line > 0 then last_emit_loc := e.loc;
   (* Q-029: tail position belongs to where this expression sits, so take it
@@ -2310,6 +2323,13 @@ let rec emit_expr (e : Ast.expr) : string =
     let then_c = emit_expr then_ in
     let cond_c = emit_expr cond in
     "(" ^ cond_c ^ " ? " ^ then_c ^ " : " ^ else_c ^ ")"
+  | Ast.Let _ when Option.is_some (vec_join_store e)
+                   && not (user_shadows "str_join") && not (user_shadows "vec_push") ->
+    let v, sep, xs = Option.get (vec_join_store e) in
+    str_join_used := true;
+    vec_join_used := true;
+    Printf.sprintf "__lang_vec_push_join(%s, %s, %s)"
+      (emit_expr v) (emit_expr sep) (emit_expr xs)
   | Ast.Let (pat0, value0, _) when
       (* Q-128: A CHAIN OF `let`s BECOMES ONE STATEMENT EXPRESSION, NOT A TOWER OF THEM.
 
@@ -2354,6 +2374,9 @@ let rec emit_expr (e : Ast.expr) : string =
     let prev_subst = !current_env_subst in
     let rec chain (cur : Ast.expr) : string =
       match cur.Ast.node with
+      | Ast.Let _ when Option.is_some (vec_join_store cur)
+                       && not (user_shadows "str_join") && not (user_shadows "vec_push") ->
+        c_tail_pos := __in_tail; emit_expr cur
       | Ast.Let (pat, value, body) ->
         (match pat.Ast.pnode with
          | Ast.P_var name when
@@ -4319,8 +4342,19 @@ let rec emit_expr (e : Ast.expr) : string =
           The outer App here has inner = App (Var "vec_push", vec_e) and
           arg = x. Return value is unit (int 0). *)
        let elem_tag = vec_elem_tag_of vec_e.Ast.ty vec_e.Ast.loc in
-       Printf.sprintf "mere_vec_%s_push(%s, %s)"
-         elem_tag (emit_expr vec_e) (emit_expr arg)
+       (match elem_tag, arg.Ast.node with
+        | "str", Ast.App ({ node = Ast.App ({ node = Ast.Var "str_join"; _ }, sep); _ }, xs)
+          when not (user_shadows "str_join") ->
+          (* The join is consumed only by this store. Construct it directly
+             in the vector's arena, preserving ownership without a temporary
+             full-size string and a second copy. Other backends retain the
+             ordinary composition of the existing builtins. *)
+          str_join_used := true;
+          vec_join_used := true;
+          Printf.sprintf "__lang_vec_push_join(%s, %s, %s)"
+            (emit_expr vec_e) (emit_expr sep) (emit_expr xs)
+        | _ -> Printf.sprintf "mere_vec_%s_push(%s, %s)"
+                 elem_tag (emit_expr vec_e) (emit_expr arg))
      | Ast.Var "f64x2_splat" -> Printf.sprintf "mere_f64x2_splat(%s)" (emit_expr arg)
      | Ast.Var "f64x2_reduce_add" -> Printf.sprintf "mere_f64x2_reduce_add(%s)" (emit_expr arg)
      | Ast.Var "f32x4_splat" -> Printf.sprintf "mere_f32x4_splat(%s)" (emit_expr arg)
@@ -13910,8 +13944,7 @@ let str_list_helpers () =
       "}";
       "";
       "/* Phase 24.3: str_join sep xs — concat list_str elements with sep. */";
-      "static const char* __lang_str_join(const char* sep, list_str xs) {";
-      "  if (list_str__tag(xs) == 0) return __lang_str_of_cstr(\"\");";
+      "static const char* __lang_str_join_at(__lang_region* region, const char* sep, list_str xs) {";
       "  size_t seplen = __lang_str_size(sep);";
       "  size_t total = 0;";
       "  int first = 1;";
@@ -13922,7 +13955,7 @@ let str_list_helpers () =
       "    first = 0;";
       "    cur = list_str__node(cur)->payload.Cons.f1;";
       "  }";
-      "  char* r = __lang_str_alloc(__lang_current_region, total);";
+      "  char* r = __lang_str_alloc(region, total);";
       "  size_t pos = 0;";
       "  first = 1;";
       "  cur = xs;";
@@ -13944,6 +13977,10 @@ let str_list_helpers () =
       "  }";
       "  r[pos] = '\\0';";
       "  return r;";
+      "}";
+      "";
+            "static const char* __lang_str_join(const char* sep, list_str xs) {";
+      "  return __lang_str_join_at(__lang_current_region, sep, xs);";
       "}";
       "";
       (* Phase 44: list_dir — turn dir entries (sorted, excluding `.` / `..`)
@@ -16023,6 +16060,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   metrics_used := false;
   str_split_used := false;
   str_join_used := false;
+  vec_join_used := false;
   list_dir_used := false;
   args_used := false;
   let variant_decls =
@@ -18059,6 +18097,19 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     (* Phase 24.3: str_split / str_join — references list_str_node so
        emit after mono variant bodies (= list_str). *)
     @ (if !str_split_used || !str_join_used || !list_dir_used || !args_used || !uses_read_lines then [str_list_helpers (); ""] else [])
+    @ (if !vec_join_used then [String.concat "\n" [
+         "static int __lang_vec_push_join(mere_vec_str* v, const char* sep, list_str xs) {";
+         "  __LANG_OWNED(v, \"Vec\", \"vec_push\");";
+         "  const char* result = __lang_str_join_at(v->region, sep, xs);";
+         "  if (v->len == v->cap) {";
+         "    int cap = v->cap * 2;";
+         "    v->data = (const char**)__lang_region_grow_aligned(v->region, v->data, sizeof(*v->data) * (size_t)v->cap, sizeof(*v->data) * (size_t)cap, __alignof__(*v->data));";
+         "    v->cap = cap;";
+         "  }";
+         "  v->data[v->len++] = result;";
+         "  v->compact_dirty = 1;";
+         "  return 0;";
+         "}" ]; ""] else [])
     @ (if !uses_read_lines then [read_lines_helper; ""] else [])
     @ (if forward_decls = [] then [] else forward_decls @ [""])
     @ (let extern_decls =
