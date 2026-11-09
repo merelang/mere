@@ -16724,9 +16724,10 @@ let () =
      in
      if has c "mere_vec_int_new((&__lang_default_region))" then "default" else "moved")
     "default";
-  check "v0.1.312: init is re-armable (a flag, not pthread_once)"
+  check "v0.1.312: module initialization is re-armable"
     (if has lib_demo "static int __mere_lib_live = 0;"
-        && not (has lib_demo "pthread_once")
+        && has lib_demo "if (!__mere_lib_live) { __mere_lib_init_body(); __mere_lib_live = 1; }"
+        && has lib_demo "  __mere_lib_live = 0;"
      then "re-armable" else "once") "re-armable";
   check "v0.1.308: without --lib, main is still emitted"
     (let c =

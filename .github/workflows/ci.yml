@@ -505,7 +505,7 @@ jobs:
       # harness, which is why they cover shapes a hand-written suite does not:
       # its first run found `show` of a Vec answering `<unknown>` on C.
       - name: "examples_parity (the corpus prints the same on interp and C)"
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: |
           sh scripts/examples_parity.sh
           sh scripts/examples_parity.sh --poison
@@ -518,7 +518,7 @@ jobs:
       # that has no float. The gate checks the round trip bit for bit, that
       # interp and C agree, and that every exported name compiles for RV32I.
       - name: "softfloat (a double's bits, on a target with no float)"
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/softfloat_check.sh
 
       # The -rv prelude is injected by the driver, so the backend's own tests

@@ -10694,7 +10694,7 @@ let str_concat_helper =
    region buffer, runs body, and frees the buffer. `&R v` allocates a
    copy of v in the region and returns a pointer. Escape check at the
    typer ensures no `&R T` value leaves the region's scope. *)
-let region_runtime_helpers =
+let region_runtime_helpers () =
   String.concat "\n"
     [ "/* A region is a chain of bump-allocated blocks. When the current";
       "   block fills, a new (geometrically larger) block is chained on";
@@ -10713,7 +10713,8 @@ let region_runtime_helpers =
       "} __attribute__((aligned(16))) __lang_region_block;";
       "/* bumped by every coroutine switch (see __lang_region_pinned): a block";
       "   allocated after a coroutine last stopped cannot be pointed into by it */";
-      "static _Thread_local unsigned long __lang_region_epoch = 1;";
+      (if !lib_mode then "static _Atomic unsigned long __lang_region_epoch = 1;"
+       else "static _Thread_local unsigned long __lang_region_epoch = 1;");
       "";
       "typedef struct __lang_region_s {";
       "  char* base;               /* current block: data start */";
@@ -10756,7 +10757,8 @@ let region_runtime_helpers =
          thread-local one (see __lang_blk_link). *)
       "  int xthread;";
       "} __lang_region;";
-      "static __lang_region __lang_default_region;";
+      ("static __lang_region __lang_default_region;" ^
+       if !lib_mode then "\nstatic pthread_mutex_t __lang_default_deps_lock = PTHREAD_MUTEX_INITIALIZER;" else "");
       "";
       "/* EVERY LIVE BLOCK, so a conservative scan can ask whether an address may be";
       "   read (coro_scan_ints): a word that points into no live block is never";
@@ -10966,11 +10968,16 @@ let region_runtime_helpers =
       "/* the address range this thread's region blocks have ever spanned: a";
       "   suspended coroutine's stack is scanned only for words inside it (see";
       "   __lang_region_pinned) */";
-      "static _Thread_local uintptr_t __lang_block_lo = UINTPTR_MAX, __lang_block_hi = 0;";
+      (if !lib_mode then "static uintptr_t __lang_block_lo = UINTPTR_MAX, __lang_block_hi = 0;"
+       else "static _Thread_local uintptr_t __lang_block_lo = UINTPTR_MAX, __lang_block_hi = 0;");
       "static void __lang_block_note(void* b, size_t cap) {";
       "  uintptr_t lo = (uintptr_t)b, hi = lo + sizeof(__lang_region_block) + cap;";
-      "  if (lo < __lang_block_lo) __lang_block_lo = lo;";
-      "  if (hi > __lang_block_hi) __lang_block_hi = hi;";
+      (if !lib_mode then
+        "  uintptr_t seen_lo = __atomic_load_n(&__lang_block_lo, __ATOMIC_RELAXED);\n  while (lo < seen_lo && !__atomic_compare_exchange_n(&__lang_block_lo, &seen_lo, lo, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}"
+       else "  if (lo < __lang_block_lo) __lang_block_lo = lo;");
+      (if !lib_mode then
+        "  uintptr_t seen_hi = __atomic_load_n(&__lang_block_hi, __ATOMIC_RELAXED);\n  while (hi > seen_hi && !__atomic_compare_exchange_n(&__lang_block_hi, &seen_hi, hi, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}"
+       else "  if (hi > __lang_block_hi) __lang_block_hi = hi;");
       "}";
       "static int __lang_region_add_block_try(__lang_region* r, size_t cap);";
       "static void __lang_region_add_block(__lang_region* r, size_t cap) {";
@@ -11018,23 +11025,28 @@ let region_runtime_helpers =
          lives in, and goes when that region's life ends. Before, it outlived
          it: the struct was freed with the block and the arena with nothing --
          8,000 maps compacted inside `region R { }` left 480 MB behind R. Only a
-         block's region (seq != 0) takes them; the default region is never
+         block's region (seq != 0) takes them; the standalone default region is never
          freed, and neither is anything it holds. A region that is kept hands
          its arenas on with its blocks. This is as safe as freeing the block
          itself: the struct that names the arena is in that block, and a
          container cannot leave its block without the block being kept. *)
       "static void __lang_region_dep_link(__lang_region* home, __lang_region* a) {";
       "  home = __lang_region_live(home);";
-      "  if (!home || home->seq == 0) return;";
+      (if !lib_mode then
+        "  if (!home || (home->seq == 0 && home != &__lang_default_region)) return;\n  if (home == &__lang_default_region) {\n    a->xthread = 1;\n    for (__lang_region_block* b = a->blocks; b; b = b->prev) { __lang_blk_unlink(b); __lang_blk_link(a, b); }\n    pthread_mutex_lock(&__lang_default_deps_lock);\n  }"
+       else "  if (!home || home->seq == 0) return;");
       "  a->dep_home = home; a->dep_prev = NULL; a->dep_next = home->deps;";
       "  if (home->deps) home->deps->dep_prev = a;";
-      "  home->deps = a;";
+      ("  home->deps = a;" ^
+       if !lib_mode then "\n  if (home == &__lang_default_region) pthread_mutex_unlock(&__lang_default_deps_lock);" else "");
       "}";
       "static void __lang_region_dep_unlink(__lang_region* a) {";
-      "  if (!a->dep_home) return;";
+      ("  if (!a->dep_home) return;" ^
+       if !lib_mode then "\n  __lang_region* home = a->dep_home;\n  if (home == &__lang_default_region) pthread_mutex_lock(&__lang_default_deps_lock);" else "");
       "  if (a->dep_prev) a->dep_prev->dep_next = a->dep_next; else a->dep_home->deps = a->dep_next;";
       "  if (a->dep_next) a->dep_next->dep_prev = a->dep_prev;";
-      "  a->dep_home = NULL; a->dep_prev = NULL; a->dep_next = NULL;";
+      ("  a->dep_home = NULL; a->dep_prev = NULL; a->dep_next = NULL;" ^
+       if !lib_mode then "\n  if (home == &__lang_default_region) pthread_mutex_unlock(&__lang_default_deps_lock);" else "");
       "}";
       (* v0.1.570: --region-sites (see `heap_container_region`). A stub is told
          apart from a Q-190 forwarder by its `site`: a forwarder's is cleared at
@@ -13052,7 +13064,9 @@ let coro_runtime ~(stack_bytes : int) =
       "static void __lang_pin_gather(__lang_coro* c) {";
       "  __lang_coro_x* x = c->x;";
       "  x->pn = 0;";
-      "  uintptr_t blo = __lang_block_lo, bhi = __lang_block_hi;";
+      (if !lib_mode then
+        "  uintptr_t blo = __atomic_load_n(&__lang_block_lo, __ATOMIC_ACQUIRE), bhi = __atomic_load_n(&__lang_block_hi, __ATOMIC_ACQUIRE);"
+       else "  uintptr_t blo = __lang_block_lo, bhi = __lang_block_hi;");
       "  for (uintptr_t* p = (uintptr_t*)x->sp; p < (uintptr_t*)x->s_hi; p++) {";
       "    uintptr_t w = *p & ~(uintptr_t)7;";
       "    if (w < blo || w >= bhi) continue;";
@@ -13559,7 +13573,8 @@ let coro_runtime ~(stack_bytes : int) =
       "   a page or two.) */";
       "#define __LANG_CORO_CLASSES 8";
       "static _Thread_local struct { size_t size; char* head; int n; } __lang_coro_pools[__LANG_CORO_CLASSES];";
-      "static _Thread_local int __lang_coro_live_n;";
+      ("static _Thread_local int __lang_coro_live_n;" ^
+       if !lib_mode then "\nstatic unsigned long long __lang_coro_children = 0;" else "");
       "static _Thread_local int __lang_coro_live_peak;";
       "/* v0.1.568: out of line. Inlined into every coroutine creation, the check in";
       "   take -- a call to a function that does not return, inside the loop -- sent";
@@ -13606,7 +13621,8 @@ let coro_runtime ~(stack_bytes : int) =
       "  /* a finished coroutine cannot unmap the stack it is standing on; the one";
       "     it handed over to does it here */";
       "  __lang_coro* z = __lang_coro_zombie;";
-      "  if (z) { __lang_coro_zombie = NULL; __lang_coro_live_n--; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }";
+      ("  if (z) { __lang_coro_zombie = NULL; __lang_coro_live_n--; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z);" ^
+       (if !lib_mode then " __atomic_sub_fetch(&__lang_coro_children, 1, __ATOMIC_RELEASE);" else "") ^ " }");
       "}";
       "";
       "static void __lang_coro_enter_root(void) {";
@@ -13732,7 +13748,8 @@ let coro_runtime ~(stack_bytes : int) =
       "  c->x->sp = __lang_coro_seed(m + sz + guard, __lang_coro_body, c);";
       "  if (++__lang_coro_live_n > __lang_coro_live_peak) __lang_coro_live_peak = __lang_coro_live_n;";
       "  __lang_coro_give_slot(c);";
-      "  __lang_coro_link(c);";
+      ("  __lang_coro_link(c);" ^
+       if !lib_mode then "\n  __atomic_add_fetch(&__lang_coro_children, 1, __ATOMIC_RELEASE);" else "");
       "  return __lang_coro_handle(c);";
       "}";
       "";
@@ -17245,6 +17262,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
               \  if (!__lib_outer && __lib_prev != __lib_me) {\n\
               \    static const char __m[] = \"mere_%s_%s: called while another thread is inside this library -- its module state (a top-level container) has one owner at a time; call the library from one thread, or hold a lock around the calls\";\n\
               \    if (err) { unsigned char* __p = (unsigned char*)malloc(sizeof __m); if (__p) { memcpy(__p, __m, sizeof __m); err->ptr = __p; err->len = (long long)(sizeof __m - 1); } }\n\
+              \    __mere_lib_thread_capture();\n\
               \    return MERE_FAIL;\n\
               \  }\n" !lib_stem name,
            "  if (__lib_outer) __atomic_store_n(&__mere_lib_busy, 0, __ATOMIC_RELEASE);\n")
@@ -17323,6 +17341,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           \      if (__p) { memcpy(__p, __lang_fail_msg, __n + 1); err->ptr = __p; err->len = (long long)__n; }\n\
           \    }\n\
           %s\
+          \    __mere_lib_thread_capture();\n\
           \    return MERE_FAIL;\n\
           \  }\n\
           \  __lang_region* __call_region = %s;\n\
@@ -17334,6 +17353,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           \  __lang_fail_jmpbuf_set = __saved_set;\n\
           \  memcpy(__lang_fail_jmpbuf, __saved_jmp, sizeof(jmp_buf));\n\
           %s\
+          \  __mere_lib_thread_capture();\n\
           \  return MERE_OK;\n\
           }"
           (wrapper_sig e) enter leave acquire input_setup body input_release release leave
@@ -17380,6 +17400,42 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
             "  out->ptr = p; out->len = b->len;";
             "}" ])
       in
+      (* Darwin releases its image TLS before ordinary pthread key destructors.
+         Keep an idle-boundary snapshot in the key's heap value so teardown can
+         restore ownership bookkeeping without reading the discarded TLS. No
+         callback is registered with dyld: owned pthread keys remain removable
+         when a host shuts down and unloads a module on a still-live thread. *)
+      let teardown_fields =
+        [ "__lang_region_cache"; "__lang_region_cache_n";
+          "__lang_region_active"; "__lang_region_active_n";
+          "__lang_region_active_cap"; "__lang_blk_tl" ] @
+        if not !uses_coro then [] else
+        [ "__lang_coro_root_x"; "__lang_coro_slots"; "__lang_coro_gens";
+          "__lang_coro_free"; "__lang_scan_sp"; "__lang_coro_pools";
+          "__lang_coro_live_n"; "__lang_retired"; "__lang_retired_n";
+          "__lang_retired_cap" ]
+      in
+      let teardown_snapshot = String.concat "\n"
+        ([ "#if defined(__APPLE__)";
+           "typedef struct {" ] @
+         List.mapi (fun i n -> Printf.sprintf "  __typeof__(%s) f%d;" n i) teardown_fields @
+         [ "} __mere_lib_thread_snapshot;";
+           "static void __mere_lib_thread_capture(void) {";
+           "  __mere_lib_thread_snapshot* s = pthread_getspecific(__mere_lib_thread_key);";
+           "  if (!s) return;" ] @
+         List.mapi (fun i n -> Printf.sprintf "  memcpy(&s->f%d, &%s, sizeof(%s));" i n n) teardown_fields @
+         [ "}";
+           "static void __mere_lib_thread_restore(void* value) {";
+           "  __mere_lib_thread_snapshot* s = value;" ] @
+         List.mapi (fun i n -> Printf.sprintf "  memcpy(&%s, &s->f%d, sizeof(%s));" n i n) teardown_fields @
+         (if not !uses_coro then [] else
+          [ "  __lang_coro_cur = &__lang_coro_root;";
+            "  __lang_region_pinned = NULL; __lang_region_pinners = NULL;" ]) @
+         [ "  free(s);"; "}";
+           "#else";
+           "static void __mere_lib_thread_capture(void) {}";
+           "#endif" ])
+      in
       [ Printf.sprintf "/* mere --lib manifest (%s)" !lib_stem;
         " * exported:" ]
       @ (if exports = [] then [" *   (none)"]
@@ -17396,10 +17452,66 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "";
           "/* One-time runtime setup. Every wrapper calls this itself, so a host";
           "   that never does is still correct; calling it early only moves the";
-          "   cost. Unlike a standalone program, a library takes NO process-global";
-          "   actions: no signal handler, no stdout buffering, no atexit -- those";
-          "   are the host's policy. The entry file's top-level bindings (and its";
+          "   cost. Unlike a standalone program, a library makes no process-global";
+          "   policy changes: no signal handlers or stdout buffering. Module unload";
+          "   unregisters only runtime-owned TLS callbacks. Top-level bindings (and its";
           "   trailing expression, if it has one) run once, inside this call. */";
+          "static pthread_key_t __mere_lib_thread_key;";
+          "static pthread_once_t __mere_lib_thread_once = PTHREAD_ONCE_INIT;";
+          "static int __mere_lib_thread_key_error, __mere_lib_thread_key_ready;";
+          "static _Thread_local int __mere_lib_thread_watched;";
+          teardown_snapshot;
+          "static void __mere_lib_thread_cleanup(void* value) {";
+          "#if defined(__APPLE__)";
+          "  if (value) __mere_lib_thread_restore(value);";
+          "#else";
+          "  (void)value;";
+          "#endif";
+          "  if (__lang_region_active_n) return;";
+          (if !uses_coro then "  if (__lang_coro_live_n) return;" else "");
+          "  while (__lang_region_cache_n > 0) {";
+          "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
+          "    __lang_region_free(r); free(r);";
+          "  }";
+          "  free(__lang_region_active);";
+          "  __lang_region_active = NULL; __lang_region_active_cap = 0;";
+          (if !uses_coro then
+            "  __lang_coro_lib_cleanup();\n  __lang_retiree* retired = __lang_retired; int count = __lang_retired_n;\n  __lang_retired = NULL; __lang_retired_n = __lang_retired_cap = 0;\n  __lang_retired_checked_epoch = 0;\n  for (int i = 0; i < count; i++) { free(retired[i].by); __lang_region_free(retired[i].r); free(retired[i].r); }\n  free(retired);"
+           else "");
+          "}";
+          "static void __mere_lib_thread_key_init(void) {";
+          "  __mere_lib_thread_key_error = pthread_key_create(&__mere_lib_thread_key, __mere_lib_thread_cleanup);";
+          "  __mere_lib_thread_key_ready = !__mere_lib_thread_key_error;";
+          "}";
+          "static void __mere_lib_watch_thread(void) {";
+          "  if (__mere_lib_thread_watched) return;";
+          "  int error = pthread_once(&__mere_lib_thread_once, __mere_lib_thread_key_init);";
+          "  if (error || __mere_lib_thread_key_error) __lang_fail_impl(\"library: cannot register thread cleanup\");";
+          "  void* value = (void*)1;";
+          "#if defined(__APPLE__)";
+          "  value = calloc(1, sizeof(__mere_lib_thread_snapshot));";
+          "  if (!value) __lang_fail_impl(\"out of memory\");";
+          "#endif";
+          "  if (pthread_setspecific(__mere_lib_thread_key, value)) {";
+          "#if defined(__APPLE__)";
+          "    free(value);";
+          "#endif";
+          "    __lang_fail_impl(\"library: cannot register thread cleanup\");";
+          "  }";
+          "  __mere_lib_thread_watched = 1;";
+          "}";
+          "static void __mere_lib_unwatch_thread(void) {";
+          "  if (!__mere_lib_thread_watched) return;";
+          "#if defined(__APPLE__)";
+          "  free(pthread_getspecific(__mere_lib_thread_key));";
+          "#endif";
+          "  pthread_setspecific(__mere_lib_thread_key, NULL);";
+          "  __mere_lib_thread_watched = 0;";
+          "}";
+          "/* A loaded module must not leave callbacks into its unmapped code. */";
+          "__attribute__((destructor)) static void __mere_lib_unload(void) {";
+          "  if (__mere_lib_thread_key_ready) pthread_key_delete(__mere_lib_thread_key);";
+          "}";
           "static void __mere_lib_init_body(void) {";
           "  __lang_region_init(&__lang_default_region, 1 << 22);";
           (if top_global_inits = [] then ""
@@ -17417,20 +17529,26 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "static int __mere_lib_live = 0;";
           "static int __mere_lib_busy = 0;   /* v0.1.582: the thread inside, if the library has module state */";
           "void mere_lib_init(void) {";
+          "  __mere_lib_watch_thread();";
           "  __lang_owner_off = 1;";
           "  pthread_mutex_lock(&__mere_lib_lock);";
           "  if (!__mere_lib_live) { __mere_lib_init_body(); __mere_lib_live = 1; }";
+          "  __mere_lib_thread_capture();";
           "  pthread_mutex_unlock(&__mere_lib_lock);";
           "}";
           "void mere_lib_shutdown(void) {";
           "  pthread_mutex_lock(&__mere_lib_lock);";
-          "  if (!__mere_lib_live) { pthread_mutex_unlock(&__mere_lib_lock); return; }";
+          (if !uses_coro then
+            "  if (__atomic_load_n(&__lang_coro_children, __ATOMIC_ACQUIRE)) { pthread_mutex_unlock(&__mere_lib_lock); return; }"
+           else "");
+          "  if (!__mere_lib_live) { __mere_lib_thread_cleanup(NULL); __mere_lib_unwatch_thread(); pthread_mutex_unlock(&__mere_lib_lock); return; }";
           "  __mere_lib_live = 0;";
           "  __lang_region_stats_report();";
           (if Hashtbl.length owned_vec_instances > 0
            then "  __mere_owned_vec_free_all();" else "");
-          ("  __lang_region_free(&__lang_default_region);"
-           ^ if !uses_coro then "\n  __lang_coro_lib_cleanup();" else "");
+          "  __lang_region_free(&__lang_default_region);";
+          "  __mere_lib_thread_cleanup(NULL);";
+          "  __mere_lib_unwatch_thread();";
           "  pthread_mutex_unlock(&__mere_lib_lock);";
           "}";
           "/* Frees any pointer this library handed to the host. malloc and free";
@@ -17490,7 +17608,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          "#endif";
          "";
          "void mere_lib_init(void);      /* optional: wrappers call it themselves */";
-         "void mere_lib_shutdown(void); /* idempotent; a later call re-initializes";
+         ("void mere_lib_shutdown(void); /* idempotent; a later call re-initializes" ^
+          if !uses_coro then " after all coroutines finish" else "");
          "                                 (module state starts fresh). do not race";
          "                                 in-flight calls. */";
          "void mere_lib_free(void* p);";
@@ -17674,7 +17793,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          allocates in the thread's current region (it used to malloc and
          leak), so the region helpers must precede it. They themselves
          depend only on malloc/pthread. *)
-      region_runtime_helpers;
+      region_runtime_helpers ();
       "";
       (* Byte-safe string primitives are DEFINED later (str_concat_helper), but
          forward-declared here — after __lang_region exists — so every string
