@@ -262,7 +262,7 @@ This covers direct source entries and the runner's `apt-mirrors.txt` or
 Repository suites, components, signing keys and other mirrors are preserved.
 The setup action's opam cache remains enabled. Compare actual setup step
 durations and cache-hit messages when measuring changes: a cache hit does not
-avoid the action's system-package installation. All 192 gates and all four
+avoid the action's system-package installation. All 195 gates and all four
 build configurations remain required.
 
 The README execution gate runs in the containers group. It still forces the
@@ -303,7 +303,7 @@ run in downstream. Each retains both its complete corpus run and poison run.
 The assignment validator pins their names, commands and destination, and the
 downstream preflight requires Perl for comment counts. The full unit suite
 remains in compiler and README execution remains in containers.
-All 192 gates, nine groups and four build configurations remain required.
+All 195 gates, nine groups and four build configurations remain required.
 
 ## Self-host semantic verification
 
@@ -325,7 +325,7 @@ A valid reordered record must still compile and
 execute. Unrelated parse errors, successful commands printing an error, signals
 and bare traps cannot satisfy a refusal. Both compiled routes also execute
 50,000 logical tail calls without increasing stack or memory limits. This runs
-inside the existing compiler-group gate; all 192 gates, nine groups and four
+inside the existing compiler-group gate; all 195 gates, nine groups and four
 build configurations remain required.
 
 The existing Wasm-size gate also runs `scripts/selfhost_browser_check.cjs` on
@@ -337,6 +337,15 @@ The CLI and browser gates also execute the standard-helper fixture and all
 17 required compatibility cases, including transitive helper dependencies,
 polymorphic calls and declaration-order shadowing.
 
+The same compiler-group gate checks 12 handwritten formatter declaration
+layouts through the interpreter and compiled Wasm, with exact output,
+idempotence and complete raw-AST comparisons. All eleven runtime fixtures are
+formatted and their 140 lines run again through the five required paths.
+Opaque extern handles also execute before and after formatting through both
+Wasm compilers. The Wasm-size gate checks the shipped optimized browser
+formatter and compiler against those layouts, runtime answers and extern
+signatures. These checks stay inside the existing gates.
+
 CI, Pages and release builds populate the opam tool cache through the official
 GitHub release API before running the pinned OCaml setup action. Downloads must
 match the release's sizes and SHA-256 digests and pass detached GPG signature
@@ -344,7 +353,7 @@ verification against the setup action's expected primary key. The completion
 marker is written only after verification and an atomic executable replacement.
 The existing assignment gate checks bootstrap ordering and runs signature,
 digest, interrupted-download and cache-publication controls. Compiler caching,
-all 192 gates and all build configurations remain required.
+all 195 gates and all build configurations remain required.
 
 Pinned Wasm, protobuf and gRPC oracle archives also use the release API. The
 shared downloader checks release identity, size and SHA-256 before atomically

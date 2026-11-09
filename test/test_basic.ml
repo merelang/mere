@@ -12393,6 +12393,26 @@ let () =
   cross_validate "polymorphic variant" "type 'a Opt = Nothing | Just of 'a; Just 1";
   cross_validate "multiple type arguments" "type ('a, 'b) Pair = { first: 'a, second: 'b }; (Pair { first = 1, second = true } : (int, bool) Pair)";
 
+  (* Keep source declarations intact: the formatting entry consumes the raw
+     parse tree, before module flattening and alias expansion. Exact layouts
+     catch dropped unused declarations; native typing and idempotence check
+     that the emitted source remains usable. *)
+  let format_rows = In_channel.with_open_bin
+      (project_root ^ "/test/selfhost/format_declarations.tsv") In_channel.input_all
+    |> String.split_on_char '\n' |> List.filter (fun row -> row <> "") in
+  if List.length format_rows <> 12 then failwith "formatter declaration inventory changed";
+  List.iter (fun row -> match String.split_on_char '\t' row with
+    | [name; encoded; input] ->
+      let expected = match Json.parse encoded with
+        | Json.Str text -> text
+        | _ -> failwith "formatter layout must be a JSON string" in
+      let actual = self_host_format input in
+      check ("self-host fmt declarations: " ^ name) actual expected;
+      check ("self-host fmt idempotent: " ^ name) (self_host_format actual) actual;
+      check ("self-host fmt type round trip: " ^ name)
+        (Pipeline.type_of actual) (Pipeline.type_of input)
+    | _ -> failwith "invalid formatter declaration row") format_rows;
+
   (* Stage 50i — records. *)
   cross_validate "record decl" "type Point = { x: int, y: int }; ()";
   cross_validate "record literal"

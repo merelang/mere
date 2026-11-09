@@ -6,13 +6,10 @@
 // below mirrors `lib/ast.ml` minus the `loc` and `mutable ty` fields
 // the pipeline carries — a pure formatter doesn't need them.
 //
-// What's deliberately NOT in this file yet:
-// - A parser. Source `.mere` strings can't enter; only hand-coded
-//   AST literals (or, eventually, ASTs produced by the OCaml parser
-//   and passed in some other way) reach fmt_expr. Parser self-host
-//   is Stage 49c / Phase 50.
-// - Comment preservation. Same as the OCaml side — comments are
-//   discarded by the lexer.
+// Source formatting uses the unresolved AST from `parse_decls`, preserving
+// module boundaries, declaration order and extern signatures. The resolved
+// AST used by evaluation and compilation has already flattened those modules.
+// Comment preservation is not implemented by the self-host lexer/formatter.
 //
 // See the design notes for the full
 // staging plan.
@@ -449,11 +446,8 @@ let format_expr = fn (e: expr) -> fmt_expr prec_top 0 e;
 // === Top-level decl printing ===============================================
 //
 // Port of OCaml lib/formatter.ml's `fmt_top_let` / `fmt_top_let_rec` /
-// `fmt_top_type` / `format_program`. The shared `ast.mere` exposes
-// three `top_decl` variants (`TopLet` / `TopLetRec` / `TopType`); the
-// OCaml side's records / extern / view / signature / module / drop /
-// type_alias are not in scope yet — they ride along when the parser
-// learns them.
+// `fmt_top_type` / `format_program`. Source declarations retain their original
+// names, type aliases and module boundaries rather than using the resolved AST.
 
 // `let pat = value;`. Bodies that are themselves block-form (`let`,
 // `if`, `match`) drop to a new line with one indent, matching the
@@ -507,9 +501,7 @@ let rec fmt_top_let_rec_walk = fn (idx: int)
 let fmt_top_let_rec = fn (bindings: (str * expr) list) ->
   str_join "\n" (fmt_top_let_rec_walk 0 bindings) ++ ";";
 
-// Type parameters — `'a `, `('a, 'b) `, or empty. The parser doesn't
-// tokenize `'a` yet so `params` is always [] in practice, but the
-// emitter mirrors the OCaml side so it works the moment that lands.
+// Type parameters — `'a `, `('a, 'b) `, or empty.
 let fmt_type_params = fn (params: str list) ->
   match params with
   | Nil -> ""
@@ -548,7 +540,13 @@ let fmt_top_type_alias = fn (name: str) -> fn (params: str list)
   "type " ++ fmt_type_params params ++ name ++ " = "
   ++ fmt_ty 0 aliased ++ ";";
 
-let fmt_top_decl = fn (d: top_decl) ->
+// Indent every nonempty line, including multiline function and match bodies.
+// Applying this once per module also preserves the layout of nested modules.
+let indent_decl = fn (text: str) ->
+  str_join "\n" (list_map (str_split text "\n") (fn line ->
+    if str_len line == 0 then line else "  " ++ line));
+
+let rec fmt_top_decl = fn (d: top_decl) ->
   match d with
   | TopLet (pat, value) -> fmt_top_let pat value
   | TopLetRec bindings -> fmt_top_let_rec bindings
@@ -557,14 +555,14 @@ let fmt_top_decl = fn (d: top_decl) ->
   | TopTypeAlias (name, params, aliased) ->
     fmt_top_type_alias name params aliased
   | TopCtorAlias _ -> "" // Internal typing metadata has no source syntax.
-  | TopModule (_name, _sub_decls) ->
-    // Phase 54.1: fmt for modules is a placeholder. The parser's
-    // `flatten_and_resolve` collapses modules into flat decls before
-    // any consumer sees them, so this arm fires only if some caller
-    // bypasses flatten. For now, emit a stub marker.
-    "/* TopModule (flattening expected) */"
-  | TopExternFn (_, _) -> "/* TopExternFn */"
-  | TopExternType _ -> "/* TopExternType */"
+  | TopModule (name, sub_decls) ->
+    let members = list_map sub_decls (fn decl -> fmt_top_decl decl) in
+    let body = str_join "\n" members in
+    "module " ++ name ++ " \{\n"
+    ++ (if str_len body == 0 then "" else indent_decl body ++ "\n") ++ "}"
+  | TopExternFn (name, sig_ty) ->
+    "extern fn " ++ name ++ ": " ++ fmt_ty 0 sig_ty ++ ";"
+  | TopExternType name -> "extern type " ++ name ++ ";"
   ;
 
 // `program = (decls, main)`. Decls are joined with a blank line, then a

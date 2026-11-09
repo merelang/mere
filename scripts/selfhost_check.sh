@@ -181,6 +181,26 @@ for f in $inputs; do
   fi
 done
 
+# The formatter consumes unresolved declarations. Reparse its exact output and
+# run every required oracle through the same five execution paths as its input.
+if [ $# -eq 0 ]; then
+  if python3 "$ROOT/scripts/selfhost_format_check.py" --mere "$MERE" \
+      --compiler "$SELF" --output "$WORK/formatted"; then
+    format_failed=0
+    for name in t06_patterns t07_pattern_visibility t08_logic t09_records \
+        t10_aliases t11_polymorphic_types t12_type_modules t13_type_scope \
+        t14_annotations t15_constructors t16_constructor_scope; do
+      if ! check_one "$WORK/formatted/$name.mere"; then format_failed=$((format_failed + 1)); fi
+    done
+    failed=$((failed + format_failed))
+    if [ "$format_failed" -eq 0 ]; then
+      echo "  formatter semantic oracles: 140 handwritten lines on five paths passed"
+    fi
+  else
+    failed=$((failed + 1))
+  fi
+fi
+
 if ! python3 scripts/selfhost_record_check.py --mere "$MERE" --compiler "$SELF"; then
   failed=$((failed + 1))
 fi

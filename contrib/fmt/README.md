@@ -3,9 +3,14 @@
 Current pattern formatting preserves parentheses around nested alternatives,
 whole-constructor aliases and or-pattern lets. Prefix patterns remain source
 patterns, and NUL and carriage-return bytes are escaped for round trips.
+The source formatter also preserves nested modules, declaration order, opaque
+extern types and extern function signatures. It consumes the unresolved output
+of `parse_decls`; evaluation and compilation use a separate flattened tree.
+Comments and import statements are not preserved, and the self-host parser
+still covers a subset of the native syntax.
 The stage tables below record the implementation history.
 
-The OCaml `Mere.Formatter` (lib/formatter.ml, ~600 lines) is the
+The OCaml `Mere.Formatter` (lib/formatter.ml) is the
 reference implementation; this directory holds the in-progress Mere
 self-host of the same pretty-printer.
 
@@ -16,7 +21,7 @@ following a multi-phase plan.
 
 | file | scope | lines |
 |---|---|---|
-| `fmt.mere` | Pretty-printer. Imports [`contrib/parser/ast.mere`](../parser/ast.mere) for AST type definitions so the parser and the formatter share one `expr` / `program` definition. | ~480 |
+| `fmt.mere` | Pretty-printer. Imports [`contrib/parser/ast.mere`](../parser/ast.mere) for AST type definitions so the parser and the formatter share one `expr` / `program` definition. | ~700 |
 
 The AST definitions live in `contrib/parser/ast.mere` since Phase 50.7
 — fmt.mere used to keep its own copy with a bare `T` prefix on ty
@@ -73,19 +78,19 @@ intentionally uncovered at Stage 49a; Stage 49b widens the match.
 `demo2` doesn't reflect precedence yet either; 49b adds the
 precedence-driven paren insertion the OCaml side has.
 
-## Known C-backend issue (DEFERRED)
+## Declaration and runtime checks
 
-The variant declaration has three sibling constructors each carrying a
-3-element tuple payload (`EBin of binop * expr * expr`,
-`ECmp of cmpop * expr * expr`, `ELogic of logicop * expr * expr`).
-The C codegen's `collect_tuple_shapes` only walks expressions and
-polymorphic-variant instantiations; it doesn't pick up tuple shapes
-buried inside *monomorphic* variant payloads, so only the first such
-tuple typedef gets emitted and the others fail to compile.
+`scripts/selfhost_format_check.py` checks 12 handwritten declaration layouts
+through the interpreter and compiled Wasm, including idempotence and complete
+raw-AST round trips. It formats all eleven required runtime fixtures, whose
+140 handwritten output lines are then checked on five paths by
+`scripts/selfhost_check.sh`. Opaque extern handles also execute before and
+after formatting through both reference-compiled and self-hosted Wasm.
 
-This affects `mere -c contrib/fmt/fmt.mere` (clang reports an unknown
-type name); interp and Wasm both work. Tracked separately as a
-codegen-side fix.
+The existing Wasm-size gate runs the actual optimized browser formatter and
+compiler with their shipped HTML and DOM glue against the same layouts,
+runtime oracles and extern signatures. The formatter also remains in the
+contrib interpreter/C differential inventory.
 
 ## Position
 
