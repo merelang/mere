@@ -11934,20 +11934,20 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "static %s* %s_new(__lang_region* r) {" struct_name struct_name;
       Printf.sprintf "  %s* m = (%s*)__lang_region_alloc_type(r, %s);"
         struct_name struct_name struct_name;
-      "  m->cap = 4;";
+      (* Empty maps need only their identity. A map promoted immediately by
+         recycle/compact must not strand initial arrays in its home region. *)
+      "  m->cap = 0;";
       "  m->len = 0;";
-      Printf.sprintf "  m->keys = (%s*)__lang_region_alloc_array(r, %s, 4);" c_k c_k;
-      Printf.sprintf "  m->values = (%s*)__lang_region_alloc_array(r, %s, 4);" c_v c_v;
-      "  m->dead = (unsigned char*)__lang_region_alloc(r, 4);";
-      "  for (int i = 0; i < 4; i++) m->dead[i] = 0;";
+      "  m->keys = 0;";
+      "  m->values = 0;";
+      "  m->dead = 0;";
       "  m->live = 0;";
       "  m->region = r;";
       "  m->home = r;";
       "  m->owner = __LANG_OWNER_NOW();";
       "  m->owns_region = 0;";
-      "  m->idx_cap = 8;";
-      "  m->idx = (int*)__lang_region_alloc(r, sizeof(int) * 8);";
-      "  for (int i = 0; i < 8; i++) m->idx[i] = -1;";
+      "  m->idx_cap = 0;";
+      "  m->idx = 0;";
       "  m->idx_used = 0;";
       "  return m;";
       "}";
@@ -12192,6 +12192,14 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "static int %s_set(%s* m, %s __mk, %s __mv) {"
         struct_name struct_name c_k c_v;
       "  __LANG_OWNED(m, \"Map\", \"map_set\");";
+      "  if (m->cap == 0) {";
+      "    m->cap = 4;";
+      Printf.sprintf "    m->keys = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_k c_k;
+      Printf.sprintf "    m->values = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_v c_v;
+      "    m->dead = (unsigned char*)__lang_region_alloc(m->region, 4);";
+      "    memset(m->dead, 0, 4);";
+      Printf.sprintf "    %s_reindex(m, 8);" struct_name;
+      "  }";
       (* v0.1.30 (copy-on-store): the map owns its contents, so a stored value
          never dangles when the storer's scope is reclaimed. But the deep-copy
          must happen only for what is actually stored: hashing and key
@@ -12277,6 +12285,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "static %s %s_get(%s* m, %s __mk) {"
         c_v struct_name struct_name c_k;
       "  __LANG_READ(m);";
+      "  if (m->live == 0) __lang_fail_impl(\"map_get: key not found in Map (use map_has to check first)\");";
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
@@ -12297,6 +12306,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "static int %s_has(%s* m, %s __mk) {"
         struct_name struct_name c_k;
       "  __LANG_READ(m);";
+      "  if (m->live == 0) return 0;";
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
@@ -12324,6 +12334,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       Printf.sprintf "static int %s_delete(%s* m, %s __mk) {"
         struct_name struct_name c_k;
       "  __LANG_OWNED(m, \"Map\", \"map_delete\");";
+      "  if (m->live == 0) return 0;";
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";

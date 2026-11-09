@@ -1683,6 +1683,10 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/rv_ownedvec_owner_check.py --poison
 
+      - name: lazy_map (empty storage, promotion and mutation under O2 and ASan)
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
+        run: python3 scripts/lazy_map_check.py
+
       - name: map_read (Map read boundaries on interpreter, C, LLVM and Wasm)
         if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: python3 scripts/map_read_check.py --poison
