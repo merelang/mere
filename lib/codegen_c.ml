@@ -11462,9 +11462,10 @@ let region_runtime_helpers =
       "typedef struct { __lang_region* r; unsigned long long* by; int nby; unsigned long ep; } __lang_retiree;";
       "static _Thread_local __lang_retiree* __lang_retired = NULL;";
       "static _Thread_local int __lang_retired_n = 0, __lang_retired_cap = 0;";
-      "static void __lang_region_retire(__lang_region* r) {";
-      "  __lang_region_dep_unlink(r);";
-      "  if (__lang_region_pinners) {";
+      "static _Thread_local unsigned long __lang_retired_checked_epoch = 0;";
+      "static void __lang_region_collect_retired(void) {";
+      "  if (!__lang_retired_n || !__lang_region_pinners || __lang_retired_checked_epoch == __lang_region_epoch) return;";
+      "  __lang_retired_checked_epoch = __lang_region_epoch;";
       "    unsigned long long curh = __lang_coro_cur_h();";
       "    int w = 0;";
       "    for (int i = 0; i < __lang_retired_n; i++) {";
@@ -11477,6 +11478,11 @@ let region_runtime_helpers =
       "      else { free(o.by); __lang_region_free(o.r); free(o.r); }";
       "    }";
       "    __lang_retired_n = w;";
+      "}";
+      "static void __lang_region_retire(__lang_region* r) {";
+      "  __lang_region_dep_unlink(r);";
+      "  __lang_region_collect_retired();";
+      "  if (__lang_region_pinners) {";
       "    unsigned long long* by = NULL;";
       "    int nby = __lang_region_pinners(r, &by);";
       "    if (nby > 0) {";
@@ -14132,11 +14138,18 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
   let tag = ty_tag elem_ty in
   let c_elem = c_type_of elem_ty in
   let struct_name = "mere_vec_" ^ tag in
+  (* String elements are immutable: after a successful compact, another copy
+     cannot reclaim anything until a vector write. Track writes rather than
+     capacity changes, since a successful copy may keep the same capacity.
+     Deferred pins leave the flag set so an unchanged page retries later.
+     Do not apply this to arbitrary elements: nested mutable containers can
+     change without a write to the outer vector. *)
   String.concat "\n"
     ([ Printf.sprintf "typedef struct %s {" struct_name;
       Printf.sprintf "  %s* data;" c_elem;
       "  int len;";
       "  int cap;";
+      (if tag = "str" then "  int compact_dirty; /* immutable elements: written since the last successful copy */\n  size_t compact_alloc; /* also observe derived allocations in this arena */" else "");
       "  __lang_region* region;";
       "  int owns_region;  /* 1 after the first compact (see the map twin) */";
       "  __lang_region* home;  /* v0.1.567: where this struct itself lives -- `region` moves */";
@@ -14153,6 +14166,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->home = r;";
       "  v->owner = __LANG_OWNER_NOW();";
       "  v->owns_region = 0;";
+      (if tag = "str" then "  v->compact_dirty = 1;" else "");
       "  return v;";
       "}";
       "";
@@ -14170,6 +14184,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "    v->cap = new_cap;";
       "  }";
       "  v->data[v->len++] = x;";
+      (if tag = "str" then "  v->compact_dirty = 1;" else "");
       "  return 0; /* unit */";
       "}";
       "";
@@ -14178,6 +14193,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
          in the arena; the generation swap is what returns them. *)
       Printf.sprintf "static int %s_compact(%s* v) {" struct_name struct_name;
       "  __LANG_OWNED(v, \"Vec\", \"vec_compact\");";
+      (if tag = "str" then "  __lang_region_collect_retired();\n  if (v->owns_region && !v->compact_dirty && v->compact_alloc == v->region->alloc_total) return 0;" else "");
       "  if (v->owns_region && __lang_region_pinned && __lang_region_pinned(v->region, 0)) {  /* v0.1.589, v0.1.648, v0.1.651: see map_compact */";
       "    if (v->region->cbase == 0) { v->region->cbase = v->region->alloc_total; return 0; }";
       "    if (v->region->alloc_total <= 2 * v->region->cbase + 1048576) return 0;";
@@ -14195,6 +14211,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  v->data = nd;";
       "  v->cap = ncap;";
       "  v->owns_region = 1;";
+      (if tag = "str" then "  v->compact_dirty = 0;\n  v->compact_alloc = v->region->alloc_total;" else "");
       "  if (owned) __lang_region_retire(old);";
       "  return 0;";
       "}";
@@ -14243,6 +14260,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       Printf.sprintf "  v->data = (%s*)__lang_region_alloc_array(v->region, %s, 4);" c_elem c_elem;
       "  v->cap = 4;";
       "  v->len = 0;";
+      (if tag = "str" then "  v->compact_dirty = 1;" else "");
       "  return 0;";
       "}";
       "";
@@ -14273,6 +14291,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  }";
       Printf.sprintf "  x = __mcopy_%s(v->region, x);" tag;
       "  v->data[i] = x;";
+      (if tag = "str" then "  v->compact_dirty = 1;" else "");
       "  return 0; /* unit */";
       "}";
       "";
@@ -14285,6 +14304,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       (* v0.1.579: no owner check here -- it is in the versioning guard, once
          per loop (a check per element was 2.8x on axpy once a thread existed) *)
       Printf.sprintf "  v->data[i] = __mcopy_%s(v->region, x);" tag;
+      (if tag = "str" then "  v->compact_dirty = 1;" else "");
       "  return 0; /* unit */";
       "}" ]
     @ (if tag <> "float" then [] else [

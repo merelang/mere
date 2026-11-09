@@ -797,6 +797,10 @@ jobs:
       # Arena capacity stays proportional to allocation: one giant allocation
       # must neither strand the bump block's tail nor become the doubling base
       # (v0.1.307). Deterministic — the meter is MERE_REGION_STATS, not RSS.
+      - name: String Vec compaction retries and unchanged pages
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: python3 scripts/string_vec_compact_check.py
+
       - name: region_slack_check (capacity tracks allocation)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/region_slack_check.sh
