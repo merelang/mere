@@ -1,0 +1,13 @@
+// The root is a host stack, not a generated executable's entry stack.
+// A collection on another coroutine must still find its native values.
+let found = map_new ();
+let probe = fn (value: int) ->
+  let root = coro_root () in
+  let _ = map_clear found in
+  let collector = coro_new (fn _me -> fn (_u: unit) ->
+    let _ = coro_scan_ints root value (value + 1)
+      (fn (n: int) -> map_set found n 1) in
+    coro_exit root ()) in
+  let _ = coro_switch collector in
+  if map_has found value then value else 0 - 1;
+()

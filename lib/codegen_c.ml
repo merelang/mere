@@ -13578,6 +13578,10 @@ let coro_runtime ~(stack_bytes : int) =
       "";
       "static void __lang_coro_enter_root(void) {";
       "  if (__lang_coro_cur) return;";
+      (* A library host does not run the generated program entry point. Read
+         its stack bounds before the first switch can suspend the root, so
+         scans and arena pins cover the caller's live frames too. *)
+      "  if (!__lang_stack_hi) __lang_stack_bounds();";
       "  __lang_coro_root.state = 1;";
       "  __lang_coro_root.owner = pthread_self();";
       "  __lang_coro_root.x = &__lang_coro_root_x;";
