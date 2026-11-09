@@ -1,0 +1,2 @@
+let roundtrip_text = fn (text: str) -> text;
+()

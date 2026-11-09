@@ -995,6 +995,22 @@ multi-instance context API. Failure returns status and unwinds temporary
 regions, but does not roll back mutations to instance state. Output buffers
 remain owned by the host and are released with `mere_lib_free`.
 
+A shutdown request leaves the library initialized while any of its non-root
+coroutines remain unfinished, including coroutines on another host thread.
+Finish them on their owning threads and retry shutdown; requests do not cancel
+or unwind suspended coroutine bodies. Finish all coroutines before their host
+thread exits. A successful shutdown can be repeated and a later exported call
+initializes fresh module state.
+
+Both ordinary and instance libraries release a host thread's cached temporary
+regions when that thread exits. Successful shutdown also releases the calling
+thread's idle caches and coroutine bookkeeping. Other host threads release their
+own caches when they exit or successfully call shutdown. Before unloading a
+shared library, finish all calls and coroutines, release each participating
+thread's caches by shutdown or thread exit, and perform final shutdown. Module
+unload unregisters the runtime's TLS callbacks so no callback can subsequently
+enter unmapped module code.
+
 Unreferenced default-region allocations also remain until shutdown. Use
 explicit temporary regions and the application's own reclamation policy;
 this mode does not add tracing GC or make unbounded allocation bounded.

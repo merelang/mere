@@ -13559,7 +13559,8 @@ let coro_runtime ~(stack_bytes : int) =
       "   a page or two.) */";
       "#define __LANG_CORO_CLASSES 8";
       "static _Thread_local struct { size_t size; char* head; int n; } __lang_coro_pools[__LANG_CORO_CLASSES];";
-      "static _Thread_local int __lang_coro_live_n;";
+      ("static _Thread_local int __lang_coro_live_n;" ^
+       if !lib_mode then "\nstatic unsigned long long __lang_coro_children = 0;" else "");
       "static _Thread_local int __lang_coro_live_peak;";
       "/* v0.1.568: out of line. Inlined into every coroutine creation, the check in";
       "   take -- a call to a function that does not return, inside the loop -- sent";
@@ -13606,7 +13607,8 @@ let coro_runtime ~(stack_bytes : int) =
       "  /* a finished coroutine cannot unmap the stack it is standing on; the one";
       "     it handed over to does it here */";
       "  __lang_coro* z = __lang_coro_zombie;";
-      "  if (z) { __lang_coro_zombie = NULL; __lang_coro_live_n--; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }";
+      ("  if (z) { __lang_coro_zombie = NULL; __lang_coro_live_n--; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z);" ^
+       (if !lib_mode then " __atomic_sub_fetch(&__lang_coro_children, 1, __ATOMIC_RELEASE);" else "") ^ " }");
       "}";
       "";
       "static void __lang_coro_watch_thread(void);";
@@ -13734,7 +13736,8 @@ let coro_runtime ~(stack_bytes : int) =
       "  c->x->sp = __lang_coro_seed(m + sz + guard, __lang_coro_body, c);";
       "  if (++__lang_coro_live_n > __lang_coro_live_peak) __lang_coro_live_peak = __lang_coro_live_n;";
       "  __lang_coro_give_slot(c);";
-      "  __lang_coro_link(c);";
+      ("  __lang_coro_link(c);" ^
+       if !lib_mode then "\n  __atomic_add_fetch(&__lang_coro_children, 1, __ATOMIC_RELEASE);" else "");
       "  return __lang_coro_handle(c);";
       "}";
       "";
@@ -13818,9 +13821,11 @@ let coro_runtime ~(stack_bytes : int) =
       "}";
       "static pthread_key_t __lang_coro_thread_key;";
       "static pthread_once_t __lang_coro_thread_once = PTHREAD_ONCE_INIT;";
-      "static int __lang_coro_thread_key_error;";
+      ("static int __lang_coro_thread_key_error;" ^
+       if !lib_mode then "\nstatic int __lang_coro_thread_key_ready;" else "");
       "static void __lang_coro_thread_key_init(void) {";
-      "  __lang_coro_thread_key_error = pthread_key_create(&__lang_coro_thread_key, __lang_coro_thread_cleanup);";
+      ("  __lang_coro_thread_key_error = pthread_key_create(&__lang_coro_thread_key, __lang_coro_thread_cleanup);" ^
+       if !lib_mode then "\n  __lang_coro_thread_key_ready = !__lang_coro_thread_key_error;" else "");
       "}";
       "static void __lang_coro_watch_thread(void) {";
       "  int error = pthread_once(&__lang_coro_thread_once, __lang_coro_thread_key_init);";
@@ -17410,10 +17415,41 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "";
           "/* One-time runtime setup. Every wrapper calls this itself, so a host";
           "   that never does is still correct; calling it early only moves the";
-          "   cost. Unlike a standalone program, a library takes NO process-global";
-          "   actions: no signal handler, no stdout buffering, no atexit -- those";
-          "   are the host's policy. The entry file's top-level bindings (and its";
+          "   cost. Unlike a standalone program, a library makes no process-global";
+          "   policy changes: no signal handlers or stdout buffering. Module unload";
+          "   unregisters only runtime-owned TLS callbacks. Top-level bindings (and its";
           "   trailing expression, if it has one) run once, inside this call. */";
+          "static pthread_key_t __mere_lib_thread_key;";
+          "static pthread_once_t __mere_lib_thread_once = PTHREAD_ONCE_INIT;";
+          "static int __mere_lib_thread_key_error, __mere_lib_thread_key_ready;";
+          "static _Thread_local int __mere_lib_thread_watched;";
+          "static void __mere_lib_thread_cleanup(void* unused) {";
+          "  (void)unused;";
+          "  if (__lang_region_active_n) return;";
+          "  while (__lang_region_cache_n > 0) {";
+          "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
+          "    __lang_region_free(r); free(r);";
+          "  }";
+          "  free(__lang_region_active);";
+          "  __lang_region_active = NULL; __lang_region_active_cap = 0;";
+          (if !uses_coro then "  __lang_coro_thread_cleanup(NULL);" else "");
+          "}";
+          "static void __mere_lib_thread_key_init(void) {";
+          "  __mere_lib_thread_key_error = pthread_key_create(&__mere_lib_thread_key, __mere_lib_thread_cleanup);";
+          "  __mere_lib_thread_key_ready = !__mere_lib_thread_key_error;";
+          "}";
+          "static void __mere_lib_watch_thread(void) {";
+          "  if (__mere_lib_thread_watched) return;";
+          "  int error = pthread_once(&__mere_lib_thread_once, __mere_lib_thread_key_init);";
+          "  if (error || __mere_lib_thread_key_error || pthread_setspecific(__mere_lib_thread_key, (void*)1))";
+          "    __lang_fail_impl(\"library: cannot register thread cleanup\");";
+          "  __mere_lib_thread_watched = 1;";
+          "}";
+          "/* A loaded module must not leave callbacks into its unmapped code. */";
+          "__attribute__((destructor)) static void __mere_lib_unload(void) {";
+          "  if (__mere_lib_thread_key_ready) pthread_key_delete(__mere_lib_thread_key);";
+          (if !uses_coro then "  if (__lang_coro_thread_key_ready) pthread_key_delete(__lang_coro_thread_key);" else "");
+          "}";
           "static void __mere_lib_init_body(void) {";
           "  __lang_region_init(&__lang_default_region, 1 << 22);";
           (if top_global_inits = [] then ""
@@ -17431,6 +17467,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "static int __mere_lib_live = 0;";
           "static int __mere_lib_busy = 0;   /* v0.1.582: the thread inside, if the library has module state */";
           "void mere_lib_init(void) {";
+          "  __mere_lib_watch_thread();";
           "  __lang_owner_off = 1;";
           "  pthread_mutex_lock(&__mere_lib_lock);";
           "  if (!__mere_lib_live) { __mere_lib_init_body(); __mere_lib_live = 1; }";
@@ -17438,12 +17475,16 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "}";
           "void mere_lib_shutdown(void) {";
           "  pthread_mutex_lock(&__mere_lib_lock);";
-          "  if (!__mere_lib_live) { pthread_mutex_unlock(&__mere_lib_lock); return; }";
+          (if !uses_coro then
+            "  if (__atomic_load_n(&__lang_coro_children, __ATOMIC_ACQUIRE)) { pthread_mutex_unlock(&__mere_lib_lock); return; }"
+           else "");
+          "  if (!__mere_lib_live) { __mere_lib_thread_cleanup(NULL); pthread_mutex_unlock(&__mere_lib_lock); return; }";
           "  __mere_lib_live = 0;";
           "  __lang_region_stats_report();";
           (if Hashtbl.length owned_vec_instances > 0
            then "  __mere_owned_vec_free_all();" else "");
           "  __lang_region_free(&__lang_default_region);";
+          "  __mere_lib_thread_cleanup(NULL);";
           "  pthread_mutex_unlock(&__mere_lib_lock);";
           "}";
           "/* Frees any pointer this library handed to the host. malloc and free";
@@ -17503,7 +17544,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          "#endif";
          "";
          "void mere_lib_init(void);      /* optional: wrappers call it themselves */";
-         "void mere_lib_shutdown(void); /* idempotent; a later call re-initializes";
+         ("void mere_lib_shutdown(void); /* idempotent; a later call re-initializes" ^
+          if !uses_coro then " after all coroutines finish" else "");
          "                                 (module state starts fresh). do not race";
          "                                 in-flight calls. */";
          "void mere_lib_free(void* p);";

@@ -9,7 +9,7 @@ import subprocess
 
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output',type=Path,required=True)
-parser.add_argument('--base',type=Path,help='optional baseline compiler for byte-identical ordinary output')
+parser.add_argument('--base',type=Path,help='optional baseline compiler for header and standalone output compatibility')
 opts=parser.parse_args()
 root=Path(__file__).resolve().parents[1]
 compiler=root/'_build/default/bin/mere.exe'
@@ -34,7 +34,8 @@ assert 'region escape' in text
 run('temporary-argument',[compiler,'--lib-instance','--header',fixtures/'temporary_argument.mere'])
 if opts.base:
  scalar=out/'scalar.mere';scalar.write_text('let state = map_new ();\nlet set = fn (n: int) -> map_set state "n" n;\n()\n')
- assert run('base-ordinary',[opts.base,'-c','--lib',scalar])==run('candidate-ordinary',[compiler,'-c','--lib',scalar])
+ assert run('base-header',[opts.base,'--header',scalar])==run('candidate-header',[compiler,'--header',scalar])
+ assert run('base-standalone',[opts.base,'-c',scalar])==run('candidate-standalone',[compiler,'-c',scalar])
 (out/'queue_pool.c').write_text(run('emit',[compiler,'-c','--lib-instance',fixtures/'queue_pool.mere']))
 cc=shlex.split(os.environ.get('CC','clang'))
 flags=cc+['-O2','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all']
@@ -55,4 +56,20 @@ assert run('strings-host',[out/'strings_host'])=='temporary string inputs, retai
 run('coroutine-roots-build',flags+['-I',out,fixtures/'coroutine_roots_host.c',out/'coroutine_roots.c','-pthread','-o',out/'coroutine_roots_host'])
 for mode in ['main','worker']:
  assert run('coroutine-roots-'+mode,[out/'coroutine_roots_host',mode])=='host root handles survive coroutine scans\n'
+for mode in ['ordinary','instance']:
+ extra=['--lib-instance'] if mode=='instance' else []
+ header=run(mode+'-threads-header',[compiler,*extra,'--header',fixtures/'thread_lifetime.mere'])
+ (out/'thread_lifetime.h').write_text(header)
+ cfile=out/(mode+'-threads.c')
+ cfile.write_text(run(mode+'-threads-emit',[compiler,'-c',*(extra or ['--lib']),fixtures/'thread_lifetime.mere']))
+ binary=out/(mode+'-threads')
+ run(mode+'-threads-build',flags+['-I',out,fixtures/'thread_lifetime_host.c',cfile,'-pthread','-o',binary])
+ assert run(mode+'-threads',[binary])=='host pthread temporary regions released\n'
+(out/'coroutine_shutdown.h').write_text(run('shutdown-header',[compiler,'--lib-instance','--header',fixtures/'coroutine_shutdown.mere']))
+(out/'coroutine_shutdown.c').write_text(run('shutdown-emit',[compiler,'-c','--lib-instance',fixtures/'coroutine_shutdown.mere']))
+run('shutdown-build',flags+['-I',out,fixtures/'coroutine_shutdown_host.c',out/'coroutine_shutdown.c','-pthread','-o',out/'shutdown_host'])
+assert run('shutdown-host',[out/'shutdown_host'])=='unfinished coroutines defer shutdown until their owner finishes them\n'
+run('unload-library-build',flags+['-fPIC','-shared',out/'coroutine_roots.c','-pthread','-o',out/'coroutine_roots.so'])
+run('unload-host-build',flags+['-I',out,fixtures/'unload_host.c','-pthread','-ldl','-o',out/'unload_host'])
+assert run('unload-host',[out/'unload_host',out/'coroutine_roots.so'])=='module unload unregisters thread cleanup callbacks\n'
 print('instance-lifetime library checks passed')

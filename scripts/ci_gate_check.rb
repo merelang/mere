@@ -18,6 +18,12 @@ module CIGates
     "fmt_comments_check (the formatter keeps column-1 comments)" => "fmt_comments_check.sh",
     "fmt_roundtrip_check (what fmt writes is still the same program)" => "fmt_roundtrip_check.sh"
   }.freeze
+  RUNTIME_MOVES = {
+    "examples_parity (the corpus prints the same on interp and C)" =>
+      ["downstream", "sh scripts/examples_parity.sh\nsh scripts/examples_parity.sh --poison\n"],
+    "softfloat (a double's bits, on a target with no float)" =>
+      ["web", "sh scripts/softfloat_check.sh"]
+  }.freeze
   CHECKOUT = "Check out the dogfood repositories"
   CACHE = "Restore the downstream compile cache"
   PACKAGES = "Install package dependencies"
@@ -125,6 +131,8 @@ module CIGates
     require!(checks.count { |s| s["name"] == FIRST_RUN } == 1, "the README execution gate must run once")
     require!(FORMATTERS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both formatter gates must run once")
+    require!(RUNTIME_MOVES.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
+             "both balanced runtime gates must run once")
     require!(checks.count { |s| s["name"] == FULL_TESTS } == 1, "the full toolchain unit suite must run once")
     require!(checks.count { |s| s["name"] == CHECKOUT } == 1, "downstream checkouts must be present")
     require!(checks.count { |s| s["name"] == CACHE } == 1, "the downstream compile cache must be present")
@@ -155,6 +163,12 @@ module CIGates
                  "formatter gates must retain their full corpus and poison runs")
         require!(!step["continue-on-error"], "formatter failures must fail downstream")
         assigned.fetch("downstream") << name
+      when *RUNTIME_MOVES.keys
+        group, command = RUNTIME_MOVES.fetch(name)
+        require!(selected == [group], "#{name}: retain its balanced execution group")
+        require!(step["run"] == command && !step["continue-on-error"],
+                 "#{name}: retain the complete corpus and controls")
+        assigned.fetch(group) << name
       when CHECKOUT
         require!(selected.sort == CHECKOUT_GROUPS, "downstream and every RISC-V oracle group need checkouts")
         require!(!step["continue-on-error"], "missing required oracle checkouts must fail the group")
@@ -234,6 +248,12 @@ module CIGates
       "formatter poison removed" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.first }["run"] = "sh scripts/fmt_comments_check.sh\n" },
       "formatter corpus removed" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.last }["run"] = "sh scripts/fmt_roundtrip_check.sh --poison\n" },
       "optional formatter" => ->(c) { c[:steps].find { |s| s["name"] == FORMATTERS.keys.last }["continue-on-error"] = true },
+      "examples back in runtime" => ->(c) { c[:steps].find { |s| s["name"] == RUNTIME_MOVES.keys.first }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" },
+      "renamed examples gate" => ->(c) { c[:steps].find { |s| s["name"] == RUNTIME_MOVES.keys.first }["name"] = "examples renamed" },
+      "examples poison removed" => ->(c) { c[:steps].find { |s| s["name"] == RUNTIME_MOVES.keys.first }["run"] = "sh scripts/examples_parity.sh\n" },
+      "softfloat back in runtime" => ->(c) { c[:steps].find { |s| s["name"] == RUNTIME_MOVES.keys.last }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" },
+      "renamed softfloat gate" => ->(c) { c[:steps].find { |s| s["name"] == RUNTIME_MOVES.keys.last }["name"] = "softfloat renamed" },
+      "softfloat bypassed" => ->(c) { c[:steps].find { |s| s["name"] == RUNTIME_MOVES.keys.last }["run"] = "true" },
       "missing full suite" => ->(c) { c[:steps].delete(c[:full]) },
       "empty full suite" => ->(c) { c[:full]["run"] = "true" },
       "missing required preflight" => ->(c) { c[:steps].reject! { |s| s["name"] == PREFLIGHT } },

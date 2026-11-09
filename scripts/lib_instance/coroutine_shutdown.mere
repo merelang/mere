@@ -1,0 +1,16 @@
+let pending = vec_new ();
+let result = vec_new ();
+let _ = vec_push result "empty";
+let park = fn (text: str) ->
+ let root = coro_root () in
+ let child = coro_new (fn _me -> fn (_u: unit) ->
+  let _ = vec_set result 0 text in coro_exit root ()) in
+ vec_push pending child;
+let count = fn (u: unit) -> vec_len pending;
+let finish = fn (u: unit) ->
+ let rec go = fn (i: int) ->
+  if i >= vec_len pending then ()
+  else let _ = coro_switch (vec_get pending i) in go (i + 1) in
+ let _ = go 0 in
+ vec_get result 0;
+()

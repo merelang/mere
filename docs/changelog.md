@@ -4,6 +4,26 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.722 — 2026-11-09
+
+C libraries release cached temporary regions when a host-created pthread exits,
+including ordinary `--lib` calls and temporary string inputs in instance mode.
+Successful shutdown also releases the calling thread's idle caches and coroutine
+bookkeeping. Module unload unregisters runtime-owned TLS callbacks.
+
+Shutdown requests leave the library initialized while any non-root coroutine
+remains unfinished. Callers can finish those coroutines on their owning threads
+and retry shutdown before reinitializing fresh module state. The library does
+not cancel suspended coroutine bodies.
+
+The existing library gate checks host-thread cache cleanup, same-thread and
+cross-thread shutdown requests, and repeated module unloading under O2 with
+ASan/UBSan. CI moves the complete
+examples corpus and its poison run to downstream and the complete softfloat
+check to web. Assignment controls pin both commands and destinations. All 196
+checks, nine integration groups, four build configurations and 3,300 tests remain
+required.
+
 ## v0.1.721 — 2026-11-09
 
 C library hosts initialize the current thread's stack bounds before registering
