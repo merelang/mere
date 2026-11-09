@@ -228,11 +228,13 @@ OCaml 5.1 / 5.4 (4-matrix). Integration checks use the validated Ubuntu 24.04
 image and run in nine parallel groups:
 compiler, runtime, containers, web, conformance, downstream, coroutines,
 RISC-V and RISC-V ownership. Each integration check runs once. The complete
-examples corpus and its poison run execute in downstream; the complete softfloat
-gate executes in web. These two
-checks previously dominated runtime's critical path. Their names, commands and
-destinations are pinned by the assignment validator, including controls for a
-missing corpus or poison run. All 196 checks and all nine groups remain required.
+examples corpus and its poison run execute in downstream. The complete softfloat
+gate runs in web, README execution in runtime, and full cross-backend parity in
+compiler. Map read and buffer boundary checks at both RISC-V widths run in RISC-V
+alongside the required memu oracle. These assignments spread the longer checks across
+existing groups. Their names, full commands and destinations are pinned by the
+assignment validator, including controls for missing corpus, poison and oracle
+coverage. All 196 checks and all nine groups remain required.
 Common tools are installed in every group; QEMU and the RISC-V disassembler are
 installed only in the RISC-V group. Network setup has bounded timeouts and retries.
 Required-tool preflights derive each group's tools from its assigned gates;

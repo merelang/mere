@@ -78,8 +78,8 @@ if [ "$MODE" = "--poison" ]; then
     "ABSENT   qemu-system-riscv32" MERE_CI_GROUP=riscv MERE_PREFLIGHT_FAKE_MISSING=qemu-system-riscv32
   run "compiler still requires its native compiler" \
     "ABSENT   clang" MERE_CI_GROUP=compiler MERE_PREFLIGHT_FAKE_MISSING=clang
-  run "containers still requires dune for README verification" \
-    "ABSENT   dune" MERE_CI_GROUP=containers MERE_PREFLIGHT_FAKE_MISSING=dune
+  run "runtime still requires dune for README verification" \
+    "ABSENT   dune" MERE_CI_GROUP=runtime MERE_PREFLIGHT_FAKE_MISSING=dune
   run "conformance still requires its normalization worker runner" \
     "ABSENT   python3" MERE_CI_GROUP=conformance MERE_PREFLIGHT_FAKE_MISSING=python3
   run "downstream requires the formatter comment counter" \
@@ -94,7 +94,15 @@ if [ "$MODE" = "--poison" ]; then
       echo "poison caught: $group does not require an unrelated emulator"
     fi
   done
-  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 13 caught"; exit 0; }
+  out=$(MERE_CI_GROUP=containers MERE_PREFLIGHT_FAKE_MISSING=dune sh "$0" 2>&1)
+  if [ $? -ne 0 ] || ! printf '%s' "$out" | grep -qF "gate group: containers" \
+     || printf '%s' "$out" | grep -qF "ABSENT   dune"; then
+    echo "POISON NOT CAUGHT — containers still requires the moved README gate's dune"
+    fails=$((fails + 1))
+  else
+    echo "poison caught: containers does not require the moved README gate's dune"
+  fi
+  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 14 caught"; exit 0; }
   echo "tool_preflight --poison: $fails not caught"; exit 1
 fi
 
