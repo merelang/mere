@@ -716,7 +716,7 @@ jobs:
         run: sh scripts/dom_canvas_check.sh
 
       - name: parity (interp / C / LLVM / wasm agree)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'compiler' }}
         run: sh scripts/parity.sh
 
       - name: ctest (C backend end to end)
@@ -993,7 +993,7 @@ jobs:
       # versions old while every gate here was green: nothing was pointed
       # outward. This is.
       - name: first_run_check (the README, executed)
-        if: ${{ !cancelled() && matrix.group == 'containers' }}
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: opam exec -- sh scripts/first_run_check.sh
 
       # Parts of the Wasm runtime are literal WAT text gated behind a flag only
@@ -1700,7 +1700,7 @@ jobs:
         run: python3 scripts/map_read_check.py --poison
 
       - name: map_read_riscv (Map read boundaries against explicit results at both widths)
-        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/map_read_check.py --rv-only --poison
 
       - name: vec_read (conversion and traversal boundaries on interpreter, C, LLVM and Wasm)
@@ -1720,7 +1720,7 @@ jobs:
         run: python3 scripts/buffer_boundary_check.py --poison
 
       - name: buffer_boundary_riscv (the same buffer contracts at both widths)
-        if: ${{ !cancelled() && matrix.group == 'riscv-ownership' }}
+        if: ${{ !cancelled() && matrix.group == 'riscv' }}
         run: MEMU="$RUNNER_TEMP/downstream/memu" python3 scripts/buffer_boundary_check.py --rv-only --poison
 
       # v0.1.637 (Q-200): a failing program fails the same way on RISC-V --
