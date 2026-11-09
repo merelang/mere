@@ -13069,7 +13069,7 @@ let coro_runtime ~(stack_bytes : int) =
          reach coro_scan_ints uses: as far as the pointers go inside the
          coroutine's own regions, three hops into anyone else's. *)
       "  __lang_pin_reach(c);";
-      "  qsort(x->pw, x->pn, sizeof(uintptr_t), __lang_uptr_cmp);";
+      "  if (x->pn > 1) qsort(x->pw, x->pn, sizeof(uintptr_t), __lang_uptr_cmp);";
       "  x->pgot = 1;";
       "}";
       "/* keep_oldest: a recycle keeps the region's first block and frees only";
@@ -13287,7 +13287,7 @@ let coro_runtime ~(stack_bytes : int) =
       "    }";
       "  __lang_scan_tlgen = __lang_blk_tl_gen; __lang_scan_dlgen = __lang_blk_dl_gen;";
       "  pthread_mutex_unlock(&__lang_blk_dl_lock);";
-      "  qsort(__lang_scan_sp, __lang_scan_nsp, sizeof(__lang_span), __lang_span_cmp);";
+      "  if (__lang_scan_nsp > 1) qsort(__lang_scan_sp, __lang_scan_nsp, sizeof(__lang_span), __lang_span_cmp);";
       "}";
       (* v0.1.589: the words a SUSPENDED coroutine's stack reaches, for the pin
          (see __lang_pin_gather): the walk coro_scan_ints makes, asking for no
@@ -13405,7 +13405,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  for (size_t done = 0; done < st.nwork; done++)";
       "    __lang_scan_words(&st, (uintptr_t*)st.work[3 * done], (uintptr_t*)st.work[3 * done + 1], (int)st.work[3 * done + 2]);";
       "  free(st.work); free(st.seen); free(st.seen_d); free(st.ownb);";
-      "  if (!running) { qsort(c->x->pw, c->x->pn, sizeof(uintptr_t), __lang_uptr_cmp); c->x->pgot = 1; }";
+      "  if (!running) { if (c->x->pn > 1) qsort(c->x->pw, c->x->pn, sizeof(uintptr_t), __lang_uptr_cmp); c->x->pgot = 1; }";
       "  if (keep) {";
       "    /* kept for the next ask (the bound is the caller's and grows): the";
       "       numbers themselves, not the stack's words */";
@@ -13609,8 +13609,14 @@ let coro_runtime ~(stack_bytes : int) =
       "  if (z) { __lang_coro_zombie = NULL; __lang_coro_live_n--; __lang_coro_stack_put(z->x->map, z->x->map_size); free(z->x->pw); free(z->x->sf); free(z->x); z->x = NULL; __lang_coro_drop_slot(z); free(z); }";
       "}";
       "";
+      "static void __lang_coro_watch_thread(void);";
       "static void __lang_coro_enter_root(void) {";
       "  if (__lang_coro_cur) return;";
+      (* A library host does not run the generated program entry point. Read
+         its stack bounds before the first switch can suspend the root, so
+         scans and arena pins cover the caller's live frames too. *)
+      "  if (!__lang_stack_hi) __lang_stack_bounds();";
+      "  __lang_coro_watch_thread();";
       "  __lang_coro_root.state = 1;";
       "  __lang_coro_root.owner = pthread_self();";
       "  __lang_coro_root.x = &__lang_coro_root_x;";
@@ -13782,6 +13788,44 @@ let coro_runtime ~(stack_bytes : int) =
       "  if (!to || to->state == 3) __lang_fail_impl(\"coro_exit: that coroutine has finished\");";
       "  to->msg = v;";
       "  return th;";
+      "}";
+      "/* Idle coroutine caches belong to the host thread. Release them when a";
+      "   worker exits; a library cannot rely on process exit to reclaim them. */";
+      "static void __lang_coro_thread_cleanup(void* unused) {";
+      "  (void)unused;";
+      "  if (__lang_coro_live_n || __lang_coro_cur != &__lang_coro_root) return;";
+      "  free(__lang_coro_root_x.pw); free(__lang_coro_root_x.sf);";
+      "  free(__lang_coro_slots); free(__lang_coro_gens); free(__lang_coro_free);";
+      "  __lang_coro_slots = NULL; __lang_coro_gens = NULL; __lang_coro_free = NULL;";
+      "  __lang_coro_nslots = __lang_coro_capslots = 0;";
+      "  __lang_coro_nfree = __lang_coro_capfree = 0;";
+      "  free(__lang_scan_sp); __lang_scan_sp = NULL;";
+      "  __lang_scan_nsp = __lang_scan_capsp = 0;";
+      "  __lang_scan_tlgen = __lang_scan_dlgen = 0;";
+      "  for (int i = 0; i < __LANG_CORO_CLASSES; i++) {";
+      "    char* m = __lang_coro_pools[i].head;";
+      "    size_t size = __lang_coro_pools[i].size;";
+      "    while (m) {";
+      "      char* next = *(char**)(m + __lang_coro_guard((size_t)sysconf(_SC_PAGESIZE)));";
+      "      munmap(m, size); m = next;";
+      "    }";
+      "  }";
+      "  memset(__lang_coro_pools, 0, sizeof __lang_coro_pools);";
+      "  memset(&__lang_coro_root, 0, sizeof __lang_coro_root);";
+      "  memset(&__lang_coro_root_x, 0, sizeof __lang_coro_root_x);";
+      "  __lang_coro_cur = __lang_coro_prev = __lang_coro_live = __lang_coro_zombie = NULL;";
+      "  __lang_coro_live_peak = 0;";
+      "}";
+      "static pthread_key_t __lang_coro_thread_key;";
+      "static pthread_once_t __lang_coro_thread_once = PTHREAD_ONCE_INIT;";
+      "static int __lang_coro_thread_key_error;";
+      "static void __lang_coro_thread_key_init(void) {";
+      "  __lang_coro_thread_key_error = pthread_key_create(&__lang_coro_thread_key, __lang_coro_thread_cleanup);";
+      "}";
+      "static void __lang_coro_watch_thread(void) {";
+      "  int error = pthread_once(&__lang_coro_thread_once, __lang_coro_thread_key_init);";
+      "  if (error || __lang_coro_thread_key_error || pthread_setspecific(__lang_coro_thread_key, (void*)1))";
+      "    __lang_fail_impl(\"coro: cannot register thread cleanup\");";
       "}";
       "static unsigned long long __lang_coro_f2b(double d) { unsigned long long b; memcpy(&b, &d, 8); return b; }";
       "static double __lang_coro_b2f(unsigned long long b) { double d; memcpy(&d, &b, 8); return d; }" ]

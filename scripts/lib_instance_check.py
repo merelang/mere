@@ -50,4 +50,9 @@ assert run('stateless-host',[out/'stateless_host'])=='stateless overlap rejectio
 (out/'retained_strings.c').write_text(run('strings-emit',[compiler,'-c','--lib-instance',fixtures/'retained_strings.mere']))
 run('strings-build',flags+['-I',out,fixtures/'retained_strings_host.c','-pthread','-o',out/'strings_host'])
 assert run('strings-host',[out/'strings_host'])=='temporary string inputs, retained copies, failure and reentry passed\n'
+(out/'coroutine_roots.h').write_text(run('coroutine-roots-header',[compiler,'--lib-instance','--header',fixtures/'coroutine_roots.mere']))
+(out/'coroutine_roots.c').write_text(run('coroutine-roots-emit',[compiler,'-c','--lib-instance',fixtures/'coroutine_roots.mere']))
+run('coroutine-roots-build',flags+['-I',out,fixtures/'coroutine_roots_host.c',out/'coroutine_roots.c','-pthread','-o',out/'coroutine_roots_host'])
+for mode in ['main','worker']:
+ assert run('coroutine-roots-'+mode,[out/'coroutine_roots_host',mode])=='host root handles survive coroutine scans\n'
 print('instance-lifetime library checks passed')
