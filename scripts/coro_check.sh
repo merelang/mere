@@ -100,7 +100,10 @@ factory_region|ic|13 13 17 17;2|0
 builtins_as_values|icl|42;7|0
 release_walk|ic|2250|0
 retire_moved|ic|300|0
-scan_outer|icl|all found;200880;0|0'
+scan_outer|icl|all found;200880;0|0
+scan_strings|icl|string roots passed|0
+scan_strings_sparse|c|sparse string roots passed|0
+scan_strings_header|c|header string root passed|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.

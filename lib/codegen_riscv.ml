@@ -723,6 +723,7 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
      | "coro_switch" -> "rvcoro_switch" :: v :: acc
      | "coro_exit" -> "rvcoro_exit" :: v :: acc
      | "coro_scan_ints" -> "rvcoro_scan_ints" :: v :: acc
+     | "coro_scan_strings" -> "rvcoro_scan_strings" :: v :: acc
      | _ -> v :: acc)
   | Ast.Int_lit _ | Ast.Bool_lit _ | Ast.Unit_lit
   | Ast.Str_lit _ | Ast.Float_lit _ -> acc
@@ -4294,6 +4295,8 @@ and compile_app env e =
     call_top env "rvcoro_transfer" args
   | Ast.Var "coro_scan_ints" when List.length args = 4 ->
     call_top env "rvcoro_scan_ints" args
+  | Ast.Var "coro_scan_strings" when List.length args = 3 ->
+    call_top env "rvcoro_scan_strings" args
   (* v0.1.640: a File is its descriptor -- both directions are the word itself *)
   | Ast.Var ("__rv_file_of_fd" | "__rv_fd_of_file") when List.length args = 1 ->
     compile_expr env (List.hd args)
