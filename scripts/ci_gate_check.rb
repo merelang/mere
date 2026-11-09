@@ -10,7 +10,7 @@ module CIGates
 
   # Update deliberately when adding or removing checks. A deleted step must
   # not silently reduce the coverage while every remaining group is green.
-  EXPECTED_CHECKS = 194
+  EXPECTED_CHECKS = 195
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   FIRST_RUN = "first_run_check (the README, executed)"

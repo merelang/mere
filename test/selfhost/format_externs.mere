@@ -1,0 +1,12 @@
+extern type FormatToken;
+extern fn format_token: int -> FormatToken;
+extern fn format_value: FormatToken -> int;
+module Foreign {
+  let read = fn n -> format_value (format_token n);
+  module Nested {
+    let read = fn n -> format_value (format_token n) + 1;
+  };
+};
+let _ = print (show (Foreign.read 41));
+let _ = print (show (Foreign.Nested.read 11));
+()

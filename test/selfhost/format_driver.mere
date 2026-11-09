@@ -1,0 +1,19 @@
+// The same unresolved parse/format pipeline as the browser, with exact file
+// output so a print epilogue cannot normalize the formatter's bytes.
+import "../../contrib/parser/parser.mere";
+import "../../contrib/fmt/fmt.mere";
+
+let _ = match args () with
+  | [mode, input, output] ->
+    let (prog, rest) = parse_decls Nil (tokenize (read_file input)) in
+    (match peek_tok rest with
+      | TEof ->
+        let text = if mode == "format" then format_program prog
+          // Debug AST strings may contain NUL bytes; quote them before the
+          // host's text-file API so every node remains part of the comparison.
+          else if mode == "ast" then escape_string_for_fmt (program_to_str prog)
+          else fail "unknown formatter test mode" in
+        write_file output text
+      | _ -> fail "unexpected token after formatter input")
+  | _ -> fail "expected mode, input and output paths"
+in ()

@@ -1,0 +1,12 @@
+module	"module M {\n  let inc = fn n -> n + 1;\n}\n\nM.inc 7\n"	module M { let inc = fn n -> n + 1; }; M.inc 7
+empty-module	"module Empty {\n}\n"	module Empty {};
+nested-module	"module Outer {\n  let x = 1;\n  module Inner {\n    let inc = fn n -> n + 1;\n  }\n  let y = 2;\n}\n\nOuter.Inner.inc 3\n"	module Outer { let x = 1; module Inner { let inc = fn n -> n + 1; }; let y = 2; }; Outer.Inner.inc 3
+module-pattern-body	"module M {\n  let f = fn x -> match x with\n  | 0 -> 1\n  | _ -> let y = x + 1 in\n    y;\n}\n\nM.f 3\n"	module M { let f = fn x -> match x with 0 -> 1 | _ -> let y = x + 1 in y; }; M.f 3
+module-alias-order	"type N = int;\n\nmodule Later {\n  let read = fn (n: N) -> n;\n  type N = bool;\n}\n\nLater.read 7\n"	type N = int; module Later { let read = fn (n: N) -> n; type N = bool; }; Later.read 7
+module-type-heads	"module M {\n  type 'a Box = { value: 'a };\n  type ('a, 'b) Pair = Left of 'a | Right of 'b;\n}\n"	module M { type 'a Box = { value: 'a }; type ('a, 'b) Pair = Left of 'a | Right of 'b; }; ()
+extern-type	"extern type Handle;\n"	extern type Handle;
+extern-arrow	"extern fn next: int -> int;\n\n7\n"	extern fn next: int -> int; 7
+extern-callback	"extern fn apply: (int -> int) -> int -> int;\n"	extern fn apply: (int -> int) -> int -> int;
+extern-tuple	"extern fn pair: int * bool -> str;\n"	extern fn pair: (int * bool) -> str;
+extern-opaque	"extern type Handle;\n\nextern fn open_handle: int -> Handle;\n\nextern fn read_handle: Handle -> int;\n"	extern type Handle; extern fn open_handle: int -> Handle; extern fn read_handle: Handle -> int;
+extern-and-module	"extern type Handle;\n\nextern fn read_handle: Handle -> int;\n\nmodule Host {\n  let plus = fn n -> n + 1;\n}\n\nHost.plus 7\n"	extern type Handle; extern fn read_handle: Handle -> int; module Host { let plus = fn n -> n + 1; }; Host.plus 7

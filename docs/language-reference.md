@@ -475,6 +475,13 @@ The checked entry retains standard list and string helpers and map iteration,
 selecting referenced implementations and their dependencies in declaration
 order to stay within the normal Wasm arena.
 
+The self-host formatter consumes source declarations before module flattening.
+It preserves nested module boundaries, declaration order, parameterized types,
+opaque extern types and extern function signatures. Formatting is idempotent,
+and the required runtime oracles retain their answers after formatting. The
+self-host lexer/parser does not preserve comments or import statements and
+still accepts a subset of the native language.
+
 Named variables in function and expression annotations are fresh for each
 annotation. Repeated names within one annotation share a type: `fn (x: 'a) -> x`
 can be let-generalized, while `((1, true) : 'a * 'a)` is rejected. Constraints

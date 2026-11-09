@@ -10,4 +10,4 @@
  ; Lower case, which is the name in the tree — the first version of this said CHANGELOG
  ; and the code that matched it opened fine here and raised on the Linux runner.
  ; The shared refusal inventory is read by both typer cross-validation paths.
- (deps selfhost/type_rejections.tsv selfhost/declaration_rejections.tsv (source_tree ../contrib) (source_tree ../scripts) (source_tree ../docs)))
+ (deps selfhost/type_rejections.tsv selfhost/declaration_rejections.tsv selfhost/format_declarations.tsv (source_tree ../contrib) (source_tree ../scripts) (source_tree ../docs)))

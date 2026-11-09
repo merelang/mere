@@ -4,6 +4,43 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.719 — 2026-11-09
+
+The self-host formatter preserves nested module declarations, source order and
+extern type/function signatures. These declarations previously became invalid
+placeholder comments. Formatting consumes the unresolved source tree, so later
+aliases or nominal restatements cannot move ahead of earlier module functions.
+Multiline function and pattern bodies retain their indentation inside modules.
+
+Twelve handwritten declaration layouts are checked through the interpreter
+and compiled Wasm, including idempotence and complete raw-AST round trips.
+All eleven required runtime fixtures are formatted and their 140 handwritten
+lines run again on the five execution paths. Opaque extern handles execute
+before and after formatting through both Wasm compilers. The actual optimized
+browser formatter and compiler run the same layouts, runtime answers and
+extern signatures, alongside the existing 61 refusals and 17 helper cases.
+The full-toolchain suite has 3,300 tests.
+
+Consumed string joins stored in a C-backend string Vec are also built directly
+in that vector's arena, avoiding an overlapping temporary copy. Argument
+evaluation order, ownership checks, builtin shadowing and the ordinary path
+for escaping strings remain intact. The dedicated O2/ASan/GCC checks bring the
+required CI inventory, together with the lazy-Map and instance-lifetime gates,
+to 195 checks across nine groups; all four build configurations remain required.
+
+New C-backend Maps allocate their backing arrays on the first insertion. Empty
+reads and deletion retain their ownership checks, and clear, recycle and compact
+remain valid before any insertion. This avoids retaining unused initial arrays
+when a fresh Map is immediately promoted to its own arena.
+
+Experimental `--lib-instance` C libraries retain their default region from
+`mere_lib_init` to `mere_lib_shutdown`, allowing retained queues and maps across
+calls. Immutable string inputs use a temporary call region; persistent stores
+copy retained values. Cross-thread overlap is rejected and same-thread reentry
+is allowed. The ordinary `--lib` contract and explicit-region escape checks
+remain in place. This mode adds neither tracing GC nor a multi-instance API;
+unreclaimed default-region allocations live until shutdown.
+
 ## v0.1.718 — 2026-11-09
 
 Qualified constructors in the self-host typer retain their declaration-time

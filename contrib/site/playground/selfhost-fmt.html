@@ -103,8 +103,10 @@
       <strong>Format</strong>. The Wasm module on this page tokenizes,
       parses, and pretty-prints your input — all written in Mere itself,
       no server round-trip. Top-level <code>let X = … ;</code> /
-      <code>let rec … ;</code> / <code>type T = … ;</code> declarations
-      and a trailing main expression both work.
+      <code>let rec … ;</code> / <code>type T = … ;</code>, nested
+      <code>module</code> declarations, <code>extern fn</code> and
+      <code>extern type</code> declarations all work, with an optional
+      trailing main expression.
     </p>
 
     <p>
@@ -127,6 +129,8 @@
       <button class="example-btn" data-example="match xs with | Nil -> 0 | Cons (h, t) -> h + sum t">match</button>
       <button class="example-btn" data-example="[1, 2, 3]">list</button>
       <button class="example-btn" data-example="1..10">range</button>
+      <button class="example-btn" data-example="module Math { module Inner { let inc = fn n -&gt; n + 1; }; }; Math.Inner.inc 7">modules</button>
+      <button class="example-btn" data-example="extern type Handle; extern fn open_handle: int -&gt; Handle; extern fn read_handle: Handle -&gt; int;">externs</button>
       <button class="example-btn" data-example="type opt = | Just of int | Nothing;
 let x = Just (42);
 let rec sum = fn (xs: int list) -> match xs with | Nil -> 0 | Cons (h, t) -> h + sum t;
@@ -148,9 +152,9 @@ sum [1, 2, 3]</textarea>
       page:
     </p>
     <ol>
-      <li><code>lexer.mere</code> (~336 lines, Stage 50a) — source string → tokens</li>
-      <li><code>parser.mere</code> (~1010 lines, Stages 50b–50e) — tokens → AST</li>
-      <li><code>fmt.mere</code> (~480 lines, Stage 49b) — AST → formatted source</li>
+      <li><code>lexer.mere</code> — source string → tokens</li>
+      <li><code>parser.mere</code> — tokens → source AST</li>
+      <li><code>fmt.mere</code> — source AST → formatted source</li>
     </ol>
     <p>
       They share the same <code>expr</code> / <code>pattern</code> /
@@ -165,11 +169,10 @@ sum [1, 2, 3]</textarea>
       Single expressions <em>and</em> full files both work. A full file
       looks like a sequence of <code>let X = e ;</code> /
       <code>let rec X = e ;</code> / <code>type T = … ;</code>
-      declarations followed by a main expression — the same shape Mere
-      itself uses. The output is byte-identical to running
-      <code>mere fmt</code> on the OCaml side for the slice of syntax
-      both formatters cover (see "Limitations" below for what's still
-      out of scope).
+      declarations, including nested modules and extern signatures, followed
+      by an optional main expression. Module boundaries and declaration order
+      are preserved. Modules and aliases may use a different layout from the
+      native formatter; the formatted program retains its behavior.
     </p>
     <p>
       Things to try: arithmetic with precedence, <code>let</code> /
@@ -177,33 +180,19 @@ sum [1, 2, 3]</textarea>
       control flow, curried lambdas (the formatter reverses the chain
       back into <code>\x y -&gt; body</code> shorthand), constructor
       patterns, list literals, ranges, variant type declarations,
-      annotated lambdas like <code>fn (n: int) -&gt; n + 1</code>.
+      annotated lambdas like <code>fn (n: int) -&gt; n + 1</code>, records,
+      parameterized types, nested modules and opaque extern handles.
     </p>
 
     <h3>Limitations</h3>
     <ul>
       <li>
-        Records (<code>type T = { f: ty };</code> / <code>T { f = e }</code>
-        / <code>e.f</code> / <code>T { … with f = e }</code>) — the
-        AST declares them but the parser doesn't accept them yet.
+        Full native syntax is not covered: for example, visibility markers,
+        <code>view</code>, <code>drop</code> and <code>signature</code>
+        declarations remain outside the self-host parser's subset.
       </li>
       <li>
-        <code>'a</code> style type variables in declarations / annotations.
-      </li>
-      <li>
-        <code>extern fn</code> / <code>extern type</code> /
-        <code>module M { … }</code> / <code>import</code> /
-        <code>open</code> / <code>view</code> / <code>drop</code> /
-        <code>signature</code> — full OCaml-side syntax not yet ported
-        to the self-host parser.
-      </li>
-      <li>
-        Phase 36 sugar operators (<code>|&gt;</code> / <code>&lt;|</code> /
-        <code>&lt;&lt;</code> / <code>&gt;&gt;</code> / <code>@@</code> /
-        <code>?</code> / <code>?!</code> / <code>&lt;-</code>) — same.
-      </li>
-      <li>
-        Comments — the lexer discards them.
+        Comments and import statements are not preserved.
       </li>
     </ul>
 
