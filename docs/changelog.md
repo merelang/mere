@@ -4,6 +4,28 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.720 — 2026-11-09
+
+C-backend Maps remain usable when their first insertion runs out of memory and
+that failure is caught. Initial capacity is published only after backing storage
+and the index are ready. Maps and Vecs also build compacted generations before
+switching arenas, releasing a partial generation if construction fails. Recycling
+stages replacement storage when a fresh arena is needed and retains the warm
+reuse path when the oldest block can hold the empty container's arrays.
+
+The existing lazy-Map gate injects failure at each reachable native allocation
+in 15 growth, reindex, compact and recycle workloads, including private arenas
+and copied strings. On macOS this provides 120 checks with 90 injected failures
+across O2 and ASan/UBSan, alongside the first-insertion retry checks. Previously
+stored values remain readable after failed generation construction, partial
+allocations are released, and subsequent mutation and compaction still work.
+
+Compacted Maps with at most three entries start with a 256-byte arena seed,
+reducing retained slack while preserving later growth and large payloads.
+The small-map allocation/lifecycle gate brings the required CI inventory to
+196 checks across nine groups. All four build configurations and the 3,300-test
+full-toolchain suite remain required.
+
 ## v0.1.719 — 2026-11-09
 
 The self-host formatter preserves nested module declarations, source order and
