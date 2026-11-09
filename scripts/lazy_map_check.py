@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Native empty-map lifecycle and initial-storage allocation regression."""
 import os
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -147,3 +148,5 @@ with tempfile.TemporaryDirectory(prefix="mere-map-retry-") as folder:
             assert result.returncode == 0 and result.stdout == b"false\n0\nfalse\n8\n1\n8\n", (
                 mode, room, result.returncode, result.stdout, result.stderr)
 print("Map allocation failure: four stages, retry and compact (O2/ASan/UBSan)")
+
+subprocess.run([sys.executable, str(ROOT / "scripts/container_failure_check.py")], check=True)
