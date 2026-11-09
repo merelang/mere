@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import platform
 from pathlib import Path
 import shlex
 import subprocess
@@ -79,4 +80,9 @@ assert run('shutdown-host',[out/'shutdown_host'])=='unfinished coroutines defer 
 run('unload-library-build',flags+['-fPIC','-shared',out/'coroutine_roots.c','-pthread','-o',out/'coroutine_roots.so'])
 run('unload-host-build',flags+['-I',out,fixtures/'unload_host.c','-pthread','-ldl','-o',out/'unload_host'])
 assert run('unload-host',[out/'unload_host',out/'coroutine_roots.so'])=='module unload unregisters thread cleanup callbacks\n'
+shared_flag='-dynamiclib' if platform.system()=='Darwin' else '-shared'
+shared=out/'libcoroutine_roots.so'
+run('coroutine-roots-shared',flags+['-fPIC',shared_flag,out/'coroutine_roots.c','-pthread','-o',shared])
+run('coroutine-roots-dynamic-build',flags+['-I',out,fixtures/'coroutine_roots_dynamic.c','-pthread','-ldl','-o',out/'coroutine_roots_dynamic'])
+assert run('coroutine-roots-dynamic',[out/'coroutine_roots_dynamic',shared])=='host roots can shut down and unload before worker exit\n'
 print('instance-lifetime library checks passed')

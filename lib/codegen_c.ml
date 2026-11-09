@@ -13625,14 +13625,12 @@ let coro_runtime ~(stack_bytes : int) =
        (if !lib_mode then " __atomic_sub_fetch(&__lang_coro_children, 1, __ATOMIC_RELEASE);" else "") ^ " }");
       "}";
       "";
-      "static void __lang_coro_watch_thread(void);";
       "static void __lang_coro_enter_root(void) {";
       "  if (__lang_coro_cur) return;";
       (* A library host does not run the generated program entry point. Read
          its stack bounds before the first switch can suspend the root, so
          scans and arena pins cover the caller's live frames too. *)
       "  if (!__lang_stack_hi) __lang_stack_bounds();";
-      "  __lang_coro_watch_thread();";
       "  __lang_coro_root.state = 1;";
       "  __lang_coro_root.owner = pthread_self();";
       "  __lang_coro_root.x = &__lang_coro_root_x;";
@@ -13806,10 +13804,9 @@ let coro_runtime ~(stack_bytes : int) =
       "  to->msg = v;";
       "  return th;";
       "}";
-      "/* Idle coroutine caches belong to the host thread. Release them when a";
-      "   worker exits; a library cannot rely on process exit to reclaim them. */";
-      "static void __lang_coro_thread_cleanup(void* unused) {";
-      "  (void)unused;";
+      "/* Release an idle host root at library shutdown, on its owner thread.";
+      "   No pthread destructor remains after a host unloads the library. */";
+      "static void __lang_coro_lib_cleanup(void) {";
       "  if (__lang_coro_live_n || __lang_coro_cur != &__lang_coro_root) return;";
       "  free(__lang_coro_root_x.pw); free(__lang_coro_root_x.sf);";
       "  free(__lang_coro_slots); free(__lang_coro_gens); free(__lang_coro_free);";
@@ -13832,19 +13829,6 @@ let coro_runtime ~(stack_bytes : int) =
       "  memset(&__lang_coro_root_x, 0, sizeof __lang_coro_root_x);";
       "  __lang_coro_cur = __lang_coro_prev = __lang_coro_live = __lang_coro_zombie = NULL;";
       "  __lang_coro_live_peak = 0;";
-      "}";
-      "static pthread_key_t __lang_coro_thread_key;";
-      "static pthread_once_t __lang_coro_thread_once = PTHREAD_ONCE_INIT;";
-      ("static int __lang_coro_thread_key_error;" ^
-       if !lib_mode then "\nstatic int __lang_coro_thread_key_ready;" else "");
-      "static void __lang_coro_thread_key_init(void) {";
-      ("  __lang_coro_thread_key_error = pthread_key_create(&__lang_coro_thread_key, __lang_coro_thread_cleanup);" ^
-       if !lib_mode then "\n  __lang_coro_thread_key_ready = !__lang_coro_thread_key_error;" else "");
-      "}";
-      "static void __lang_coro_watch_thread(void) {";
-      "  int error = pthread_once(&__lang_coro_thread_once, __lang_coro_thread_key_init);";
-      "  if (error || __lang_coro_thread_key_error || pthread_setspecific(__lang_coro_thread_key, (void*)1))";
-      "    __lang_fail_impl(\"coro: cannot register thread cleanup\");";
       "}";
       "static unsigned long long __lang_coro_f2b(double d) { unsigned long long b; memcpy(&b, &d, 8); return b; }";
       "static double __lang_coro_b2f(unsigned long long b) { double d; memcpy(&d, &b, 8); return d; }" ]
@@ -17492,7 +17476,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "  free(__lang_region_active);";
           "  __lang_region_active = NULL; __lang_region_active_cap = 0;";
           (if !uses_coro then
-            "  __lang_coro_thread_cleanup(NULL);\n  __lang_retiree* retired = __lang_retired; int count = __lang_retired_n;\n  __lang_retired = NULL; __lang_retired_n = __lang_retired_cap = 0;\n  __lang_retired_checked_epoch = 0;\n  for (int i = 0; i < count; i++) { free(retired[i].by); __lang_region_free(retired[i].r); free(retired[i].r); }\n  free(retired);"
+            "  __lang_coro_lib_cleanup();\n  __lang_retiree* retired = __lang_retired; int count = __lang_retired_n;\n  __lang_retired = NULL; __lang_retired_n = __lang_retired_cap = 0;\n  __lang_retired_checked_epoch = 0;\n  for (int i = 0; i < count; i++) { free(retired[i].by); __lang_region_free(retired[i].r); free(retired[i].r); }\n  free(retired);"
            else "");
           "}";
           "static void __mere_lib_thread_key_init(void) {";
@@ -17527,7 +17511,6 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
           "/* A loaded module must not leave callbacks into its unmapped code. */";
           "__attribute__((destructor)) static void __mere_lib_unload(void) {";
           "  if (__mere_lib_thread_key_ready) pthread_key_delete(__mere_lib_thread_key);";
-          (if !uses_coro then "  if (__lang_coro_thread_key_ready) pthread_key_delete(__lang_coro_thread_key);" else "");
           "}";
           "static void __mere_lib_init_body(void) {";
           "  __lang_region_init(&__lang_default_region, 1 << 22);";
