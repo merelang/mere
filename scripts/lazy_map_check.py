@@ -89,6 +89,8 @@ let _ = map_compact m;
 let _ = print_int (map_get m 2);
 '''
 RETRY_PREFIX = r'''
+/* Preserve the generated runtime's feature macros before including headers. */
+#define _GNU_SOURCE 1
 #include <stdlib.h>
 #include <stddef.h>
 #include <sys/mman.h>
