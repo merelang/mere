@@ -1022,6 +1022,10 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/lib_check.sh
 
+      - name: lib_instance_check (retained state and call lifetimes)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: python3 scripts/lib_instance_check.py --output "$RUNNER_TEMP/lib-instance-check"
+
       # Readiness I/O (v0.1.313): the transcript checks both directions --
       # events arrive when they should, none are invented when nothing
       # happened -- and pins the coded would-block returns on nonblocking
