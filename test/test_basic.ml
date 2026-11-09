@@ -16173,7 +16173,7 @@ let () =
   assert_contains "v0.1.589: a failed malloc under the region lock unlocks before it fails"
     (codegen "1 + 1") "if (shared && !__lang_region_add_block_try(r, ncap)) { pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
   assert_contains "v0.1.589: a recycled map keeps the capacity of the block it kept"
-    (codegen "let m = map_new () in let _ = map_set m 1 2 in map_recycle m") "    r->cap = b->pad;";
+    (codegen "let m = map_new () in let _ = map_set m 1 2 in map_recycle m") "  old->cap = seed->pad;";
   assert_contains "v0.1.274: the LLVM region allocator reads it too"
     (llvm "1 + 1") "call void @__lang_fail_impl(ptr @.oom_msg)";
   (* A product that wraps would buy a small buffer for a large copy. *)

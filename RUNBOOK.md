@@ -262,7 +262,7 @@ This covers direct source entries and the runner's `apt-mirrors.txt` or
 Repository suites, components, signing keys and other mirrors are preserved.
 The setup action's opam cache remains enabled. Compare actual setup step
 durations and cache-hit messages when measuring changes: a cache hit does not
-avoid the action's system-package installation. All 195 gates and all four
+avoid the action's system-package installation. All 196 gates and all four
 build configurations remain required.
 
 The README execution gate runs in the containers group. It still forces the
@@ -303,7 +303,7 @@ run in downstream. Each retains both its complete corpus run and poison run.
 The assignment validator pins their names, commands and destination, and the
 downstream preflight requires Perl for comment counts. The full unit suite
 remains in compiler and README execution remains in containers.
-All 195 gates, nine groups and four build configurations remain required.
+All 196 gates, nine groups and four build configurations remain required.
 
 ## Self-host semantic verification
 
@@ -325,7 +325,7 @@ A valid reordered record must still compile and
 execute. Unrelated parse errors, successful commands printing an error, signals
 and bare traps cannot satisfy a refusal. Both compiled routes also execute
 50,000 logical tail calls without increasing stack or memory limits. This runs
-inside the existing compiler-group gate; all 195 gates, nine groups and four
+inside the existing compiler-group gate; all 196 gates, nine groups and four
 build configurations remain required.
 
 The existing Wasm-size gate also runs `scripts/selfhost_browser_check.cjs` on
@@ -353,7 +353,7 @@ verification against the setup action's expected primary key. The completion
 marker is written only after verification and an atomic executable replacement.
 The existing assignment gate checks bootstrap ordering and runs signature,
 digest, interrupted-download and cache-publication controls. Compiler caching,
-all 195 gates and all build configurations remain required.
+all 196 gates and all build configurations remain required.
 
 Pinned Wasm, protobuf and gRPC oracle archives also use the release API. The
 shared downloader checks release identity, size and SHA-256 before atomically

@@ -162,10 +162,10 @@ ownedvec_store|c|owned_vec_push stores the pointer|s/v->data\[v->len++\] = __mco
 ownedvec_store|ll|owned_vec_push stores the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/
 channel_from_block|ll|the message is sent as the pointer|s/= call ptr @__mcopy_str(ptr @__lang_default_region, ptr \(%t[0-9]*\))/= getelementptr i8, ptr \1, i64 0/
 recycled_escape|c|only the moved storage is kept, not where the struct lives|s/ __lang_region_keep(v->home, r); / /
-recycle_dedicated|c|a recycle claims 4 KB on the block it kept|s/^    r->cap = b->pad;$/    r->cap = 4096;/
+recycle_dedicated|c|a recycle claims 4 KB on the block it kept|s/^  old->cap = seed->pad;$/  old->cap = 4096;/
 coro_pin_reach|c|the pin reads the stack and not what it points at|s/^  __lang_pin_reach(c);$//
 coro_pin_resumed|c|a retired arena is freed while its pinner runs|perl:s/if \(o.by\[j\] == curh\) keep = 1;/if (o.by[j] == curh) keep = 2;/; s/if \(keep\) __lang_retired\[w\+\+\] = o;/if (keep == 2) { free(o.by); __lang_region_free(o.r); free(o.r); } else if (keep) __lang_retired[w++] = o;/
-vec_recycle_pin|c|vec_recycle asks the pin about the growth only, as map_recycle does|s/__lang_region_pinned(v->region, 0)) {/__lang_region_pinned(v->region, 1) \&\& v->region->blocks->prev) {/
+vec_recycle_pin|c|vec_recycle asks the pin about the growth only, as map_recycle does|s/int pinned = owned && __lang_region_pinned && __lang_region_pinned(old, 0);/int pinned = owned \&\& old->blocks->prev \&\& __lang_region_pinned \&\& __lang_region_pinned(old, 1);/
 channel_xthread|c|a message region goes on the list of the thread that made it|s/__lang_region_init_x(mr, 256, 1)/__lang_region_init_x(mr, 256, 0)/'
   printf '%s\n' "$POISONS" | while IFS='|' read -r f be what expr; do
     want=$("$MERE" "$FX/$f.mere" 2>&1)

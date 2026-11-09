@@ -11467,6 +11467,25 @@ let region_runtime_helpers =
       "  r->blocks = NULL;";
       "}";
       "";
+      (* Build a private generation without publishing it. A caught failure
+         releases its partial allocations and preserves the caller's handler. *)
+      {|#define __LANG_ARENA_TRY(fresh) \
+  jmp_buf __arena_saved; int __arena_set = __lang_fail_jmpbuf_set; \
+  memcpy(__arena_saved, __lang_fail_jmpbuf, sizeof(jmp_buf)); \
+  __lang_fail_jmpbuf_set = 1; \
+  if (_setjmp(__lang_fail_jmpbuf) != 0) { \
+    char __arena_reason[sizeof __lang_fail_msg]; \
+    memcpy(__arena_reason, __lang_fail_msg, sizeof __arena_reason); \
+    __lang_fail_jmpbuf_set = __arena_set; \
+    memcpy(__lang_fail_jmpbuf, __arena_saved, sizeof(jmp_buf)); \
+    __lang_region_dep_unlink(fresh); \
+    __lang_region_free(fresh); free(fresh); \
+    __lang_fail_impl(__arena_reason); \
+  }
+#define __LANG_ARENA_DONE() \
+  __lang_fail_jmpbuf_set = __arena_set; \
+  memcpy(__lang_fail_jmpbuf, __arena_saved, sizeof(jmp_buf))|};
+      "";
       "/* An arena a SUSPENDED COROUTINE may still point into is not freed.";
       "   Compaction and recycling free an arena whole, and a coroutine that stopped";
       "   in the middle of an expression can hold a pointer into it in a C variable";
@@ -12026,37 +12045,45 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          lower it to exactly that. *)
       Printf.sprintf "static int %s_recycle(%s* m) {" struct_name struct_name;
       "  __LANG_OWNED(m, \"Map\", \"map_recycle\");";
-      (* an arena a suspended coroutine points into is not recycled in place:
-         the map moves to a fresh one and the old is retired *)
-      "  if (m->owns_region && m->region->blocks->prev && __lang_region_pinned && __lang_region_pinned(m->region, 1)) {";
-      "    __lang_region* old = m->region;";
+      "  __lang_region* old = m->region;";
+      "  int owned = m->owns_region;";
+      "  int pinned = owned && old->blocks->prev && __lang_region_pinned && __lang_region_pinned(old, 1);";
+      "  __lang_region_block* seed = owned ? old->blocks : NULL;";
+      "  if (seed) while (seed->prev) seed = seed->prev;";
+      Printf.sprintf "  size_t need = 4 * sizeof(%s) + 4 * sizeof(%s) + 4 + 8 * sizeof(int) + 48;" c_k c_v;
+      "  if (!owned || pinned || seed->pad < need) {";
       "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "    if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "    memset(fresh, 0, sizeof(*fresh));";
+      "    __LANG_ARENA_TRY(fresh);";
       "    __lang_region_init(fresh, 4096);";
+      Printf.sprintf "    %s next = *m;" struct_name;
+      "    next.region = fresh;";
+      "    next.owns_region = 1;";
+      Printf.sprintf "    next.keys = (%s*)__lang_region_alloc_array(next.region, %s, 4);" c_k c_k;
+      Printf.sprintf "    next.values = (%s*)__lang_region_alloc_array(next.region, %s, 4);" c_v c_v;
+      "    next.dead = (unsigned char*)__lang_region_alloc(next.region, 4);";
+      "    for (int i = 0; i < 4; i++) next.dead[i] = 0;";
+      "    next.cap = 4;";
+      "    next.len = 0;";
+      "    next.live = 0;";
+      "    next.idx = (int*)__lang_region_alloc(next.region, sizeof(int) * 8);";
+      "    for (int i = 0; i < 8; i++) next.idx[i] = -1;";
+      "    next.idx_cap = 8;";
+      "    next.idx_used = 0;";
+      "    __LANG_ARENA_DONE();";
       "    __lang_region_dep_link(m->home, fresh);";
-      "    m->region = fresh;";
-      "    __lang_region_retire(old);";
-      "  } else if (m->owns_region) {";
-      "    __lang_region* r = m->region;";
-      "    __lang_region_block* b = r->blocks;";
-      "    while (b->prev) { __lang_region_block* p = b->prev; __lang_blk_free(b); b = p; }";
-      "    r->blocks = b;";
-      "    r->base = (char*)(b + 1);";
-      "    r->top = r->base;";
-      (* the block kept is the OLDEST, which is the 4 KB seed only while no
-         dedicated block (v0.1.307) was chained in behind the seed; with the
-         seed still the bump block, the oldest IS the dedicated one, and a
-         capacity of 4096 claimed on it let the next allocations run off its
-         end into the heap (mere-ruby's frame pool) *)
-      "    r->cap = b->pad;";
-      "  } else {";
-      "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
-      "    if (!fresh) __lang_fail_impl(\"out of memory\");";
-      "    __lang_region_init(fresh, 4096);";
-      "    __lang_region_dep_link(m->home, fresh);";
-      "    m->region = fresh;";
-      "    m->owns_region = 1;";
+      "    *m = next;";
+      "    if (owned) __lang_region_retire(old);";
+      "    return 0;";
       "  }";
+      "  /* The retained seed fits all empty-container storage: no allocation can fail. */";
+      "  __lang_region_block* b = old->blocks;";
+      "  while (b != seed) { __lang_region_block* prev = b->prev; __lang_blk_free(b); b = prev; }";
+      "  old->blocks = seed;";
+      "  old->base = (char*)(seed + 1);";
+      "  old->top = old->base;";
+      "  old->cap = seed->pad;";
       Printf.sprintf "  m->keys = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_k c_k;
       Printf.sprintf "  m->values = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_v c_v;
       "  m->dead = (unsigned char*)__lang_region_alloc(m->region, 4);";
@@ -12148,11 +12175,13 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          normally; no payload-size bound or ownership rule changes. *)
       "  size_t __seed = m->live <= 3 ? 256 : 512;";
       "  while (m->live > 3 && __seed < 4096 && __seed < (size_t)m->live * 64 + 256) __seed <<= 1;";
+      "  memset(fresh, 0, sizeof(*fresh));";
+      "  __LANG_ARENA_TRY(fresh);";
       "  __lang_region_init(fresh, __seed);";
-      "  __lang_region_dep_link(m->home, fresh);";
       "  __lang_region* old = m->region;";
       "  int owned = m->owns_region;";
-      "  m->region = fresh;";
+      Printf.sprintf "  %s next = *m;" struct_name;
+      "  next.region = fresh;";
       (* Q-063: sized to the LIVE count and copying only the live entries -- a
          compact that carried tombstones into the fresh arena would be paying to
          move what it exists to drop. `dead` moves too: it lives in the arena
@@ -12169,21 +12198,24 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "    nd[w] = 0;";
       "    w++;";
       "  }";
-      "  m->keys = nk;";
-      "  m->values = nv;";
-      "  m->dead = nd;";
-      "  m->len = w;";
-      "  m->live = w;";
-      "  m->cap = ncap;";
+      "  next.keys = nk;";
+      "  next.values = nv;";
+      "  next.dead = nd;";
+      "  next.len = w;";
+      "  next.live = w;";
+      "  next.cap = ncap;";
       "  int nic = 8;";
       "  while (nic < ncap * 2) nic <<= 1;";
       (* v0.1.316: reindex reuses the buffer when the capacity is unchanged --
          which here would be the OLD arena's buffer, freed two lines down.
          The index is moving regions, so force a fresh allocation. *)
-      "  m->idx = 0;";
-      "  m->idx_cap = 0;";
-      Printf.sprintf "  %s_reindex(m, nic);" struct_name;
-      "  m->owns_region = 1;";
+      "  next.idx = 0;";
+      "  next.idx_cap = 0;";
+      Printf.sprintf "  %s_reindex(&next, nic);" struct_name;
+      "  next.owns_region = 1;";
+      "  __LANG_ARENA_DONE();";
+      "  __lang_region_dep_link(m->home, fresh);";
+      "  *m = next;";
       "  if (owned) __lang_region_retire(old);";
       "  return 0;";
       "}";
@@ -12196,12 +12228,13 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
         struct_name struct_name c_k c_v;
       "  __LANG_OWNED(m, \"Map\", \"map_set\");";
       "  if (m->cap == 0) {";
-      "    m->cap = 4;";
       Printf.sprintf "    m->keys = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_k c_k;
       Printf.sprintf "    m->values = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_v c_v;
       "    m->dead = (unsigned char*)__lang_region_alloc(m->region, 4);";
       "    memset(m->dead, 0, 4);";
       Printf.sprintf "    %s_reindex(m, 8);" struct_name;
+      (* A caught allocation failure must leave initialization retryable. *)
+      "    m->cap = 4;";
       "  }";
       (* v0.1.30 (copy-on-store): the map owns its contents, so a stored value
          never dangles when the storer's scope is reclaimed. But the deep-copy
@@ -14301,14 +14334,17 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  }";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "  memset(fresh, 0, sizeof(*fresh));";
+      "  __LANG_ARENA_TRY(fresh);";
       "  __lang_region_init(fresh, 4096);";
-      "  __lang_region_dep_link(v->home, fresh);";
       "  __lang_region* old = v->region;";
       "  int owned = v->owns_region;";
-      "  v->region = fresh;";
       "  int ncap = v->len < 4 ? 4 : v->len;";
       Printf.sprintf "  %s* nd = (%s*)__lang_region_alloc_array(fresh, %s, ncap);" c_elem c_elem c_elem;
       Printf.sprintf "  for (int i = 0; i < v->len; i++) nd[i] = __mcopy_%s(fresh, v->data[i]);" tag;
+      "  __LANG_ARENA_DONE();";
+      "  __lang_region_dep_link(v->home, fresh);";
+      "  v->region = fresh;";
       "  v->data = nd;";
       "  v->cap = ncap;";
       "  v->owns_region = 1;";
@@ -14334,30 +14370,38 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
          pin can see. *)
       Printf.sprintf "static int %s_recycle(%s* v) {" struct_name struct_name;
       "  __LANG_OWNED(v, \"Vec\", \"vec_recycle\");";
-      "  if (v->owns_region && __lang_region_pinned && __lang_region_pinned(v->region, 0)) {";
-      "    __lang_region* old = v->region;";
+      "  __lang_region* old = v->region;";
+      "  int owned = v->owns_region;";
+      "  int pinned = owned && __lang_region_pinned && __lang_region_pinned(old, 0);";
+      "  __lang_region_block* seed = owned ? old->blocks : NULL;";
+      "  if (seed) while (seed->prev) seed = seed->prev;";
+      Printf.sprintf "  size_t need = 4 * sizeof(%s) + 16;" c_elem;
+      "  if (!owned || pinned || seed->pad < need) {";
       "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "    if (!fresh) __lang_fail_impl(\"out of memory\");";
+      "    memset(fresh, 0, sizeof(*fresh));";
+      "    __LANG_ARENA_TRY(fresh);";
       "    __lang_region_init(fresh, 256);";
+      Printf.sprintf "    %s next = *v;" struct_name;
+      "    next.region = fresh;";
+      "    next.owns_region = 1;";
+      Printf.sprintf "    next.data = (%s*)__lang_region_alloc_array(next.region, %s, 4);" c_elem c_elem;
+      "    next.cap = 4;";
+      "    next.len = 0;";
+      (if tag = "str" then "    next.compact_dirty = 1;" else "");
+      "    __LANG_ARENA_DONE();";
       "    __lang_region_dep_link(v->home, fresh);";
-      "    v->region = fresh;";
-      "    __lang_region_retire(old);";
-      "  } else if (v->owns_region) {";
-      "    __lang_region* r = v->region;";
-      "    __lang_region_block* b = r->blocks;";
-      "    while (b->prev) { __lang_region_block* p = b->prev; __lang_blk_free(b); b = p; }";
-      "    r->blocks = b;";
-      "    r->base = (char*)(b + 1);";
-      "    r->top = r->base;";
-      "    r->cap = b->pad;  /* see map_recycle */";
-      "  } else {";
-      "    __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
-      "    if (!fresh) __lang_fail_impl(\"out of memory\");";
-      "    __lang_region_init(fresh, 256);";
-      "    __lang_region_dep_link(v->home, fresh);";
-      "    v->region = fresh;";
-      "    v->owns_region = 1;";
+      "    *v = next;";
+      "    if (owned) __lang_region_retire(old);";
+      "    return 0;";
       "  }";
+      "  /* The retained seed fits all empty-container storage: no allocation can fail. */";
+      "  __lang_region_block* b = old->blocks;";
+      "  while (b != seed) { __lang_region_block* prev = b->prev; __lang_blk_free(b); b = prev; }";
+      "  old->blocks = seed;";
+      "  old->base = (char*)(seed + 1);";
+      "  old->top = old->base;";
+      "  old->cap = seed->pad;";
       Printf.sprintf "  v->data = (%s*)__lang_region_alloc_array(v->region, %s, 4);" c_elem c_elem;
       "  v->cap = 4;";
       "  v->len = 0;";
@@ -14365,7 +14409,6 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  return 0;";
       "}";
       "";
-      (* v0.1.299: the Vec twin of map_bytes. *)
       Printf.sprintf "static long long %s_bytes(%s* v) {" struct_name struct_name;
       "  return v->owns_region ? (long long)__lang_region_bytes(v->region) : 0LL;";
       "}";
