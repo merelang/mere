@@ -240,7 +240,8 @@ fi
 #   under __LANG_REGION_KEEP_MAX   a released region KEEPS its grown block
 #   over it                        it gives the block back and re-seeds at 1 MiB
 #
-# The second is the cap doing its job -- eight regions are cached per thread, so
+# The second is the cap doing its job -- eight cached regions per thread may
+# hold a grown block (the other 56 slots take only 1 MiB seeds, v0.1.727), so
 # an uncapped keep is eight times the largest value the program ever built, held
 # for the rest of the run. A future change that removes the cap turns this red
 # and asks for the decision again.
@@ -287,6 +288,35 @@ if [ -f "$BIGSRC" ]; then
     fi
   else
     echo "FAIL region_reclaim/perbigvec: the leg did not build"
+    fail=1
+  fi
+fi
+
+# ---- nestdepth: regions nested deeper than the old cache of eight --------
+#
+# v0.1.727. An interpreter's regions nest dozens deep on every call; a release
+# past the per-thread cache freed the region's 1 MiB seed and the next acquire
+# made another (on Darwin two 1 MiB memsets: the kept mapping's 0xAA fill and
+# its zeroing). 40 levels opened and closed over and over must leave 40
+# regions cached, not 8 -- 20,000 rounds took 21 s on v0.1.726 and 0.03 s now.
+NDSRC="$ROOT/test/regionreclaim/nestdepth.mere"
+if [ -f "$NDSRC" ]; then
+  if "$MERE" -c "$NDSRC" > "$TMP/nd.c" 2>/dev/null && $CC -O2 -w "$TMP/nd.c" -o "$TMP/ndbin" 2>/dev/null; then
+    nd_out="$(MERE_REGION_STATS=1 "$TMP/ndbin" 40 1000 2>&1)"
+    nd_sum="$(printf '%s\n' "$nd_out" | sed -n '1p')"
+    nd_regions="$(printf '%s\n' "$nd_out" | sed -n 's/^region-stats cache: regions=\([0-9]*\) retained=[0-9]*$/\1/p' | tail -1)"
+    if [ "$nd_sum" != "40000" ]; then
+      echo "FAIL region_reclaim/nestdepth: got '$nd_sum', expected 40000"
+      fail=1
+    elif [ -z "$nd_regions" ] || [ "$nd_regions" -lt 40 ]; then
+      echo "FAIL region_reclaim/nestdepth: ${nd_regions:-no} regions cached after nesting 40 deep -- a release past"
+      echo "  the cache frees the region's seed and the next acquire at that depth makes another."
+      echo "  See __LANG_REGION_CACHE_CAP in codegen_c.ml."
+      fail=1
+    fi
+    checked=$((checked + 1))
+  else
+    echo "FAIL region_reclaim/nestdepth: the leg did not build"
     fail=1
   fi
 fi
@@ -464,7 +494,7 @@ if [ "$RV_ONLY" = 1 ]; then
   [ "$fail" = 0 ] && { echo "PASS region_reclaim (RV64): 100 trees of depth 14 run in 16 MB$(echo "$rv_note" | sed 's/^, RV64 holds 100 trees in 16 MB//')"; exit 0; }
   exit 1
 fi
-if [ "$checked" -lt 7 ]; then
+if [ "$checked" -lt 8 ]; then
   echo "FAIL region_reclaim: only $checked checks ran"
   exit 1
 fi

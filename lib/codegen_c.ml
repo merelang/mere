@@ -12244,9 +12244,24 @@ let region_runtime_helpers () =
          before the default region is freed (a normal return), or the atexit
          hook (a program that leaves through exit() never reaches main's
          epilogue, and its region is still intact when atexit fires). *)
-      "#define __LANG_REGION_CACHE_CAP 8";
-      (* v0.1.475: how much a recycled region may hold on to. Eight regions
-         are cached per thread, so this bounds the retention at 8 * this. *)
+      (* v0.1.727: 64 deep, of which the first 8 may hold a grown block.
+         An interpreter nests regions deeper than eight on every call -- a
+         statement's, a method body's, a block's, at each level -- and a
+         release past the cache freed the region's 1 MB seed, which on
+         Darwin (v0.1.702) is a kept mapping FILLED WITH 0xAA as it is kept
+         and zeroed as it is handed out again: two 1 MB memsets per region,
+         per call. mere-ruby's Marshal.load(1) spent 0.6 ms in them (ruby
+         takes a microsecond); 64 makes it 0.1 ms, a 2,000-load loop of an
+         Addrinfo 5x faster, and the 596 corpus programs 2% faster with
+         their peaks 11% lower summed (the largest the same).
+         Past the first 8 a slot takes only a region whose block is the
+         1 MB seed, so what the deeper slots can hold is 56 MB of seeds
+         touched as far as they were used, never 56 grown blocks. *)
+      "#define __LANG_REGION_CACHE_CAP 64";
+      "#define __LANG_REGION_CACHE_GROWN 8";
+      (* v0.1.475: how much a recycled region may hold on to. Eight cached
+         regions may hold a grown block, so this bounds that retention at
+         8 * this. *)
       "#define __LANG_REGION_KEEP_MAX (16 * 1024 * 1024)";
       "static _Thread_local __lang_region* __lang_region_cache[__LANG_REGION_CACHE_CAP];";
       "static _Thread_local int __lang_region_cache_n = 0;";
@@ -12635,7 +12650,8 @@ let region_runtime_helpers () =
       "    }";
       "  }";
       "  r->top = r->base;";
-      "  if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP)";
+      "  if (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN";
+      "      || (__lang_region_cache_n < __LANG_REGION_CACHE_CAP && r->cap <= (1 << 20)))";
       "    __lang_region_cache[__lang_region_cache_n++] = r;";
       "  else { __lang_region_free(r); free(r); }";
       "}" ]
