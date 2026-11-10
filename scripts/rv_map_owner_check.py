@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Compare Map ownership with C on RV32 and RV64, with mutation controls."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 import os
 from pathlib import Path
 import re
@@ -133,9 +135,25 @@ print_int (channel_recv results)
     return cases
 
 
+def compare_in_batches(items, compare, workers):
+    """Keep at most two cases live and stop scheduling after a failed batch."""
+    if workers not in (1, 2):
+        raise ValueError("Map ownership checks require one or two workers")
+    if workers == 1:
+        yield from map(compare, items)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        iterator = iter(items)
+        while batch := list(islice(iterator, workers)):
+            # map preserves catalogue order; only this batch is submitted.
+            yield from pool.map(compare, batch)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--poison", action="store_true")
+    parser.add_argument("--workers", type=int, choices=(1, 2), default=2,
+                        help="independent fixture workers (default: 2; use 1 for timing comparisons)")
     args = parser.parse_args()
     memu = Path(os.environ.get("MEMU", ""))
     if not (memu / "riscv-runc/rv32i_run.mere").is_file():
@@ -152,28 +170,37 @@ def main():
         references = {}
         checks = 0
 
-        def build(name, width, env=None):
+        def build(name, width, env=None, directory=None):
+            directory = directory or tmp
             flag = "-rv" if width == 32 else "-rv64"
-            (tmp / "prog.bin").write_bytes(checked_env([MERE, flag, "--ram", "32", tmp / f"{name}.mere"], tmp, env))
+            (directory / "prog.bin").write_bytes(checked_env([MERE, flag, "--ram", "32", tmp / f"{name}.mere"], directory, env))
 
-        def run(width):
-            return guest(execute([runners[width], "32"], tmp))
+        def run(width, directory=None):
+            return guest(execute([runners[width], "32"], directory or tmp))
 
         for name, source in cases.items():
             (tmp / f"{name}.mere").write_text(source)
-            (tmp / "ref.c").write_bytes(checked([MERE, "-c", tmp / f"{name}.mere"], tmp))
-            checked([CC, "-O1", "-w", "ref.c", "-o", "ref", "-lm", "-lpthread"], tmp)
-            result = execute([tmp / "ref"], tmp)
-            expected = (result.returncode, result.stdout, result.stderr)
-            if expected[0] or expected[2]:
-                raise RuntimeError(f"{name}: unexpected C failure: {expected!r}")
+
+        def compare(item):
+            name, _ = item
+            with tempfile.TemporaryDirectory(prefix=name + "-", dir=tmp) as directory:
+                directory = Path(directory)
+                (directory / "ref.c").write_bytes(checked([MERE, "-c", tmp / f"{name}.mere"], directory))
+                checked([CC, "-O1", "-w", "ref.c", "-o", "ref", "-lm", "-lpthread"], directory)
+                result = execute([directory / "ref"], directory)
+                expected = (result.returncode, result.stdout, result.stderr)
+                if expected[0] or expected[2]:
+                    raise RuntimeError(f"{name}: unexpected C failure: {expected!r}")
+                for width in (32, 64):
+                    build(name, width, directory=directory)
+                    actual = run(width, directory)
+                    if actual != expected:
+                        raise RuntimeError(f"{name}: RV{width} differs from C: {actual!r} versus {expected!r}")
+                return name, expected
+
+        for name, expected in compare_in_batches(cases.items(), compare, args.workers):
             references[name] = expected
-            for width in (32, 64):
-                build(name, width)
-                actual = run(width)
-                if actual != expected:
-                    raise RuntimeError(f"{name}: RV{width} differs from C: {actual!r} versus {expected!r}")
-                checks += 1
+            checks += 2
             print(f"  ok    {name}: RV32 and RV64 match C", flush=True)
 
         if args.poison:
