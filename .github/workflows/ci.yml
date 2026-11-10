@@ -136,6 +136,9 @@ jobs:
       - name: Validate RISC-V Map case scheduling
         timeout-minutes: 2
         run: python3 scripts/rv_map_runner_check.py
+      - name: Validate RISC-V listing case scheduling
+        timeout-minutes: 2
+        run: python3 scripts/rv_listing_runner_check.py
 
   # Separate runners isolate fixed ports, build outputs and large compilations.
   # Every group keeps the same pinned tools and required preflights.

@@ -17,11 +17,21 @@
 # each function symbol of the debug map is a label of the listing at the same
 # address. Plus one generated program big enough to take the wide layout.
 set -u
+workers=2
+if [ "$#" = 2 ] && [ "$1" = --workers ]; then
+  workers=$2; shift 2
+fi
+case "$workers:$#" in
+  1:0|2:0) ;;
+  *) echo "usage: sh scripts/rv_listing_check.sh [--workers 1|2]" >&2; exit 1 ;;
+esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="$ROOT/_build/default/bin/mere.exe"
 [ -x "$MERE" ] || { echo "rv_listing: $MERE not found — run 'dune build'" >&2; exit 1; }
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-rc=0; checked=0; words=0
+TMP=$(mktemp -d) || exit 1
+trap 'rm -rf "$TMP"' EXIT
+rc=0; checked=0; words=0; wide=0
+batch=""; pids=""; queued=0; next_case=0
 
 # word-for-word: the listing's "  <hex addr>:  <8 hex>  ..." lines against the
 # binary's 32-bit little-endian words (od prints them in host order, which is
@@ -44,6 +54,10 @@ check_one() {  # $1 = flag (-rv / -rv64), $2 = program
   nw=$(printf '%s\n' "$out" | tail -1 | awk '{print $2}')
   nbad=$(printf '%s\n' "$out" | tail -1 | awk '{print $3}')
   words=$((words + nw)); checked=$((checked + 1))
+  if [ "$nw" = 0 ]; then
+    echo "FAIL rv_listing: $(basename "$prog") at $flag: no encoded listing words"
+    rc=1
+  fi
   if [ "$nbad" != 0 ]; then
     echo "FAIL rv_listing: $(basename "$prog") at $flag: $nbad of $nw listed words are not the binary's"
     printf '%s\n' "$out" | grep '^  at ' ; rc=1
@@ -61,9 +75,53 @@ check_one() {  # $1 = flag (-rv / -rv64), $2 = program
   fi
 }
 
+# Each child has its own files and counters. Wait for the entire batch and
+# replay logs in catalogue order; any failure prevents another batch starting.
+wait_batch() {
+  for pid in $pids; do wait "$pid" || rc=1; done
+  for id in $batch; do
+    cat "$TMP/$id.log" || rc=1
+    if read -r n w jumps < "$TMP/$id/result"; then
+      checked=$((checked + n)); words=$((words + w)); wide=$((wide + jumps))
+    else
+      echo "FAIL rv_listing: worker $id did not return its counts"; rc=1
+    fi
+    rm -rf "$TMP/$id" "$TMP/$id.log" || rc=1
+  done
+  batch=""; pids=""; queued=0
+  [ "$rc" = 0 ]
+}
+
+queue_case() { # flag, program, require-wide
+  next_case=$((next_case + 1))
+  (
+    # Only the parent owns the top-level temporary directory's EXIT trap.
+    trap - EXIT
+    TMP="$TMP/$next_case"
+    mkdir "$TMP" || exit 1
+    rc=0; checked=0; words=0; jumps=0
+    check_one "$1" "$2"
+    if [ "$3" = 1 ]; then
+      if [ "$checked" != 1 ]; then
+        echo "FAIL rv_listing: the generated wide program was refused"; rc=1
+      fi
+      jumps=$(grep -c 'auipc+jalr' "$TMP/l.s" 2>/dev/null || true)
+      if [ "${jumps:-0}" = 0 ]; then
+        echo "FAIL rv_listing: the generated program did not take the wide layout (the case this exists for)"; rc=1
+      fi
+    fi
+    printf '%s %s %s\n' "$checked" "$words" "${jumps:-0}" > "$TMP/result" || exit 1
+    exit "$rc"
+  ) > "$TMP/$next_case.log" 2>&1 &
+  pids="$pids $!"; batch="$batch $next_case"; queued=$((queued + 1))
+  if [ "$queued" = "$workers" ]; then wait_batch; fi
+}
+
 for f in "$ROOT"/test/parity/*.mere; do
-  check_one -rv "$f"; check_one -rv64 "$f"
+  queue_case -rv "$f" 0 || exit 1
+  queue_case -rv64 "$f" 0 || exit 1
 done
+wait_batch || exit 1
 
 # wide layout: each function calls the next one and the one halfway round (on
 # a branch never taken), so reachability keeps all 6000 of them -- over 2 MB of
@@ -81,9 +139,9 @@ awk 'BEGIN {
   }
   printf "print (str_of_int (f0 7))\n"
 }' > "$W"
-check_one -rv64 "$W"
-wide=$(grep -c 'auipc+jalr' "$TMP/l.s" || true)
-if [ "$wide" = 0 ]; then echo "FAIL rv_listing: the generated program did not take the wide layout (the case this exists for)"; rc=1; fi
+# Keep the large fixture serial to bound memory independently of corpus size.
+queue_case -rv64 "$W" 1 || exit 1
+wait_batch || exit 1
 
 [ "$rc" = 0 ] && echo "ok rv_listing: $checked listings ($words encoded words, incl. a wide one with $wide auipc+jalr jumps) are the binary word for word, and every debug-map symbol is a listing label"
 exit $rc
