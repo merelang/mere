@@ -28,3 +28,5 @@ for probe in sockaddr/ancillary_probe tty/pty_probe stdio/eagain_probe; do
     esac
   done
 done
+
+python3 "$ROOT/scripts/spawn_failure_check.py"

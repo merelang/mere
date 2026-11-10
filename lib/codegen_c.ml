@@ -9566,6 +9566,27 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "   close-on-exec pipe, as -errno in Linux's numbers. */";
              "#include <sys/ioctl.h>";
              "typedef struct { char k; int a; int b; int fl; long long mode; const char* p; } __spawn_act;";
+             (* Keep both internal pipe ends outside every action descriptor. *)
+             "static int __spawn_channel_reserved(int fd, const __spawn_act* v, int n) {";
+             "  if (fd < 3) return 0;";
+             "  for (int i = 0; i < n; i++)";
+             "    if (v[i].a == fd || (v[i].k == 'd' && v[i].b == fd)) return 0;";
+             "  return 1;";
+             "}";
+             "static int __spawn_channel_move(int* fd, const __spawn_act* v, int n) {";
+             "  int low = 3;";
+             "  while (!__spawn_channel_reserved(*fd, v, n)) {";
+             "    int next;";
+             "    do { next = fcntl(*fd, F_DUPFD_CLOEXEC, low); } while (next < 0 && errno == EINTR);";
+             "    if (next < 0) return -1;";
+             "    close(*fd); *fd = next;";
+             "    if (next == INT_MAX) { errno = EMFILE; return -1; }";
+             "    low = next + 1;";
+             "  }";
+             "  int rc;";
+             "  do { rc = fcntl(*fd, F_SETFD, FD_CLOEXEC); } while (rc < 0 && errno == EINTR);";
+             "  return rc;";
+             "}";
              "static long long __proc_spawn_session(const char* path, char** argv, char** envp, char** acts, int nact, const char* dir) {";
              "  __spawn_act* v = (__spawn_act*)calloc((size_t)(nact > 0 ? nact : 1), sizeof(__spawn_act));";
              "  char*** held = (char***)calloc((size_t)(nact > 0 ? nact : 1), sizeof(char**));";
@@ -9587,7 +9608,9 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
              "  {";
              "    int pfd[2];";
              "    if (pipe(pfd) != 0) { r = -(long long)__lin_errno(errno); goto out; }";
-             "    fcntl(pfd[0], F_SETFD, FD_CLOEXEC); fcntl(pfd[1], F_SETFD, FD_CLOEXEC);";
+             "    if (__spawn_channel_move(&pfd[0], v, nact) < 0 || __spawn_channel_move(&pfd[1], v, nact) < 0) {";
+             "      int e = errno; close(pfd[0]); close(pfd[1]); r = -(long long)__lin_errno(e); goto out;";
+             "    }";
              "    pid_t pid = fork();";
              "    if (pid < 0) { r = -(long long)__lin_errno(errno); close(pfd[0]); close(pfd[1]); goto out; }";
              "    if (pid == 0) {";

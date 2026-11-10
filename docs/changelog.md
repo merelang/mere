@@ -40,7 +40,21 @@ and LLVM. `print_err` writes its line and newline as one write on C.
 again on every call, from the title already written there, so after a short
 title (`$0 = "rbx"`) every later one was cut to its length on Darwin, and
 Linux lost the environment's part once its strings had moved.
-`scripts/host_io_check.sh` runs the three probes on the two native backends.
+The new-session spawn path reserves both ends of its exec-error pipe outside
+every descriptor referenced by the file actions. A `dup`, `open` or `close`
+action therefore cannot replace the private channel, hide an exec failure or
+write binary errno data into application output. Originally closed source
+descriptors remain closed. `scripts/host_io_check.sh` runs the three probes
+on both native backends and checks 50 descriptor-action failure cases.
+
+C coroutine string-root scans also visit overlapping header-search windows
+once over the existing sorted pin set. The candidate-copy, span-bound and
+conservative-match contracts remain in place. The reproducible phase
+benchmark records a representative macOS arm64/clang 21 O2 case with a
+4,096-byte unused candidate: the complete measured call changes from median
+63.69 to 25.00 microseconds over nine process samples. Short-candidate ranges
+overlap. Required CI checks repeated-scan memory bounds and an independent
+per-word reference, operation counts and intended mutation witnesses.
 
 ## v0.1.723 — 2026-11-10
 

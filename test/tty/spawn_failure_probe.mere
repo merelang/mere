@@ -1,0 +1,24 @@
+// Session-spawn errors must remain private under descriptor actions.
+extern fn file_fstat: int -> int;
+extern fn proc_spawn: str -> str -> str -> str -> int -> str -> int;
+extern fn proc_waitpid: int -> int -> int;
+let rec at = fn (xs: str list) -> fn (n: int) -> match xs with Nil -> "" | Cons (x, tail) -> if n == 0 then x else at tail (n - 1);
+let argv = args ();
+let mode = at argv 0;
+let fd = at argv 1;
+let path = at argv 2;
+let missing = at argv 3;
+let two = chr 2;
+let action = if str_eq mode "dup-chain" then
+               "d" ++ two ++ "1" ++ two ++ fd ++ chr 1 ++
+               "d" ++ two ++ "1" ++ two ++ str_of_int (int_of_str fd + 1)
+             else if str_eq mode "dup-dst" then "d" ++ two ++ "1" ++ two ++ fd
+             else if str_eq mode "dup-src" then "d" ++ two ++ fd ++ two ++ "1"
+             else if str_eq mode "open" then "o" ++ two ++ fd ++ two ++ "577" ++ two ++ "384" ++ two ++ path
+             else if str_eq mode "close" then "c" ++ two ++ fd else "";
+// Exit 42 reports that the source existed before the private pipe was allocated.
+let source_open = str_eq mode "dup-src" && file_fstat (int_of_str fd) == 0;
+let pid = proc_spawn missing "missing" "" action (0 - 2) "";
+let _ = if pid > 0 then (let _ = proc_waitpid pid 0 in ()) else ();
+let _ = print (str_of_int pid);
+if source_open then exit 42 else ()
