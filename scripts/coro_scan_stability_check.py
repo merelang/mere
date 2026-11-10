@@ -61,7 +61,8 @@ def measurements(result, rounds):
         raise AssertionError((result.returncode, result.stdout, result.stderr))
     rows = [tuple(map(int, m)) for m in re.findall(
         r"^scan-sample (\d+) (\d+) (\d+) (\d+)$", result.stderr, re.M)]
-    if len(rows) != 2 or [r[0] for r in rows] != [15, rounds - 1]:
+    if (len(rows) != 2 or [r[0] for r in rows] != [15, rounds - 1]
+            or any(r[1] <= 0 or r[3] <= 0 for r in rows)):
         raise AssertionError(("missing native measurements", result.stderr))
     return rows
 
