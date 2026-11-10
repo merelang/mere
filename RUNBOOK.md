@@ -230,11 +230,13 @@ compiler, runtime, containers, web, conformance, downstream, coroutines,
 RISC-V and RISC-V ownership. Each integration check runs once. The complete
 examples corpus and its poison run execute in downstream. The complete softfloat
 gate runs in web, README execution in runtime, and full cross-backend parity in
-compiler. Map read and buffer boundary checks at both RISC-V widths run in RISC-V
-alongside the required memu oracle. These assignments spread the longer checks across
-existing groups. Their names, full commands and destinations are pinned by the
-assignment validator, including controls for missing corpus, poison and oracle
-coverage. All 196 checks and all nine groups remain required.
+web. Map read and buffer boundary checks at both RISC-V widths run in RISC-V
+alongside the required memu oracle. The complete contrib C comparison and
+compile-only RISC-V prelude checks run in downstream. The latter needs no emulator or disassembler; both
+independent RISC-V oracles stay in the RISC-V group. These assignments spread
+the longer checks across existing groups. Their names, full commands and
+destinations are pinned by the assignment validator, including controls for missing corpus, poison and oracle
+coverage. All 197 checks and all nine groups remain required.
 Common tools are installed in every group; QEMU and the RISC-V disassembler are
 installed only in the RISC-V group. Network setup has bounded timeouts and retries.
 Required-tool preflights derive each group's tools from its assigned gates;
@@ -278,7 +280,7 @@ This covers direct source entries and the runner's `apt-mirrors.txt` or
 Repository suites, components, signing keys and other mirrors are preserved.
 The setup action's opam cache remains enabled. Compare actual setup step
 durations and cache-hit messages when measuring changes: a cache hit does not
-avoid the action's system-package installation. All 196 gates and all four
+avoid the action's system-package installation. All 197 gates and all four
 build configurations remain required.
 
 The README execution gate runs in the runtime group. It still forces the
@@ -319,7 +321,18 @@ run in downstream. Each retains both its complete corpus run and poison run.
 The assignment validator pins their names, commands and destination, and the
 downstream preflight requires Perl for comment counts. The full unit suite
 remains in compiler and README execution remains in runtime.
-All 196 gates, nine groups and four build configurations remain required.
+All 197 gates, nine groups and four build configurations remain required.
+
+The latest routing adjustment moves cross-backend parity from compiler to web,
+and the complete contrib C comparison and compile-only RISC-V prelude check
+to downstream. Names, commands, corpus sizes, poison probes, timeouts and all
+four build configurations are unchanged. The full unit suite remains in compiler.
+Routing controls pin all three destinations and reject removed, bypassed,
+optional or duplicated moved checks. Group preflights still require the tools
+used by the assigned commands; downstream does not acquire an emulator dependency.
+When comparing timings, use complete job durations including setup and report
+cache hits separately. Replaying old step durations with new assignments is an
+estimate; verify the change with complete hosted runs before claiming a gain.
 
 ## Self-host semantic verification
 

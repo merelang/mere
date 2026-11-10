@@ -84,7 +84,11 @@ if [ "$MODE" = "--poison" ]; then
     "ABSENT   python3" MERE_CI_GROUP=conformance MERE_PREFLIGHT_FAKE_MISSING=python3
   run "downstream requires the formatter comment counter" \
     "ABSENT   perl" MERE_CI_GROUP=downstream MERE_PREFLIGHT_FAKE_MISSING=perl
-  for group in compiler web; do
+  run "web requires the Wasm compiler for parity" \
+    "ABSENT   wat2wasm" MERE_CI_GROUP=web MERE_PREFLIGHT_FAKE_MISSING=wat2wasm
+  run "downstream requires the native compiler for contrib" \
+    "ABSENT   clang" MERE_CI_GROUP=downstream MERE_PREFLIGHT_FAKE_MISSING=clang
+  for group in compiler web downstream; do
     out=$(MERE_CI_GROUP="$group" MERE_PREFLIGHT_FAKE_MISSING=qemu-system-riscv32 sh "$0" 2>&1)
     if [ $? -ne 0 ] || ! printf '%s' "$out" | grep -qF "gate group: $group" \
        || printf '%s' "$out" | grep -qF "ABSENT   qemu-system-riscv32"; then
@@ -102,7 +106,7 @@ if [ "$MODE" = "--poison" ]; then
   else
     echo "poison caught: containers does not require the moved README gate's dune"
   fi
-  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 14 caught"; exit 0; }
+  [ "$fails" -eq 0 ] && { echo "tool_preflight --poison: 17 caught"; exit 0; }
   echo "tool_preflight --poison: $fails not caught"; exit 1
 fi
 
