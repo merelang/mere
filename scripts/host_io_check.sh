@@ -9,14 +9,22 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 CC="${CC:-clang}"
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-for probe in sockaddr/ancillary_probe tty/pty_probe stdio/eagain_probe; do
+for probe in sockaddr/ancillary_probe tty/pty_probe stdio/eagain_probe sockaddr/sendmsg_to_probe; do
   P="$ROOT/test/$probe.mere"
   name=$(basename "$probe")
   "$MERE" -c "$P" > "$T/$name.c"
-  "$CC" -O2 -w -pthread "$T/$name.c" -o "$T/$name-c" -lm
+  if [ "$name" = sendmsg_to_probe ]; then
+    "$CC" -O2 -w -pthread "$T/$name.c" "$ROOT/test/sockaddr/sendmsg_to_support.c" -o "$T/$name-c" -lm
+  else
+    "$CC" -O2 -w -pthread "$T/$name.c" -o "$T/$name-c" -lm
+  fi
   "$MERE" -ll "$P" > "$T/$name.ll"
   "$MERE" --ffi-c "$P" > "$T/$name-ffi.c"
-  "$CC" -O2 -w -pthread "$T/$name.ll" "$T/$name-ffi.c" -o "$T/$name-llvm" -lm
+  if [ "$name" = sendmsg_to_probe ]; then
+    "$CC" -O2 -w -pthread "$T/$name.ll" "$T/$name-ffi.c" "$ROOT/test/sockaddr/sendmsg_to_support.c" -o "$T/$name-llvm" -lm
+  else
+    "$CC" -O2 -w -pthread "$T/$name.ll" "$T/$name-ffi.c" -o "$T/$name-llvm" -lm
+  fi
   for backend in c llvm; do
     (cd "$T" && sh "$ROOT/scripts/bounded.sh" 20 "./$name-$backend") > "$T/$backend.out" 2>&1 || {
       cat "$T/$backend.out"

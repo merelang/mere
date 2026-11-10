@@ -1,0 +1,89 @@
+// Explicit destinations and packet information travel together. Loopback
+// sockets have receive deadlines, so a missing reply fails instead of hanging.
+extern fn sock_sendmsg: int -> int -> int -> int -> str -> int;
+extern fn sock_sendmsg_to: int -> int -> int -> int -> str -> str -> int;
+extern fn sock_recvmsg: int -> int -> int -> int -> int -> str;
+extern fn sock_bind: int -> str -> int -> int;
+extern fn sock_connect: int -> str -> int -> int;
+extern fn sock_local_addr: int -> str;
+extern fn sock_peer_addr: int -> str;
+extern fn fd_close: int -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn mere_test_message_socket: int -> int;
+extern fn mere_test_receive_pktinfo: int -> int -> int;
+extern fn mere_test_pktinfo_level: int -> int;
+extern fn mere_test_pktinfo_type: int -> int;
+extern fn mere_test_pktinfo_index_offset: int -> int;
+
+let check = fn (label: str) -> fn (ok: bool) ->
+  if ok then () else (let _ = print ("FAIL " ++ label) in exit 1);
+let rec nth = fn (xs: str list) -> fn (i: int) ->
+  match xs with Nil -> "" | Cons (v, rest) -> if i == 0 then v else nth rest (i - 1);
+let buffer = mem_alloc 128;
+let run = fn (ipv6: int) ->
+  let host = if ipv6 == 1 then "::1" else "127.0.0.1" in
+  let family = if ipv6 == 1 then "inet6" else "inet" in
+  let wildcard = if ipv6 == 1 then "::" else "0.0.0.0" in
+  let server = mere_test_message_socket ipv6 in
+  let client = mere_test_message_socket ipv6 in
+  let _ = check "bounded sockets" (server >= 0 && client >= 0) in
+  let _ = check "bind wildcard" (sock_bind server wildcard 0 == 0) in
+  let _ = check "enable packet information" (mere_test_receive_pktinfo server ipv6 == 0) in
+  let port = int_of_str (nth (str_split (sock_local_addr server) " ") 1) in
+  let dest = host ++ " " ++ str_of_int port in
+  let _ = check "server has no peer" (str_eq (sock_peer_addr server) "" && fd_last_errno () > 0) in
+  let _ = mem_copy_str buffer 0 "request" in
+  let _ = check "explicit request" (sock_sendmsg_to client buffer 7 0 dest "" == 7 && fd_last_errno () == 0) in
+  let received = str_split (sock_recvmsg server buffer 128 0 512) "\n" in
+  let header = str_split (nth received 0) " " in
+  let _ = check "request and sender" (str_eq (nth header 0) "7" && str_eq (nth header 2) family && str_eq (nth header 4) host && str_eq (mem_to_str buffer 7) "request") in
+  let control = nth received 1 in
+  let fields = str_split control " " in
+  let _ = check "packet information received" (int_of_str (nth fields 0) == mere_test_pktinfo_level ipv6 && int_of_str (nth fields 1) == mere_test_pktinfo_type ipv6 && str_len (nth fields 2) > 0) in
+  let reply_dest = nth header 4 ++ " " ++ nth header 3 in
+  let _ = mem_copy_str buffer 0 "reply" in
+  // An invalid interface must reach the kernel as control data. Dropping
+  // msg_control would turn this into a successful ordinary datagram.
+  let data = nth fields 2 in
+  let index = 2 * mere_test_pktinfo_index_offset ipv6 in
+  let invalid_data = substring data 0 index ++ "ffffff7f" ++ substring data (index + 8) (str_len data) in
+  let invalid_control = nth fields 0 ++ " " ++ nth fields 1 ++ " " ++ invalid_data in
+  let _ = check "invalid packet interface" (sock_sendmsg_to server buffer 5 0 reply_dest invalid_control == 0 - 1 && fd_last_errno () > 0) in
+  let _ = check "reply with received control" (sock_sendmsg_to server buffer 5 0 reply_dest control == 5 && fd_last_errno () == 0) in
+  let reply = str_split (nth (str_split (sock_recvmsg client buffer 128 0 0) "\n") 0) " " in
+  let _ = check "reply address and payload" (str_eq (nth reply 0) "5" && str_eq (nth reply 2) family && int_of_str (nth reply 3) == port && str_eq (nth reply 4) host && str_eq (mem_to_str buffer 5) "reply") in
+  let _ = check "server remains unconnected" (str_eq (sock_peer_addr server) "" && fd_last_errno () > 0) in
+  let rec reject = fn (bad: str list) ->
+    match bad with
+    | Nil -> ()
+    | Cons (address, rest) ->
+      let _ = check ("bad destination " ++ address) (sock_sendmsg_to client buffer 1 0 address "" == 0 - 2 && fd_last_errno () == 0) in
+      reject rest in
+  let _ = reject [host, host ++ " ", host ++ " -1", host ++ " 65536", host ++ " 70000", host ++ " " ++ str_of_int (port + 65536), host ++ " 999999999999999999999", host ++ " 9x", "localhost 9", " 9", (if ipv6 == 1 then "127.0.0.1 9" else "::1 9")] in
+  let _ = check "bad descriptor" (sock_sendmsg_to (0 - 1) buffer 1 0 dest "" == 0 - 1 && fd_last_errno () == 9) in
+  let _ = check "bad offset" (sock_sendmsg_to client (0 - 1) 1 0 dest "" == 0 - 1 && fd_last_errno () == 22) in
+  let _ = check "bad length" (sock_sendmsg_to client buffer (0 - 1) 0 dest "" == 0 - 1 && fd_last_errno () == 22) in
+  let _ = check "bad flags" (sock_sendmsg_to client buffer 1 2147483648 dest "" == 0 - 1 && fd_last_errno () == 22) in
+  let rec bad_controls = fn (n: int) ->
+    if n == 0 then () else (
+      let _ = check "bad control after resolution" (sock_sendmsg_to client buffer 1 0 dest "1 x 00" == 0 - 1 && fd_last_errno () == 22) in
+      bad_controls (n - 1)) in
+  let _ = bad_controls 64 in
+  let _ = check "connect client" (sock_connect client host port == 0) in
+  let _ = mem_copy_str buffer 0 "old" in
+  let _ = check "original connected API" (sock_sendmsg client buffer 3 0 "" == 3) in
+  let old = sock_recvmsg server buffer 128 0 512 in
+  let _ = check "original API payload" (str_starts_with old "3 " && str_eq (mem_to_str buffer 3) "old") in
+  let _ = check "empty destination and empty datagram" (sock_sendmsg_to client buffer 0 0 "" "" == 0 && fd_last_errno () == 0) in
+  let empty = str_split (nth (str_split (sock_recvmsg server buffer 128 0 512) "\n") 0) " " in
+  let _ = check "empty datagram retains sender" (str_eq (nth empty 0) "0" && str_eq (nth empty 2) family && str_eq (nth empty 4) host) in
+  let _ = fd_close client in
+  let _ = check "closed descriptor" (sock_sendmsg_to client buffer 1 0 dest "" == 0 - 1 && fd_last_errno () == 9) in
+  let _ = fd_close server in
+  ();
+let _ = run 0;
+let _ = run 1;
+print "sendmsg_to: IPv4/IPv6 control replies, compatibility and refusals passed"
