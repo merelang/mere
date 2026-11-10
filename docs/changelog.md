@@ -4,6 +4,39 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.724 — 2026-11-10
+
+The host calls whose arguments are a struct an `extern` cannot spell, kept in
+the runtime and crossing as text, as `sock_getopt` and `sock_local_addr` do.
+`file_fstat fd` takes the same snapshot `file_stat` does from an open
+descriptor, so a file unlinked while open still has a size (RISC-V through
+`fstat`, syscall 80). `sock_peer_ids` is the peer's uid and gid
+(`getpeereid`, `SO_PEERCRED` on Linux), `sock_ifaddrs` the interface list a
+line per entry, and `sock_sendmsg` / `sock_recvmsg` carry control messages as
+`"level type hex"` lines -- `SCM_RIGHTS` passes a descriptor -- with the
+`CMSG_*` layout on the runtime's side.
+
+`pty_open` opens a pseudo-terminal with `posix_openpt` (no libutil);
+`tty_attrs` / `tty_set_attrs` read and write any descriptor's termios as its
+four flag words, two speeds and the control characters in hex;
+`tty_winsize` / `tty_set_winsize` are `TIOCGWINSZ` / `TIOCSWINSZ`, and
+`tty_flush` is `tcflush`. `proc_spawn`'s group `-2` starts the child in a new
+session (`POSIX_SPAWN_SETSID`), so a pty slave it opens by path becomes its
+controlling terminal. The platform's numbers (flag bits, `SOL_SOCKET`) stay
+the caller's to ask `sys_os` about, as for `sock_getopt`. All of them keep
+errno for `fd_last_errno`. These are C and LLVM; on RISC-V only `file_fstat`.
+A child whose stdout or stderr is a pipe its parent made non-blocking (ruby's
+`IO.pipe` makes both ends so) got `EAGAIN` once the pipe was full, and
+`print_no_nl`, `print_bytes` and `print_err` lost the rest: a child of
+`Open3.capture3` ended at 64 KiB. They now wait until the descriptor can be
+written (`poll`, `POLLOUT`), as reading stdin has waited since v0.1.633, on C
+and LLVM. `print_err` writes its line and newline as one write on C.
+`proc_set_title` measures the argument area once and keeps it. It measured
+again on every call, from the title already written there, so after a short
+title (`$0 = "rbx"`) every later one was cut to its length on Darwin, and
+Linux lost the environment's part once its strings had moved.
+`scripts/host_io_check.sh` runs the three probes on the two native backends.
+
 ## v0.1.723 — 2026-11-10
 
 `coro_scan_strings c candidates visit` exposes conservative candidate string

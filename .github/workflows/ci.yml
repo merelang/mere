@@ -1096,6 +1096,12 @@ jobs:
       - name: datagram_check (addressed UDP on C and LLVM)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
         run: sh scripts/datagram_check.sh
+      # v0.1.724: a peer's ids, the interface list, SCM_RIGHTS; a pty, a
+      # descriptor's termios and window size, a child that gets the pty as its
+      # controlling terminal, and fstat of a file unlinked while open.
+      - name: host_io_check (sock_peer_ids, sock_ifaddrs, sock_sendmsg/recvmsg, pty_open, tty_*, file_fstat)
+        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        run: sh scripts/host_io_check.sh
 
       # v0.1.677: the system log. syslog(3) takes varargs and openlog(3) keeps
       # the ident pointer, so the runtime makes both calls; the message goes

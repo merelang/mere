@@ -980,6 +980,12 @@ let __rv_stat = fn (p: str) -> fn (flags: int) ->
   if r < 0 then 0 - 1 else 0;
 let __libm_file_stat = fn (p: str) -> __rv_stat p 0;
 let __libm_file_lstat = fn (p: str) -> __rv_stat p 256;          // AT_SYMLINK_NOFOLLOW
+// fstat(2) of a descriptor into the same snapshot; errno kept as the fd_* family keeps it
+let __libm_file_fstat = fn (fd: int) ->
+  let r = if fd < 0 then 0 - 9 else __rv_syscall 80 fd (__rv_stat_at ()) 0 0 in
+  let _ = __rv_poke (__rv_stat_at () + 128) (if r < 0 then 0 else 1) in
+  let _ = __rv_rtw_set 80 (if r < 0 then 0 - r else 0) in
+  if r < 0 then 0 - 1 else 0;
 let __libm_file_stat_field = fn (k: int) ->
   let rec le = fn (off: int) -> fn (n: int) -> fn (acc: int) ->
     if n == 0 then acc
