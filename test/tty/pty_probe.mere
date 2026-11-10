@@ -63,6 +63,14 @@ let _ = check "echo off" (bit_and (int_of_str (nth (str_split (tty_attrs s) " ")
 let _ = check "restore attrs" (tty_set_attrs s 2 t0 == 0 && str_eq (tty_attrs s) t0);
 let _ = check "bad when" (tty_set_attrs s 3 t0 == 0 - 1 && fd_last_errno () == 22);
 let _ = check "bad text" (tty_set_attrs s 0 "1 2" == 0 - 1 && fd_last_errno () == 22);
+// Linux rejects unknown speed encodings. Neither setter failure may reach
+// tcsetattr: the requested ECHO change must not be applied on either error.
+let _ = if str_eq (sys_os ()) "linux" then (
+  let attrs_with_speeds = fn (input: str) -> fn (output: str) ->
+    str_join " " (Cons (nth f0 0, Cons (nth f0 1, Cons (nth f0 2, Cons (str_of_int (lflag - echo_bit), Cons (input, Cons (output, Cons (nth f0 6, Nil)))))))) in
+  let _ = check "invalid input speed" (tty_set_attrs s 0 (attrs_with_speeds "4294967295" (nth f0 5)) == 0 - 1 && fd_last_errno () == 22 && str_eq (tty_attrs s) t0) in
+  check "invalid output speed" (tty_set_attrs s 0 (attrs_with_speeds (nth f0 4) "4294967295") == 0 - 1 && fd_last_errno () == 22 && str_eq (tty_attrs s) t0)
+) else ();
 let _ = check "flush" (tty_flush s 2 == 0 && tty_flush s 3 == 0 - 1);
 let pp = fd_pipe ();
 let rd = pp / 4294967296;

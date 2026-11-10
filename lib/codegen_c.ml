@@ -8649,7 +8649,8 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  }";
       "  t.c_iflag = (tcflag_t)v[0]; t.c_oflag = (tcflag_t)v[1];";
       "  t.c_cflag = (tcflag_t)v[2]; t.c_lflag = (tcflag_t)v[3];";
-      "  cfsetispeed(&t, (speed_t)v[4]); cfsetospeed(&t, (speed_t)v[5]);";
+      "  if (cfsetispeed(&t, (speed_t)v[4]) != 0) { __fd_errno = errno; return -1; }";
+      "  if (cfsetospeed(&t, (speed_t)v[5]) != 0) { __fd_errno = errno; return -1; }";
       "  int act = when == 0 ? TCSANOW : when == 1 ? TCSADRAIN : TCSAFLUSH;";
       "  int r = tcsetattr((int)fd, act, &t);";
       "  __fd_errno = r == 0 ? 0 : errno;";

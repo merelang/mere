@@ -46,6 +46,9 @@ action therefore cannot replace the private channel, hide an exec failure or
 write binary errno data into application output. Originally closed source
 descriptors remain closed. `scripts/host_io_check.sh` runs the three probes
 on both native backends and checks 50 descriptor-action failure cases.
+Terminal attribute changes also preserve errors from both speed setters
+before applying any attributes. Linux C/LLVM regressions reject invalid
+input and output speeds and verify the original settings remain unchanged.
 
 C coroutine string-root scans also visit overlapping header-search windows
 once over the existing sorted pin set. The candidate-copy, span-bound and
