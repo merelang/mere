@@ -52,3 +52,15 @@ sanitizer runs because their allocation quarantine has a separate policy.
 and checks controls for scan storage escaping to the default arena, an omitted
 scratch release, missing root matches and stale pin caches after a switch.
 It runs inside the existing required coroutine CI gate.
+
+The C walker consumes sorted pin words and visits overlapping header search
+windows once. A valid header seen for an earlier word either contained that
+word's address or ended before it; in the latter case it cannot match a later word. Allocation
+span boundaries and current-region high-water marks still bound every read.
+The cursor is local to one scan and does not survive coroutine switches or
+callback execution.
+
+See [the scan scaling benchmark](https://github.com/merelang/mere/tree/main/benchmarks/coro_scan) for phase
+measurements and its independent reference walker. The required coroutine
+gate runs its deterministic reference, operation-count and mutation checks;
+timing differences do not decide whether CI passes.

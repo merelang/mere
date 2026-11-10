@@ -14,6 +14,11 @@ python3 benchmarks/run.py --verify-only # the deterministic half (what CI runs)
 
 `scripts/bench_check.sh` is the CI gate and runs the last of those.
 
+The [candidate string-root scan benchmark](coro_scan/README.md) separately
+measures native coroutine registry indexing, pin preparation, header search
+and callbacks. Its deterministic reference and operation-count checks run
+inside the required coroutine gate.
+
 ## What this is, and what it is not
 
 It is a **record**, not a verdict. Nothing here fails because a number moved,
