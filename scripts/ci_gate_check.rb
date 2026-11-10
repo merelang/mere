@@ -30,10 +30,17 @@ module CIGates
   RUNTIME_MOVES = {
     "examples_parity (the corpus prints the same on interp and C)" =>
       ["downstream", "sh scripts/examples_parity.sh\nsh scripts/examples_parity.sh --poison\n"],
-    PARITY => ["compiler", "sh scripts/parity.sh"],
+    PARITY => ["web", "sh scripts/parity.sh"],
     "softfloat (a double's bits, on a target with no float)" =>
       ["web", "sh scripts/softfloat_check.sh"]
   }.freeze
+  REBALANCED_CHECKS = {
+    "contrib_ctest (contrib compiles and agrees with the interpreter)" =>
+      ["downstream", "sh scripts/contrib_ctest.sh"],
+    "rv prelude (every name it defines compiles for -rv)" =>
+      ["downstream", "sh scripts/rv_prelude_check.sh"]
+  }.freeze
+  BALANCED_CHECKS = RUNTIME_MOVES.merge(REBALANCED_CHECKS).freeze
   RISCV_BOUNDARIES = {
     "map_read_riscv (Map read boundaries against explicit results at both widths)" => "map_read_check.py",
     "buffer_boundary_riscv (the same buffer contracts at both widths)" => "buffer_boundary_check.py"
@@ -146,8 +153,8 @@ module CIGates
     require!(checks.count { |s| s["name"] == COROUTINES } == 1, "the coroutine gate must run once")
     require!(FORMATTERS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both formatter gates must run once")
-    require!(RUNTIME_MOVES.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
-             "all balanced runtime gates must run once")
+    require!(BALANCED_CHECKS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
+             "all balanced gates must run once")
     require!(RISCV_BOUNDARIES.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both balanced RISC-V boundary gates must run once")
     require!(checks.count { |s| s["name"] == FULL_TESTS } == 1, "the full toolchain unit suite must run once")
@@ -186,8 +193,8 @@ module CIGates
                  "formatter gates must retain their full corpus and poison runs")
         require!(!step["continue-on-error"], "formatter failures must fail downstream")
         assigned.fetch("downstream") << name
-      when *RUNTIME_MOVES.keys
-        group, command = RUNTIME_MOVES.fetch(name)
+      when *BALANCED_CHECKS.keys
+        group, command = BALANCED_CHECKS.fetch(name)
         require!(selected == [group], "#{name}: retain its balanced execution group")
         require!(step["run"] == command && !step["continue-on-error"],
                  "#{name}: retain the complete corpus and controls")
@@ -308,6 +315,18 @@ module CIGates
       "always successful result" => ->(c) { c[:final]["steps"].first["run"] = "true" },
       "ignored assignment result" => ->(c) { c[:final]["steps"].first["run"] = '[ "$GATE_SHARDS_RESULT" = success ]' }
     }
+    mutations["parity back in compiler"] = ->(c) {
+      c[:steps].find { |s| s["name"] == PARITY }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}"
+    }
+    REBALANCED_CHECKS.each_key do |name|
+      original = name.start_with?("contrib_ctest") ? "runtime" : "riscv"
+      mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }
+      mutations["renamed #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["name"] = "balanced gate renamed" }
+      mutations["previous group for #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["if"] = "${{ !cancelled() && matrix.group == '#{original}' }}" }
+      mutations["optional #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["continue-on-error"] = true }
+      mutations["bypassed #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["run"] = "true" }
+      mutations["duplicated #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["if"] = "${{ !cancelled() && (matrix.group == 'downstream' || matrix.group == '#{original}') }}" }
+    end
     mutations["missing coroutine gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == COROUTINES } }
     mutations["renamed coroutine gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["name"] = "coroutines renamed" }
     mutations["coroutines in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" }

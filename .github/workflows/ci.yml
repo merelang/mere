@@ -525,7 +525,7 @@ jobs:
       # cannot see it. Without this a name could be added there and never
       # compiled by anything.
       - name: "rv prelude (every name it defines compiles for -rv)"
-        if: ${{ !cancelled() && matrix.group == 'riscv' }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: sh scripts/rv_prelude_check.sh
 
       # The listing (-rvs) and the debug map (-rvg) must describe the binary
@@ -716,7 +716,7 @@ jobs:
         run: sh scripts/dom_canvas_check.sh
 
       - name: parity (interp / C / LLVM / wasm agree)
-        if: ${{ !cancelled() && matrix.group == 'compiler' }}
+        if: ${{ !cancelled() && matrix.group == 'web' }}
         run: sh scripts/parity.sh
 
       - name: ctest (C backend end to end)
@@ -727,7 +727,7 @@ jobs:
       # which is how `contrib/toml` spent the project's whole history unable
       # to produce C that compiles. Four minutes, 87 programs.
       - name: contrib_ctest (contrib compiles and agrees with the interpreter)
-        if: ${{ !cancelled() && matrix.group == 'runtime' }}
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: sh scripts/contrib_ctest.sh
 
       # Q-134 pinned in both directions: an allocation visible in a function's
