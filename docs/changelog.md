@@ -21,8 +21,11 @@ line per entry, and `sock_sendmsg` / `sock_recvmsg` carry control messages as
 four flag words, two speeds and the control characters in hex;
 `tty_winsize` / `tty_set_winsize` are `TIOCGWINSZ` / `TIOCSWINSZ`, and
 `tty_flush` is `tcflush`. `proc_spawn`'s group `-2` starts the child in a new
-session (`POSIX_SPAWN_SETSID`), so a pty slave it opens by path becomes its
-controlling terminal. The platform's numbers (flag bits, `SOL_SOCKET`) stay
+session whose controlling terminal is the first terminal among 0..2 (a pty
+slave opened there by path), the order pty.c uses: fork, setsid, the actions,
+`TIOCSCTTY`, exec. `POSIX_SPAWN_SETSID` cannot do it -- Darwin applies the file
+actions before the new session, and the child had no terminal; the probe's
+child is stty reading /dev/tty, since a shell takes a terminal on its own. The platform's numbers (flag bits, `SOL_SOCKET`) stay
 the caller's to ask `sys_os` about, as for `sock_getopt`. All of them keep
 errno for `fd_last_errno`. These are C and LLVM; on RISC-V only `file_fstat`.
 A child whose stdout or stderr is a pipe its parent made non-blocking (ruby's

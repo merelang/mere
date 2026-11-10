@@ -71,10 +71,12 @@ let _ = fd_close rd;
 let _ = fd_close (pp % 4294967296);
 
 // 4. a child in a new session opens the slave by path: it is the child's
-//    controlling terminal (/dev/tty opens) and it has the window size
-let script = "stty size; (exec 3</dev/tty) && echo ctty-ok";
+//    controlling terminal. The child is stty and not a shell -- a shell takes
+//    a terminal on its own -- and it reads /dev/tty, the controlling
+//    terminal, which is ENXIO for a process that has none
+let tflag = if str_eq (sys_os ()) "darwin" then "-f" else "-F";
 let acts = "o" ++ two ++ "0" ++ two ++ "2" ++ two ++ "0" ++ two ++ path ++ chr 1 ++ "d" ++ two ++ "0" ++ two ++ "1" ++ chr 1 ++ "d" ++ two ++ "0" ++ two ++ "2";
-let pid = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ script) "PATH=/bin:/usr/bin" acts (0 - 2) "";
+let pid = proc_spawn "/bin/stty" ("stty" ++ z ++ tflag ++ z ++ "/dev/tty" ++ z ++ "size") "PATH=/bin:/usr/bin" acts (0 - 2) "";
 let _ = check "spawn in a new session" (pid > 0);
 let _ = fd_close s;
 let buf = mem_alloc 4096;
@@ -83,8 +85,7 @@ let rec drain = fn (acc: str) ->
   if n <= 0 then acc else drain (acc ++ mem_to_str buf n);
 let out = drain "";
 let _ = proc_waitpid pid 0;
-let _ = check "child saw the size" (str_contains out "24 80");
-let _ = check "controlling terminal" (str_contains out "ctty-ok");
+let _ = check "controlling terminal, and its size" (str_contains out "24 80");
 let _ = check "bad group" (proc_spawn "/bin/true" "true" "" "" (0 - 3) "" == 0 - 22);
 let _ = fd_close m;
 
