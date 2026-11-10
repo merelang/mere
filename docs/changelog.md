@@ -20,6 +20,15 @@ block is the 1 MB seed: what the deeper slots can hold is bounded by 56 seeds,
 and `__LANG_REGION_KEEP_MAX` still bounds the 8 that may keep a grown block
 (`scripts/region_reclaim_check.sh` pins both).
 
+This change applies to the C backend. Cached payload is bounded by 184 MiB
+per thread (eight blocks of at most 16 MiB and 56 seeds of 1 MiB); this is
+capacity, not a bound on process RSS. The gate checks depths 8/9/40/63/64/65/80,
+C/LLVM result agreement, mixed seed/grown retention, thread isolation and
+actual normal/failed worker cleanup. Five mutations must fail, including
+removing the worker cache drain. LLVM's separate region implementation is
+unchanged.
+
+
 ## v0.1.726 — 2026-11-10
 
 Three host calls whose arguments are a struct or a platform constant no

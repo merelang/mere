@@ -292,33 +292,37 @@ if [ -f "$BIGSRC" ]; then
   fi
 fi
 
-# ---- nestdepth: regions nested deeper than the old cache of eight --------
-#
-# v0.1.727. An interpreter's regions nest dozens deep on every call; a release
-# past the per-thread cache freed the region's 1 MiB seed and the next acquire
-# made another (on Darwin two 1 MiB memsets: the kept mapping's 0xAA fill and
-# its zeroing). 40 levels opened and closed over and over must leave 40
-# regions cached, not 8 -- 20,000 rounds took 21 s on v0.1.726 and 0.03 s now.
+# ---- nestdepth: required cache boundaries and backend agreement ---------
 NDSRC="$ROOT/test/regionreclaim/nestdepth.mere"
-if [ -f "$NDSRC" ]; then
-  if "$MERE" -c "$NDSRC" > "$TMP/nd.c" 2>/dev/null && $CC -O2 -w "$TMP/nd.c" -o "$TMP/ndbin" 2>/dev/null; then
-    nd_out="$(MERE_REGION_STATS=1 "$TMP/ndbin" 40 1000 2>&1)"
+[ -f "$NDSRC" ] || { echo "FAIL region_reclaim: missing nestdepth fixture"; exit 1; }
+if "$MERE" -c "$NDSRC" > "$TMP/nd.c" 2>"$TMP/nd.err" &&
+   "$CC" -O2 -w "$TMP/nd.c" -o "$TMP/ndbin" 2>>"$TMP/nd.err" &&
+   "$MERE" -ll "$NDSRC" > "$TMP/nd.ll" 2>>"$TMP/nd.err" &&
+   "$CC" -O2 -w "$TMP/nd.ll" -o "$TMP/ndll" 2>>"$TMP/nd.err"; then
+  for nd_depth in 8 9 40 63 64 65 80; do
+    nd_out="$(MERE_REGION_STATS=1 "$TMP/ndbin" "$nd_depth" 3 2>&1)"
+    nd_rc=$?
+    nd_ll="$("$TMP/ndll" "$nd_depth" 3)"; nd_ll_rc=$?
     nd_sum="$(printf '%s\n' "$nd_out" | sed -n '1p')"
     nd_regions="$(printf '%s\n' "$nd_out" | sed -n 's/^region-stats cache: regions=\([0-9]*\) retained=[0-9]*$/\1/p' | tail -1)"
-    if [ "$nd_sum" != "40000" ]; then
-      echo "FAIL region_reclaim/nestdepth: got '$nd_sum', expected 40000"
-      fail=1
-    elif [ -z "$nd_regions" ] || [ "$nd_regions" -lt 40 ]; then
-      echo "FAIL region_reclaim/nestdepth: ${nd_regions:-no} regions cached after nesting 40 deep -- a release past"
-      echo "  the cache frees the region's seed and the next acquire at that depth makes another."
-      echo "  See __LANG_REGION_CACHE_CAP in codegen_c.ml."
+    nd_bytes="$(printf '%s\n' "$nd_out" | sed -n 's/^region-stats cache: regions=[0-9]* retained=\([0-9]*\)$/\1/p' | tail -1)"
+    nd_expected=$nd_depth; [ "$nd_expected" -le 64 ] || nd_expected=64
+    if [ "$nd_rc" != 0 ] || [ "$nd_ll_rc" != 0 ] ||
+       [ "$nd_sum" != "$((nd_depth * 3))" ] || [ "$nd_ll" != "$nd_sum" ] ||
+       [ "$nd_regions" != "$nd_expected" ] || [ "$nd_bytes" != "$((nd_expected * 1024 * 1024))" ]; then
+      echo "FAIL region_reclaim/nestdepth $nd_depth: C=$nd_sum LLVM=$nd_ll cached=${nd_regions:-missing} bytes=${nd_bytes:-missing}"
       fail=1
     fi
     checked=$((checked + 1))
-  else
-    echo "FAIL region_reclaim/nestdepth: the leg did not build"
-    fail=1
-  fi
+  done
+else
+  echo "FAIL region_reclaim/nestdepth: C or LLVM did not build"; head -3 "$TMP/nd.err"; fail=1
+fi
+# Mixed seed/grown slots and real normal/failed spawn cleanup, with poisons.
+if MERE="$MERE" CC="$CC" python3 "$ROOT/scripts/region_cache_check.py"; then
+  checked=$((checked + 1))
+else
+  echo "FAIL region_reclaim: cache retention or thread cleanup contract"; fail=1
 fi
 
 # ---- percall: Q-127's remaining half, closed on C and open on LLVM --------
@@ -494,7 +498,8 @@ if [ "$RV_ONLY" = 1 ]; then
   [ "$fail" = 0 ] && { echo "PASS region_reclaim (RV64): 100 trees of depth 14 run in 16 MB$(echo "$rv_note" | sed 's/^, RV64 holds 100 trees in 16 MB//')"; exit 0; }
   exit 1
 fi
-if [ "$checked" -lt 8 ]; then
+# Nineteen native checks are required; Wasm adds three when its tools exist.
+if [ "$checked" -lt 19 ]; then
   echo "FAIL region_reclaim: only $checked checks ran"
   exit 1
 fi
