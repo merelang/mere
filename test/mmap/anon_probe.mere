@@ -1,0 +1,76 @@
+// Anonymous mapped memory held by handle: a MAP_SHARED mapping is written by
+// a forked child and read back by the parent; a MAP_PRIVATE one is not. Every
+// range and handle check keeps errno for fd_last_errno. fd_pathconf asks
+// fpathconf(2) by name, here PIPE_BUF of a pipe.
+extern fn mmap_anon: int -> int -> int;
+extern fn mmap_size: int -> int;
+extern fn mmap_get_u8: int -> int -> int;
+extern fn mmap_set_u8: int -> int -> int -> int;
+extern fn mmap_to_str: int -> int -> int -> str;
+extern fn mmap_copy_str: int -> int -> str -> int;
+extern fn mmap_unmap: int -> int;
+extern fn fd_pathconf: int -> str -> int;
+extern fn fd_pathconf_var: str -> int;
+extern fn fd_pathconf_names: unit -> str;
+extern fn fd_pipe: unit -> int;
+extern fn fd_close: int -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn proc_waitpid: int -> int -> int;
+extern fn proc_wait_status: unit -> int;
+extern fn fork: unit -> int;
+
+let check = fn (label: str) -> fn (ok: bool) ->
+  if ok then () else (let _ = print ("FAIL " ++ label) in exit 1);
+
+// --- a shared mapping, written by a child
+let shared = mmap_anon 64 1;
+let _ = check "shared mapping" (shared >= 0 && fd_last_errno () == 0 && mmap_size shared == 64);
+let _ = check "zeroed" (mmap_get_u8 shared 0 == 0 && mmap_get_u8 shared 63 == 0);
+let private = mmap_anon 16 0;
+let _ = check "private mapping" (private >= 0 && private != shared);
+let pid = fork ();
+let _ = if pid == 0 then
+  (let _ = mmap_copy_str shared 3 "Hello" in
+   let _ = mmap_set_u8 shared 0 258 in
+   let _ = mmap_set_u8 private 0 7 in
+   exit 0)
+else 0;
+let _ = check "fork" (pid > 0);
+let _ = check "child reaped" (proc_waitpid pid 0 == pid && proc_wait_status () == 0);
+let _ = check "child's bytes" (str_eq (mmap_to_str shared 3 5) "Hello" && mmap_get_u8 shared 0 == 2);
+let _ = check "private stays the parent's" (mmap_get_u8 private 0 == 0);
+
+// --- bytes with a NUL in them, and the edges
+let _ = check "copy with a nul" (mmap_copy_str shared 60 ("a" ++ chr 0 ++ "b") == 3);
+let s = mmap_to_str shared 60 4;
+let _ = check "to_str keeps the nul" (str_len s == 4 && str_eq (substring s 0 3) ("a" ++ chr 0 ++ "b"));
+let _ = check "past the end" (mmap_get_u8 shared 64 == 0 - 1 && fd_last_errno () == 22);
+let _ = check "negative offset" (mmap_set_u8 shared (0 - 1) 1 == 0 - 1 && fd_last_errno () == 22);
+let _ = check "copy that does not fit" (mmap_copy_str shared 62 "xyz" == 0 - 1 && fd_last_errno () == 22 && mmap_get_u8 shared 62 == 98 && mmap_get_u8 shared 63 == 0);
+let _ = check "to_str out of range" (str_len (mmap_to_str shared 10 60) == 0 && fd_last_errno () == 22);
+let _ = check "empty to_str" (str_len (mmap_to_str shared 64 0) == 0 && fd_last_errno () == 0);
+let _ = check "bad length" (mmap_anon 0 1 == 0 - 1 && fd_last_errno () == 22);
+let _ = check "bad shared flag" (mmap_anon 8 2 == 0 - 1 && fd_last_errno () == 22);
+
+// --- unmapping, and a handle that is not mapped
+let _ = check "unmap" (mmap_unmap private == 0);
+let _ = check "unmapped handle" (mmap_get_u8 private 0 == 0 - 1 && fd_last_errno () == 9);
+let _ = check "unmap twice" (mmap_unmap private == 0 - 1 && fd_last_errno () == 9);
+let _ = check "no such handle" (mmap_size 99999 == 0 - 1 && mmap_size (0 - 1) == 0 - 1);
+let again = mmap_anon 8 0;
+let _ = check "slot reused" (again == private && mmap_get_u8 again 0 == 0);
+let _ = check "unmap rest" (mmap_unmap again == 0 && mmap_unmap shared == 0);
+
+// --- fpathconf by name
+let fds = fd_pipe ();
+let r = fds / 4294967296;
+let w = fds - r * 4294967296;
+let pipe_buf = fd_pathconf w "PIPE_BUF";
+let _ = check "PIPE_BUF" (pipe_buf >= 512 && fd_last_errno () == 0);
+let _ = check "unknown name" (fd_pathconf w "NOPE" == 0 - 1 && fd_last_errno () == 22);
+let _ = check "bad descriptor" (fd_pathconf (0 - 1) "PIPE_BUF" == 0 - 1 && fd_last_errno () == 9);
+let _ = check "platform number" (fd_pathconf_var "PIPE_BUF" > 0 && fd_pathconf_var "NOPE" == 0 - 1);
+let _ = check "names" (str_contains (fd_pathconf_names ()) "NAME_MAX" && str_contains (fd_pathconf_names ()) "PIPE_BUF");
+let _ = fd_close r;
+let _ = fd_close w;
+let _ = print "anon_probe passed";

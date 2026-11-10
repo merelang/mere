@@ -4,6 +4,30 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.726 — 2026-11-10
+
+Three host calls whose arguments are a struct or a platform constant no
+`extern` can spell. `sock_unix_sendto fd p len flags path` sends a datagram
+to a filesystem path through a `struct sockaddr_un`, the datagram half of
+`sock_unix_bind` / `sock_unix_connect`, leaving the socket unbound and
+unconnected. `fd_pathconf fd name` is `fpathconf(2)` with the variable asked
+for by name (`"PIPE_BUF"`, `"NAME_MAX"`, ...), since the `_PC_*` numbers differ
+between hosts; `-1` with errno 0 is "no limit", as fpathconf has it.
+`fd_pathconf_var` and `fd_pathconf_names` hand out the platform's numbers and
+names, as `proc_rlimit_resource` and `proc_rlimit_names` do for limits.
+
+`mmap_anon len shared` is anonymous mapped memory held by handle, with
+`mmap_get_u8` / `mmap_set_u8` / `mmap_to_str` / `mmap_copy_str` /
+`mmap_size` / `mmap_unmap`. A `MAP_SHARED` mapping is the one place a forked
+child can write bytes its parent then reads: the byte arena is copied by
+`fork`. Every call checks the handle and range, and errno is kept for
+`fd_last_errno`. `scripts/host_io_check.sh` runs two new probes on C and
+LLVM: a forked child writing a shared and a private mapping (with `PIPE_BUF`
+of a pipe), and AF_UNIX datagrams to a path from an unbound and a bound
+sender. `sock_recvfrom` names an unbound AF_UNIX sender `"unix 0 "` on
+Linux too, where the kernel gives no address for it (Darwin gives the family
+with an empty path).
+
 ## v0.1.725 — 2026-11-10
 
 `sock_sendmsg_to fd p len flags dest control` adds an explicit destination
