@@ -82,8 +82,10 @@ def exercise(root, workers, control="healthy"):
     env.pop("LISTING_BARRIER", None)
     if workers == 2 and control == "healthy":
         env["LISTING_BARRIER"] = "1"
-    run = subprocess.run(["sh", str(root / "scripts" / SCRIPT.name), "--workers", str(workers)],
-                         env=env, capture_output=True, text=True, timeout=30)
+    command = ["sh", str(root / "scripts" / SCRIPT.name)]
+    if workers != 2 or control != "healthy":
+        command += ["--workers", str(workers)]
+    run = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     assert not list((root / "scratch").iterdir()), "temporary files were retained"
     calls = [json.loads(line) for line in events.read_text().splitlines()]
     return run, calls
