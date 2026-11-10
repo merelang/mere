@@ -5419,10 +5419,10 @@ let rec emit_expr ?(let_body_top = false) (env : env) (e : Ast.expr) : string =
     emit_instr "  call i32 @fflush(ptr null)";
     let l = fresh_reg () in
     emit_instr (Printf.sprintf "  %s = call i64 @__lang_str_size(ptr %s)" l av);
-    let w = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 2, ptr %s, i64 %s)" w av l);
-    let w2 = fresh_reg () in
-    emit_instr (Printf.sprintf "  %s = call i64 @write(i32 2, ptr @.s_newline, i64 1)" w2);
+    (* v0.1.724: through __lang_err_write_all, which waits on EAGAIN (a
+       stderr its parent made non-blocking) where a bare write lost the line *)
+    emit_instr (Printf.sprintf "  call void @__lang_err_write_all(ptr %s, i64 %s)" av l);
+    emit_instr "  call void @__lang_err_write_all(ptr @.s_newline, i64 1)";
     "0"
   | Ast.App ({ node = Ast.Var "print_no_nl"; _ }, arg) ->
     let av = emit_expr env arg in
@@ -16716,15 +16716,27 @@ let host_errno_fn_llvm () =
    `loop { puts :ok }` under a closed pipe raises EPIPE by it). The refusal is
    kept in mere_rt_out_errno, which a program's native runtime (`--ffi-c`)
    reads; the name is exported for that reason. *)
-let write_all_runtime_llvm () =
+(* v0.1.724: ...and a descriptor its parent made non-blocking (ruby's IO.pipe
+   does that to both ends, and a child inherits the write end) answers EAGAIN
+   once the pipe is full. That is not a refusal: wait until it can be written
+   (poll, POLLOUT is 4 on both hosts) and go on, as the C runtime does.
+   `poll` is declared here unless something else in the module already is
+   its declaration -- a program's own extern, or the stdin readers -- since a
+   second declaration of one symbol is an IR error. *)
+let write_all_runtime_llvm ~(poll_declared : bool) =
   let ef = host_errno_fn_llvm () in
-  String.concat "\n"
-    [ "@mere_rt_out_errno = thread_local global i32 0";
-      Printf.sprintf "declare ptr @%s()" ef;
-      "define void @__lang_write_all(i32 %fd, ptr %p0, i64 %n0) {";
+  let darwin = (match Sysinfo.host_os () with "darwin" | "freebsd" -> true | _ -> false) in
+  let eagain = if darwin then 35 else 11 in
+  let nfds = if darwin then "i32" else "i64" in
+  (* one loop, two functions: __lang_write_all keeps a refusal for
+     proc_out_errno; __lang_err_write_all (print_err's) keeps nothing -- a
+     stale stderr errno read as stdout's would raise on the next print *)
+  let writer name params fd keep =
+    [ Printf.sprintf "define void @%s(%s) {" name params;
       "entry:";
       "  %pp = alloca ptr";
       "  %np = alloca i64";
+      "  %pfd = alloca [8 x i8], align 4";
       "  store ptr %p0, ptr %pp";
       "  store i64 %n0, ptr %np";
       "  %fl = call i32 @fflush(ptr null)";
@@ -16735,7 +16747,7 @@ let write_all_runtime_llvm () =
       "  br i1 %done, label %out, label %w";
       "w:";
       "  %p = load ptr, ptr %pp";
-      "  %r = call i64 @write(i32 %fd, ptr %p, i64 %n)";
+      Printf.sprintf "  %%r = call i64 @write(i32 %s, ptr %%p, i64 %%n)" fd;
       "  %pos = icmp sgt i64 %r, 0";
       "  br i1 %pos, label %adv, label %err";
       "adv:";
@@ -16751,13 +16763,30 @@ let write_all_runtime_llvm () =
       Printf.sprintf "  %%ep = call ptr @%s()" ef;
       "  %e = load i32, ptr %ep";
       "  %intr = icmp eq i32 %e, 4";
-      "  br i1 %intr, label %loop, label %keep";
-      "keep:";
-      "  store i32 %e, ptr @mere_rt_out_errno";
-      "  br label %out";
-      "out:";
-      "  ret void";
-      "}" ]
+      "  br i1 %intr, label %loop, label %again";
+      "again:";
+      Printf.sprintf "  %%ag = icmp eq i32 %%e, %d" eagain;
+      "  br i1 %ag, label %wait, label %keep";
+      "wait:";
+      Printf.sprintf "  store i32 %s, ptr %%pfd" fd;
+      "  %ev = getelementptr i8, ptr %pfd, i64 4";
+      "  store i16 4, ptr %ev";
+      "  %rv = getelementptr i8, ptr %pfd, i64 6";
+      "  store i16 0, ptr %rv";
+      Printf.sprintf "  %%pr = call i32 @poll(ptr %%pfd, %s 1, i32 -1)" nfds;
+      "  br label %loop";
+      "keep:" ]
+    @ (if keep then ["  store i32 %e, ptr @mere_rt_out_errno"] else [])
+    @ [ "  br label %out";
+        "out:";
+        "  ret void";
+        "}" ] in
+  String.concat "\n"
+    ([ "@mere_rt_out_errno = thread_local global i32 0";
+      Printf.sprintf "declare ptr @%s()" ef ]
+     @ (if poll_declared then [] else [Printf.sprintf "declare i32 @poll(ptr, %s, i32)" nfds])
+     @ writer "__lang_write_all" "i32 %fd, ptr %p0, i64 %n0" "%fd" true
+     @ writer "__lang_err_write_all" "ptr %p0, i64 %n0" "2" false)
 
 (* v0.1.670: what a program's native runtime (`mere --ffi-c`, the C backend's
    runtime compiled beside this IR) calls back into: a string, and any block,
@@ -19486,7 +19515,10 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
     @ (if !env_var_used_llvm then [env_var_runtime_llvm; ""] else [])
     @ (match host_misc_runtime_llvm (Hashtbl.mem extern_fn_decls_llvm) with
        | [] -> [] | l -> l @ [""])
-    @ [write_all_runtime_llvm (); ""]
+    @ [write_all_runtime_llvm
+         ~poll_declared:(Hashtbl.mem extern_fn_decls_llvm "poll"
+                         || Hashtbl.mem host_misc_used_llvm "read_key"
+                         || Hashtbl.mem host_misc_used_llvm "stdin_byte"); ""]
     @ (if !native_ffi_used_llvm then [ffi_exports_llvm; ""] else [])
     @ (match host_struct_runtime_llvm (Hashtbl.mem host_misc_used_llvm)
                (fun name line -> if Hashtbl.mem extern_fn_decls_llvm name then [] else [line]) with

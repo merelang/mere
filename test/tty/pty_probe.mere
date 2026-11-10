@@ -1,0 +1,112 @@
+// v0.1.724: a pseudo-terminal, a descriptor's termios and window size, a
+// child in a new session that gets the pty as its controlling terminal,
+// fstat(2) of a file unlinked while open, and a title after a shorter one
+// -- on the C and LLVM backends
+// (scripts/host_io_check.sh). Nothing here needs the caller's own terminal.
+extern fn pty_open: unit -> str;
+extern fn tty_attrs: int -> str;
+extern fn tty_set_attrs: int -> int -> str -> int;
+extern fn tty_winsize: int -> str;
+extern fn tty_set_winsize: int -> int -> int -> int -> int -> int;
+extern fn tty_flush: int -> int -> int;
+extern fn file_fstat: int -> int;
+extern fn file_stat: str -> int;
+extern fn file_stat_field: int -> int;
+extern fn proc_spawn: str -> str -> str -> str -> int -> str -> int;
+extern fn proc_waitpid: int -> int -> int;
+extern fn fd_open: str -> str -> int -> int;
+extern fn fd_pipe: unit -> int;
+extern fn fd_write: int -> int -> int -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn fd_close: int -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn unlink: str -> int;
+extern fn getpid: unit -> int;
+extern fn proc_set_title: str -> int;
+
+let check = fn (label: str) -> fn (ok: bool) ->
+  if ok then () else (let _ = print ("FAIL " ++ label) in exit 1);
+let rec nth = fn (xs: str list) -> fn (i: int) ->
+  match xs with Nil -> "" | Cons (v, rest) -> if i == 0 then v else nth rest (i - 1);
+let rec join_from = fn (xs: str list) -> fn (i: int) ->
+  match xs with
+  | Nil -> ""
+  | Cons (_, rest) -> if i > 0 then join_from rest (i - 1) else str_join " " xs;
+let z = chr 0;
+let two = chr 2;
+let echo_bit = 8;
+
+// 1. a pty: two descriptors and the slave's path
+let p = str_split (pty_open ()) " ";
+let m = int_of_str (nth p 0);
+let s = int_of_str (nth p 1);
+let path = join_from p 2;
+let _ = check "pty_open" (m >= 0 && s >= 0 && m != s && str_starts_with path "/dev/" && fd_last_errno () == 0);
+
+// 2. the window size, set on the slave and read from both ends
+let _ = check "set winsize" (tty_set_winsize s 24 80 0 0 == 0);
+let _ = check "winsize slave" (str_eq (tty_winsize s) "24 80 0 0");
+let _ = check "winsize master" (str_eq (tty_winsize m) "24 80 0 0");
+let _ = check "winsize range" (tty_set_winsize s 70000 80 0 0 == 0 - 1 && fd_last_errno () == 22);
+
+// 3. termios: ECHO off and back, through the text tty_attrs answers
+let t0 = tty_attrs s;
+let f0 = str_split t0 " ";
+let lflag = int_of_str (nth f0 3);
+let _ = check "attrs fields" (str_len (nth f0 6) > 0 && str_len (nth f0 6) % 2 == 0 && bit_and lflag echo_bit != 0);
+let off = str_join " " (Cons (nth f0 0, Cons (nth f0 1, Cons (nth f0 2, Cons (str_of_int (lflag - echo_bit), Cons (nth f0 4, Cons (nth f0 5, Cons (nth f0 6, Nil))))))));
+let _ = check "set attrs" (tty_set_attrs s 0 off == 0);
+let _ = check "echo off" (bit_and (int_of_str (nth (str_split (tty_attrs s) " ") 3)) echo_bit == 0);
+let _ = check "restore attrs" (tty_set_attrs s 2 t0 == 0 && str_eq (tty_attrs s) t0);
+let _ = check "bad when" (tty_set_attrs s 3 t0 == 0 - 1 && fd_last_errno () == 22);
+let _ = check "bad text" (tty_set_attrs s 0 "1 2" == 0 - 1 && fd_last_errno () == 22);
+// Linux rejects unknown speed encodings. Neither setter failure may reach
+// tcsetattr: the requested ECHO change must not be applied on either error.
+let _ = if str_eq (sys_os ()) "linux" then (
+  let attrs_with_speeds = fn (input: str) -> fn (output: str) ->
+    str_join " " (Cons (nth f0 0, Cons (nth f0 1, Cons (nth f0 2, Cons (str_of_int (lflag - echo_bit), Cons (input, Cons (output, Cons (nth f0 6, Nil)))))))) in
+  let _ = check "invalid input speed" (tty_set_attrs s 0 (attrs_with_speeds "4294967295" (nth f0 5)) == 0 - 1 && fd_last_errno () == 22 && str_eq (tty_attrs s) t0) in
+  check "invalid output speed" (tty_set_attrs s 0 (attrs_with_speeds (nth f0 4) "4294967295") == 0 - 1 && fd_last_errno () == 22 && str_eq (tty_attrs s) t0)
+) else ();
+let _ = check "flush" (tty_flush s 2 == 0 && tty_flush s 3 == 0 - 1);
+let pp = fd_pipe ();
+let rd = pp / 4294967296;
+let _ = check "not a tty" (str_eq (tty_attrs rd) "" && fd_last_errno () == 25 && str_eq (tty_winsize rd) "" && fd_last_errno () == 25);
+let _ = fd_close rd;
+let _ = fd_close (pp % 4294967296);
+
+// 4. a child in a new session opens the slave by path: it is the child's
+//    controlling terminal. The child is stty and not a shell -- a shell takes
+//    a terminal on its own -- and it reads /dev/tty, the controlling
+//    terminal, which is ENXIO for a process that has none
+let tflag = if str_eq (sys_os ()) "darwin" then "-f" else "-F";
+let acts = "o" ++ two ++ "0" ++ two ++ "2" ++ two ++ "0" ++ two ++ path ++ chr 1 ++ "d" ++ two ++ "0" ++ two ++ "1" ++ chr 1 ++ "d" ++ two ++ "0" ++ two ++ "2";
+let pid = proc_spawn "/bin/stty" ("stty" ++ z ++ tflag ++ z ++ "/dev/tty" ++ z ++ "size") "PATH=/bin:/usr/bin" acts (0 - 2) "";
+let _ = check "spawn in a new session" (pid > 0);
+let _ = fd_close s;
+let buf = mem_alloc 4096;
+let rec drain = fn (acc: str) ->
+  let n = fd_read m buf 4096 in
+  if n <= 0 then acc else drain (acc ++ mem_to_str buf n);
+let out = drain "";
+let _ = proc_waitpid pid 0;
+let _ = check "controlling terminal, and its size" (str_contains out "24 80");
+let _ = check "bad group" (proc_spawn "/bin/true" "true" "" "" (0 - 3) "" == 0 - 22);
+let _ = fd_close m;
+
+// 5. fstat of a file unlinked while open
+let f = "pty_probe_fstat_" ++ str_of_int (getpid ()) ++ ".txt";
+let fd = fd_open f "w+" 420;
+let _ = mem_copy_str buf 0 "hello";
+let _ = check "write" (fd_write fd buf 5 == 5);
+let _ = check "unlink" (unlink f == 0 && file_stat f == 0 - 1);
+let _ = check "fstat" (file_fstat fd == 0 && file_stat_field 7 == 5 && fd_last_errno () == 0);
+let _ = fd_close fd;
+let _ = check "fstat closed" (file_fstat fd == 0 - 1 && fd_last_errno () == 9 && file_stat_field 7 == 0 - 1);
+// 6. the title's area is the one exec laid out, however short the last title
+let _ = check "short title" (proc_set_title "x" == 1);
+let _ = check "longer title after it" (proc_set_title "pty-probe-title" == 15);
+print "pty: winsize, termios, a controlling terminal, fstat and the title passed"

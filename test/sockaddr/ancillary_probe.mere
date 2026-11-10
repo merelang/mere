@@ -1,0 +1,124 @@
+// v0.1.724: a peer's credentials, the interface list, a descriptor passed
+// with SCM_RIGHTS over a socketpair, and connect(2) on an existing socket
+// -- on the C and LLVM backends (scripts/host_io_check.sh). Loopback only:
+// no network, no DNS.
+extern fn sock_pair: int -> int;
+extern fn sock_peer_ids: int -> str;
+extern fn sock_ifaddrs: unit -> str;
+extern fn sock_sendmsg: int -> int -> int -> int -> str -> int;
+extern fn sock_recvmsg: int -> int -> int -> int -> int -> str;
+extern fn socket: int -> int -> int -> int;
+extern fn sock_connect: int -> str -> int -> int;
+extern fn sock_bind: int -> str -> int -> int;
+extern fn sock_local_addr: int -> str;
+extern fn sock_peer_addr: int -> str;
+extern fn tcp_listen_at: str -> int -> int -> int;
+extern fn fd_pipe: unit -> int;
+extern fn fd_write: int -> int -> int -> int;
+extern fn fd_read: int -> int -> int -> int;
+extern fn fd_close: int -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn file_fstat: int -> int;
+extern fn file_stat_field: int -> int;
+
+let check = fn (label: str) -> fn (ok: bool) ->
+  if ok then () else (let _ = print ("FAIL " ++ label) in exit 1);
+let rec nth = fn (xs: str list) -> fn (i: int) ->
+  match xs with Nil -> "" | Cons (v, rest) -> if i == 0 then v else nth rest (i - 1);
+let rec count = fn (xs: str list) -> fn (n: int) ->
+  match xs with Nil -> n | Cons (_, rest) -> count rest (n + 1);
+let hexd = "0123456789abcdef";
+let hexbyte = fn (b: int) -> substring hexd (b / 16) (b / 16 + 1) ++ substring hexd (b % 16) (b % 16 + 1);
+// an int's four bytes in host order (both hosts are little-endian)
+let le4 = fn (n: int) ->
+  hexbyte (n % 256) ++ hexbyte (n / 256 % 256) ++ hexbyte (n / 65536 % 256) ++ hexbyte (n / 16777216 % 256);
+let nib = fn (c: str) -> str_index_of hexd c;
+let rec unle = fn (h: str) -> fn (i: int) ->
+  if i < 0 then 0
+  else unle h (i - 1) + (nib (substring h (2 * i) (2 * i + 1)) * 16 + nib (substring h (2 * i + 1) (2 * i + 2))) * (if i == 0 then 1 else if i == 1 then 256 else if i == 2 then 65536 else 16777216);
+let sol = if str_eq (sys_os ()) "darwin" then 65535 else 1;
+
+// 1. the peer's credentials: ours, from either end
+let pr = sock_pair 1;
+let a = pr / 1048576;
+let b = pr % 1048576;
+let _ = check "pair" (pr > 0);
+// a new pipe is owned by this process's effective uid and gid (getuid and
+// getgid cannot be externs: uid_t / gid_t conflict with an emitted `int`)
+let ids_pipe = fd_pipe ();
+let _ = file_fstat (ids_pipe % 4294967296);
+let me = str_of_int (file_stat_field 4) ++ " " ++ str_of_int (file_stat_field 5);
+let _ = fd_close (ids_pipe / 4294967296);
+let _ = fd_close (ids_pipe % 4294967296);
+let _ = check "peer ids" (str_eq (sock_peer_ids a) me && str_eq (sock_peer_ids b) me && fd_last_errno () == 0);
+let lone = socket 1 1 0;
+let _ = check "no peer" (str_eq (sock_peer_ids lone) "" && fd_last_errno () > 0);
+let _ = check "bad fd ids" (str_eq (sock_peer_ids (0 - 1)) "" && fd_last_errno () == 9);
+
+// 2. the interface list: seven tab fields a line, and loopback's 127.0.0.1
+let ifs = str_split (sock_ifaddrs ()) "\n";
+let rec all7 = fn (ls: str list) -> match ls with
+  | Nil -> true | Cons (l, t) -> count (str_split l "\t") 0 == 7 && all7 t;
+let rec has_lo = fn (ls: str list) -> match ls with
+  | Nil -> false
+  | Cons (l, t) ->
+    let f = str_split l "\t" in
+    (str_starts_with (nth f 0) "lo" && str_eq (nth f 3) "inet 0 127.0.0.1"
+     && str_eq (nth f 4) "inet 0 255.0.0.0" && int_of_str (nth f 1) > 0) || has_lo t;
+let _ = check "ifaddrs fields" (count ifs 0 > 0 && all7 ifs);
+let _ = check "ifaddrs loopback" (has_lo ifs);
+
+// 3. a pipe's read end crosses the socketpair as SCM_RIGHTS
+let pp = fd_pipe ();
+let rd = pp / 4294967296;
+let wr = pp % 4294967296;
+let buf = mem_alloc 64;
+let _ = mem_copy_str buf 0 "x";
+let ctl = str_of_int sol ++ " 1 " ++ le4 rd;
+let _ = check "sendmsg" (sock_sendmsg a buf 1 0 ctl == 1 && fd_last_errno () == 0);
+let got = str_split (sock_recvmsg b buf 64 0 256) "\n";
+let head = str_split (nth got 0) " ";
+let _ = check "recvmsg count" (str_eq (nth head 0) "1" && str_eq (mem_to_str buf 1) "x");
+let _ = check "recvmsg flags" (str_eq (nth head 1) "0");
+let cm = str_split (nth got 1) " ";
+let _ = check "control message" (count got 0 == 2 && int_of_str (nth cm 0) == sol && str_eq (nth cm 1) "1" && str_len (nth cm 2) == 8);
+let rd2 = unle (nth cm 2) 3;
+let _ = check "a new descriptor" (rd2 >= 0 && rd2 != rd);
+let _ = mem_copy_str buf 0 "hi";
+let _ = check "write the pipe" (fd_write wr buf 2 == 2);
+let _ = check "read what crossed" (fd_read rd2 buf 64 == 2 && str_eq (mem_to_str buf 2) "hi");
+
+// 4. no control data; truncated control space; refusals
+let _ = mem_copy_str buf 0 "plain";
+let _ = check "sendmsg plain" (sock_sendmsg a buf 5 0 "" == 5);
+let g2 = str_split (sock_recvmsg b buf 64 0 0) "\n";
+let _ = check "recvmsg plain" (count g2 0 == 1 && str_eq (nth (str_split (nth g2 0) " ") 0) "5" && str_eq (mem_to_str buf 5) "plain");
+let _ = check "bad control" (sock_sendmsg a buf 1 0 "1 x 00" == 0 - 1 && fd_last_errno () == 22);
+let _ = check "odd hex" (sock_sendmsg a buf 1 0 (str_of_int sol ++ " 1 0") == 0 - 1 && fd_last_errno () == 22);
+let _ = check "bad recv fd" (str_eq (sock_recvmsg (0 - 1) buf 1 0 0) "" && fd_last_errno () == 9);
+let _ = fd_close a;
+let _ = fd_close b;
+let _ = fd_close rd;
+let _ = fd_close rd2;
+let _ = fd_close wr;
+let _ = fd_close lone;
+// 5. connect(2) on an existing socket: it keeps its descriptor and family
+let srv = tcp_listen_at "127.0.0.1" 0 16;
+let sport = int_of_str (nth (str_split (sock_local_addr srv) " ") 1);
+let t4 = socket 2 1 0;
+let _ = check "connect tcp" (sock_connect t4 "127.0.0.1" sport == 0 && str_eq (sock_peer_addr t4) ("inet " ++ str_of_int sport ++ " 127.0.0.1"));
+let _ = check "connect twice" (sock_connect t4 "127.0.0.1" sport == 0 - 1 && fd_last_errno () > 0);
+let u4 = socket 2 2 0;
+let _ = check "connect udp" (sock_connect u4 "127.0.0.1" 9 == 0 && str_starts_with (sock_local_addr u4) "inet ");
+let u6 = socket 2 2 0;
+let _ = check "another family" (sock_connect u6 "::1" 9 == 0 - 1 && fd_last_errno () > 0);
+let _ = check "a name" (sock_connect u6 "localhost" 9 == 0 - 2 && fd_last_errno () == 0);
+let _ = check "bad port" (sock_connect u6 "127.0.0.1" 70000 == 0 - 1 && fd_last_errno () == 22);
+let _ = fd_close t4;
+let _ = fd_close u4;
+let _ = fd_close u6;
+let _ = fd_close srv;
+print "ancillary: peer ids, interfaces, SCM_RIGHTS and connect passed"

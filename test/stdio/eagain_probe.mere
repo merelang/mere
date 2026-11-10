@@ -1,0 +1,44 @@
+// v0.1.724: stdout and stderr on a pipe made non-blocking, as a child of
+// ruby's IO.pipe gets them. A full pipe answers EAGAIN, and print_no_nl,
+// print_bytes and print_err wait until it can be written instead of losing
+// the rest -- on the C and LLVM backends (scripts/host_io_check.sh).
+extern fn fd_pipe: unit -> int;
+extern fn fd_close: int -> int;
+extern fn dup2: int -> int -> int;
+extern fn io_set_nonblocking: int -> int;
+extern fn proc_spawn: str -> str -> str -> str -> int -> str -> int;
+extern fn proc_waitpid: int -> int -> int;
+extern fn getpid: unit -> int;
+
+let z = chr 0;
+let two = chr 2;
+let n = 300000;
+let out = "eagain_probe_" ++ str_of_int (getpid ()) ++ ".txt";
+
+// a reader that starts late, so the pipe fills first, and counts the bytes
+let through = fn (fd: int) -> fn (send: unit -> unit) ->
+  let pp = fd_pipe () in
+  let rd = pp / 4294967296 in
+  let wr = pp % 4294967296 in
+  let acts = "d" ++ two ++ str_of_int rd ++ two ++ "0" ++ chr 1 ++ "c" ++ two ++ str_of_int wr
+             ++ chr 1 ++ "o" ++ two ++ "1" ++ two ++ "577" ++ two ++ "420" ++ two ++ out in
+  let pid = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "sleep 0.3; wc -c | tr -d ' '") "PATH=/bin:/usr/bin" acts (0 - 1) "" in
+  let _ = fd_close rd in
+  let saved = 100 + fd in
+  let _ = dup2 fd saved in
+  let _ = dup2 wr fd in
+  let _ = fd_close wr in
+  let _ = io_set_nonblocking fd in
+  let _ = send () in
+  let _ = dup2 saved fd in
+  let _ = fd_close saved in
+  let _ = proc_waitpid pid 0 in
+  str_trim (read_file out);
+
+let big = str_repeat "o" n;
+let a = through 1 (fn (u: unit) -> print_no_nl big);
+let b = through 2 (fn (u: unit) -> print_err (str_repeat "e" (n - 1)));
+let _ = file_delete out;
+let _ = (if str_eq a (str_of_int n) then () else (let _ = print ("FAIL stdout " ++ a) in exit 1));
+let _ = (if str_eq b (str_of_int n) then () else (let _ = print ("FAIL stderr " ++ b) in exit 1));
+print "eagain: stdout and stderr waited for a full pipe passed"

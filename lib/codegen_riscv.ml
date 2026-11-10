@@ -564,6 +564,8 @@ let libm_sigs : (string * string) list =
          snapshot that file_stat_field reads) *)
       ("getpid", "u>i"); ("access", "si>i"); ("rmdir", "s>i");
       ("file_stat", "s>i"); ("file_lstat", "s>i"); ("file_stat_field", "i>i");
+      (* v0.1.724: and of an open descriptor *)
+      ("file_fstat", "i>i");
       (* v0.1.633: and where the process is, and a file's mode *)
       ("chdir", "s>i"); ("file_chmod", "si>i");
       (* v0.1.634: descriptors, and the byte arena their bytes cross through *)
