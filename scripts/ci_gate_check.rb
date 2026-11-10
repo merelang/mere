@@ -18,6 +18,7 @@ module CIGates
   COROUTINES = "coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)"
   COROUTINE_COMMAND = <<~'SH'.freeze
     python3 scripts/coro_runner_test.py
+    python3 scripts/coro_scan_stability_check.py
     CORO_TIMINGS="$RUNNER_TEMP/coro-rv-timings.tsv" MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/coro_check.sh --poison
     awk -F '\t' 'NR > 1 { count[$1]++; seconds[$1] += $3 } END { for (phase in count) printf "coro timings: %s %d runs %.3f worker-seconds\n", phase, count[phase], seconds[phase] }' "$RUNNER_TEMP/coro-rv-timings.tsv"
   SH
@@ -310,7 +311,7 @@ module CIGates
     mutations["renamed coroutine gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["name"] = "coroutines renamed" }
     mutations["coroutines in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" }
     mutations["optional coroutines"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["continue-on-error"] = true }
-    ["python3 scripts/coro_runner_test.py\n", " --poison", 'MEMU="$RUNNER_TEMP/downstream/memu" ',
+    ["python3 scripts/coro_runner_test.py\n", "python3 scripts/coro_scan_stability_check.py\n", " --poison", 'MEMU="$RUNNER_TEMP/downstream/memu" ',
      'CORO_TIMINGS="$RUNNER_TEMP/coro-rv-timings.tsv" '].each do |part|
       mutations["coroutine command missing #{part.strip}"] = ->(c) {
         c[:steps].find { |s| s["name"] == COROUTINES }["run"].sub!(part, "")

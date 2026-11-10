@@ -38,3 +38,17 @@ suspended and finished targets, empty lists, duplicates, binary bytes
 and partial application. C keeps its separate sparse-root contract. At both
 RISC-V widths, poison probes omit the callback, omit the list tail or replace
 candidate bytes; each must make the conservative fixture fail.
+
+The native repeated-scan check runs `scan_strings_repeated.mere` with 1,000
+and 4,000 unused candidates, one changing live name and 32 versus 256 rounds.
+Each round switches the coroutine, scans strings, scans integer roots, then
+scans strings again into a fresh result map. Named scratch regions enclose
+candidate registries, results and scan storage. Measurements after warmup and
+at completion bound registered region capacity and default-arena allocation;
+O2 also compares peak RSS between short and long runs. RSS is diagnostic in
+sanitizer runs because their allocation quarantine has a separate policy.
+
+`python3 scripts/coro_scan_stability_check.py` runs O0, O2 and ASan/UBSan modes
+and checks controls for scan storage escaping to the default arena, an omitted
+scratch release, missing root matches and stale pin caches after a switch.
+It runs inside the existing required coroutine CI gate.
