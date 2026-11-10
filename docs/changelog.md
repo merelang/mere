@@ -4,6 +4,16 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.725 — 2026-11-10
+
+`sock_sendmsg` takes a destination, the `msg_name` of sendmsg(2): `"host
+port"`, a numeric address of the socket's family, or `""` for its connected
+peer (`-2` with errno 0 for one that is not). A datagram socket answers the
+address it received from with control data -- ruby's `Socket.udp_server_*`
+replies with `IP_PKTINFO` through it -- and v0.1.724's `sock_sendmsg` could
+only send on a connected socket. The ancillary probe sends to an address from
+an unconnected socket and is refused a name.
+
 ## v0.1.724 — 2026-11-10
 
 The host calls whose arguments are a struct an `extern` cannot spell, kept in

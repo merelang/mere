@@ -5,7 +5,7 @@
 extern fn sock_pair: int -> int;
 extern fn sock_peer_ids: int -> str;
 extern fn sock_ifaddrs: unit -> str;
-extern fn sock_sendmsg: int -> int -> int -> int -> str -> int;
+extern fn sock_sendmsg: int -> int -> int -> int -> str -> str -> int;
 extern fn sock_recvmsg: int -> int -> int -> int -> int -> str;
 extern fn socket: int -> int -> int -> int;
 extern fn sock_connect: int -> str -> int -> int;
@@ -78,7 +78,7 @@ let wr = pp % 4294967296;
 let buf = mem_alloc 64;
 let _ = mem_copy_str buf 0 "x";
 let ctl = str_of_int sol ++ " 1 " ++ le4 rd;
-let _ = check "sendmsg" (sock_sendmsg a buf 1 0 ctl == 1 && fd_last_errno () == 0);
+let _ = check "sendmsg" (sock_sendmsg a buf 1 0 "" ctl == 1 && fd_last_errno () == 0);
 let got = str_split (sock_recvmsg b buf 64 0 256) "\n";
 let head = str_split (nth got 0) " ";
 let _ = check "recvmsg count" (str_eq (nth head 0) "1" && str_eq (mem_to_str buf 1) "x");
@@ -93,11 +93,11 @@ let _ = check "read what crossed" (fd_read rd2 buf 64 == 2 && str_eq (mem_to_str
 
 // 4. no control data; truncated control space; refusals
 let _ = mem_copy_str buf 0 "plain";
-let _ = check "sendmsg plain" (sock_sendmsg a buf 5 0 "" == 5);
+let _ = check "sendmsg plain" (sock_sendmsg a buf 5 0 "" "" == 5);
 let g2 = str_split (sock_recvmsg b buf 64 0 0) "\n";
 let _ = check "recvmsg plain" (count g2 0 == 1 && str_eq (nth (str_split (nth g2 0) " ") 0) "5" && str_eq (mem_to_str buf 5) "plain");
-let _ = check "bad control" (sock_sendmsg a buf 1 0 "1 x 00" == 0 - 1 && fd_last_errno () == 22);
-let _ = check "odd hex" (sock_sendmsg a buf 1 0 (str_of_int sol ++ " 1 0") == 0 - 1 && fd_last_errno () == 22);
+let _ = check "bad control" (sock_sendmsg a buf 1 0 "" "1 x 00" == 0 - 1 && fd_last_errno () == 22);
+let _ = check "odd hex" (sock_sendmsg a buf 1 0 "" (str_of_int sol ++ " 1 0") == 0 - 1 && fd_last_errno () == 22);
 let _ = check "bad recv fd" (str_eq (sock_recvmsg (0 - 1) buf 1 0 0) "" && fd_last_errno () == 9);
 let _ = fd_close a;
 let _ = fd_close b;
@@ -117,6 +117,18 @@ let u6 = socket 2 2 0;
 let _ = check "another family" (sock_connect u6 "::1" 9 == 0 - 1 && fd_last_errno () > 0);
 let _ = check "a name" (sock_connect u6 "localhost" 9 == 0 - 2 && fd_last_errno () == 0);
 let _ = check "bad port" (sock_connect u6 "127.0.0.1" 70000 == 0 - 1 && fd_last_errno () == 22);
+// ...and a datagram to an address, from a socket that is not connected
+let ua = socket 2 2 0;
+let ub = socket 2 2 0;
+let _ = check "bind datagram" (sock_bind ua "127.0.0.1" 0 == 0 && sock_bind ub "127.0.0.1" 0 == 0);
+let ubp = int_of_str (nth (str_split (sock_local_addr ub) " ") 1);
+let _ = mem_copy_str buf 0 "to";
+let _ = check "sendmsg to" (sock_sendmsg ua buf 2 0 ("127.0.0.1 " ++ str_of_int ubp) "" == 2);
+let g3 = str_split (nth (str_split (sock_recvmsg ub buf 64 0 0) "\n") 0) " ";
+let _ = check "received from" (str_eq (nth g3 0) "2" && str_eq (nth g3 2) "inet" && str_eq (nth g3 4) "127.0.0.1" && str_eq (mem_to_str buf 2) "to");
+let _ = check "sendmsg to a name" (sock_sendmsg ua buf 2 0 "localhost 9" "" == 0 - 2 && fd_last_errno () == 0);
+let _ = fd_close ua;
+let _ = fd_close ub;
 let _ = fd_close t4;
 let _ = fd_close u4;
 let _ = fd_close u6;
