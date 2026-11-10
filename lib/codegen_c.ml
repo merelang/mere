@@ -13467,6 +13467,7 @@ let coro_runtime ~(stack_bytes : int) =
         "typedef struct { const char* text; size_t len, next; uint64_t hash; int found; } __lang_string_candidate;";
         "typedef struct {";
         "  __lang_string_candidate* entries; size_t* heads; size_t cap, maxlen;";
+        "  uintptr_t scanned;";
         "  __lang_span* spans; size_t nsp;";
         "} __lang_string_scan;";
         "static uint64_t __lang_string_root_hash(const char* p, size_t n) {";
@@ -13488,6 +13489,7 @@ let coro_runtime ~(stack_bytes : int) =
         "static void __lang_string_root_word(void* ctx, uintptr_t w) {";
         "  __lang_string_scan* s = (__lang_string_scan*)ctx;";
         "  uintptr_t a = w & ~(uintptr_t)7;";
+        "  if (a < s->scanned) return;";
         "  size_t lo = 0, hi = s->nsp;";
         "  while (lo < hi) { size_t m = lo + (hi - lo) / 2; if (s->spans[m].hi <= a) lo = m + 1; else hi = m; }";
         "  if (lo == s->nsp || a < s->spans[lo].lo) return;";
@@ -13500,6 +13502,13 @@ let coro_runtime ~(stack_bytes : int) =
         "  uintptr_t begin = a > s->maxlen ? a - s->maxlen : 0;";
         "  if (begin < sp->lo + sizeof(size_t)) begin = sp->lo + sizeof(size_t);";
         "  begin = (begin + 7) & ~(uintptr_t)7;";
+        "  /* Pin words are sorted. A header already visited either matched the";
+        "     earlier address, or ended before it and cannot match a later one.";
+        "     Visit overlapping windows once; keep gaps between spans unread. */";
+        "  if (begin <= s->scanned) {";
+        "    if (s->scanned > UINTPTR_MAX - 8) return;";
+        "    begin = s->scanned + 8;";
+        "  }";
         "  uintptr_t end = a <= UINTPTR_MAX - sizeof(size_t) ? a + sizeof(size_t) : a;";
         "  if (end > used) end = used;";
         "  for (uintptr_t p = begin; p <= end; p += 8) {";
@@ -13508,6 +13517,7 @@ let coro_runtime ~(stack_bytes : int) =
         "      __lang_string_root_match(s, (const char*)p, n);";
         "    if (end - p < 8) break;";
         "  }";
+        "  if (begin <= end) s->scanned = end & ~(uintptr_t)7;";
         "}";
         "static void __lang_coro_scan_strings(__lang_coro_h ch, const char* const* names, size_t n, void* env, void* fn) {";
         "  if (!n) return;";

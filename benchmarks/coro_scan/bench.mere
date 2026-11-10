@@ -1,0 +1,62 @@
+// The native driver supplies phase measurements; candidate construction is untimed.
+extern fn scan_bench_reset: unit -> unit;
+extern fn scan_bench_report: int -> unit;
+extern fn scan_bench_begin: unit -> unit;
+extern fn scan_bench_end: unit -> unit;
+let argv = args ();
+let number = fn (xs: str list) -> match xs with Cons (s, _) -> int_of_str s | Nil -> 1;
+let rest = fn (xs: str list) -> match xs with Cons (_, tail) -> tail | Nil -> Nil;
+let count = number argv;
+let width = number (rest argv);
+let workers = number (rest (rest argv));
+let rounds = number (rest (rest (rest argv)));
+let root = coro_root ();
+let live_name = fn (i: int) -> "live-" ++ str_of_int i ++ chr 0 ++ "tail";
+let rec make_workers = fn (i: int) -> fn (xs: Coro[unit] list) ->
+  if i == workers then xs else
+  let c = coro_new (fn _me -> fn (_u: unit) ->
+    region Held {
+      let rec fill = fn (j: int) -> fn (xs: str list) ->
+        if j == 64 then xs else fill (j + 1) (Cons (live_name j, xs)) in
+      let values = fill 0 Nil in
+      let _ = coro_switch root in
+      let _ = (match values with
+        | Cons (s, _) -> if str_eq s (live_name 63) then ()
+                        else fail "scan benchmark: worker root lost"
+        | Nil -> fail "scan benchmark: empty worker") in
+      coro_exit root ()
+    }) in
+  let _ = coro_switch c in
+  make_workers (i + 1) (Cons (c, xs));
+let targets = make_workers 0 Nil;
+let rec unused = fn (i: int) -> fn (xs: str list) ->
+  if i == count then xs else unused (i + 1) (Cons ("unused-" ++ str_of_int i, xs));
+let rec live = fn (i: int) -> fn (xs: str list) ->
+  if i == 64 then xs else live (i + 1) (Cons (live_name i, xs));
+// One long unused candidate changes the search window without multiplying
+// every candidate's copy cost by its length.
+let names = live 0 (unused 0 (Cons (str_repeat "z" width, Nil)));
+let rec scan = fn (xs: Coro[unit] list) -> match xs with
+  | Nil -> ()
+  | Cons (c, tail) ->
+    let _ = region Scratch {
+      let found = map_new () in
+      let _ = scan_bench_begin () in
+      let _ = coro_scan_strings c names (fn (s: str) -> map_set found s 1) in
+      let _ = scan_bench_end () in
+      let rec check = fn (i: int) ->
+        if i == 64 then () else (
+          let _ = (if map_has found (live_name i) then ()
+                   else fail "scan benchmark: live root missing") in check (i + 1)) in
+      check 0
+    } in scan tail;
+let rec repeat = fn (i: int) ->
+  if i == rounds then () else (let _ = scan targets in repeat (i + 1));
+let _ = scan_bench_reset ();
+let _ = repeat 0;
+let _ = scan_bench_report (workers * rounds);
+let rec finish = fn (xs: Coro[unit] list) -> match xs with
+  | Nil -> ()
+  | Cons (c, tail) -> let _ = coro_switch c in finish tail;
+let _ = finish targets;
+print "scan benchmark passed"
