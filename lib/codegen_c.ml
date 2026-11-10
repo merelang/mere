@@ -7313,7 +7313,7 @@ let native_ffi_names =
        control data, which take a struct ucred / ifaddrs / msghdr; and a
        pseudo-terminal and the termios / winsize of any descriptor, which take
        a struct termios / winsize. The structs stay here and cross as text. *)
-    "sock_peer_ids"; "sock_ifaddrs"; "sock_sendmsg"; "sock_recvmsg"; "sock_connect";
+    "sock_peer_ids"; "sock_ifaddrs"; "sock_sendmsg"; "sock_sendmsg_to"; "sock_recvmsg"; "sock_connect";
     "pty_open"; "tty_attrs"; "tty_set_attrs"; "tty_winsize"; "tty_set_winsize"; "tty_flush";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
@@ -8511,25 +8511,52 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  __fd_errno = EINVAL;";
       "  return -1;";
       "}";
-      "/* sock_sendmsg: sendmsg(2) of len bytes at arena offset p, with the";
-      "   platform's MSG_* flags and the control messages above, on a connected";
-      "   socket. The count sent, or -1 with errno kept (EINVAL for control text";
-      "   that does not parse). */";
-      "static long long sock_sendmsg(long long fd, long long p, long long len, long long flags, const char* ctl) {";
+      "/* sock_sendmsg_to: sendmsg(2) of len bytes at arena offset p, with the";
+      "   platform's MSG_* flags, to `dest` -- \"host port\", a numeric address of";
+      "   the socket's family, or \"\" for its connected peer -- with the control";
+      "   messages above. The count sent, or -1 with errno kept (EINVAL for";
+      "   control text that does not parse), -2 with errno 0 for a destination";
+      "   that is not a numeric address of the family. */";
+      "static long long sock_sendmsg_to(long long fd, long long p, long long len, long long flags, const char* dest, const char* ctl) {";
       "  if (fd < 0 || fd > INT_MAX) { __fd_errno = EBADF; return -1; }";
       "  if (p < 0 || p > __MEM_CAP || len < 0 || len > __MEM_CAP - p ||";
       "      flags < INT_MIN || flags > INT_MAX) { __fd_errno = EINVAL; return -1; }";
+      "  struct addrinfo* res = NULL; struct addrinfo* pick = NULL;";
+      "  if (dest != NULL && dest[0] != 0) {";
+      "    struct sockaddr_storage ss; socklen_t sl = sizeof ss; memset(&ss, 0, sizeof ss);";
+      "    if (getsockname((int)fd, (struct sockaddr*)&ss, &sl) != 0) { __fd_errno = errno; return -1; }";
+      "    const char* sp = strrchr(dest, ' ');";
+      "    char host[1100];";
+      "    if (sp == NULL || sp == dest || (size_t)(sp - dest) >= sizeof host) { __fd_errno = 0; return -2; }";
+      "    const char* service = sp + 1; unsigned port = 0;";
+      "    if (*service == 0) { __fd_errno = 0; return -2; }";
+      "    for (const char* q = service; *q; q++) {";
+      "      if (*q < '0' || *q > '9' || port > 6553 || (port == 6553 && *q > '5')) { __fd_errno = 0; return -2; }";
+      "      port = port * 10 + (unsigned)(*q - '0');";
+      "    }";
+      "    memcpy(host, dest, (size_t)(sp - dest)); host[sp - dest] = 0;";
+      "    struct addrinfo hints; memset(&hints, 0, sizeof hints);";
+      "    hints.ai_family = ss.ss_family; hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;";
+      "    if (getaddrinfo(host, sp + 1, &hints, &res) != 0 || res == NULL) { __fd_errno = 0; return -2; }";
+      "    pick = res;";
+      "  }";
       "  unsigned char* cb; size_t cl;";
-      "  if (__sock_ctl_parse(ctl, &cb, &cl) != 0) return -1;";
+      "  if (__sock_ctl_parse(ctl, &cb, &cl) != 0) { if (res) freeaddrinfo(res); return -1; }";
       "  struct iovec iov; iov.iov_base = __mem + p; iov.iov_len = (size_t)len;";
       "  struct msghdr mh; memset(&mh, 0, sizeof mh);";
       "  mh.msg_iov = &iov; mh.msg_iovlen = 1;";
+      "  if (pick) { mh.msg_name = pick->ai_addr; mh.msg_namelen = pick->ai_addrlen; }";
       "  if (cl > 0) { mh.msg_control = cb; mh.msg_controllen = (socklen_t)cl; }";
       "  ssize_t n = sendmsg((int)fd, &mh, (int)flags);";
       "  int err = errno;";
       "  free(cb);";
+      "  if (res) freeaddrinfo(res);";
       "  __fd_errno = n < 0 ? err : 0;";
       "  return n < 0 ? -1 : (long long)n;";
+      "}";
+      "/* Preserve the v0.1.724 connected-socket API and its five arguments. */";
+      "static long long sock_sendmsg(long long fd, long long p, long long len, long long flags, const char* ctl) {";
+      "  return sock_sendmsg_to(fd, p, len, flags, \"\", ctl);";
       "}";
       "/* sock_recvmsg: recvmsg(2) into the arena (cap bytes at p) with room for";
       "   ctlcap bytes of control data. The first line is \"count msgflags family";

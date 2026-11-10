@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.725 — 2026-11-10
+
+`sock_sendmsg_to fd p len flags dest control` adds an explicit destination
+(`msg_name`) to native ancillary-message sends. `dest` is a numeric
+`"host port"` in the socket's family, or `""` for its connected peer.
+Decimal ports must be in 0..65535; malformed or unsupported destinations
+return `-2` with errno 0 without a DNS lookup. Destination ports are checked
+before resolution so a platform resolver cannot wrap an out-of-range port.
+The v0.1.724 five-argument `sock_sendmsg` API remains unchanged.
+
+The host I/O gate retains its original connected-socket probes and adds
+IPv4/IPv6 datagram replies that pass received packet information back with
+an explicit destination. It also checks connected and empty datagrams,
+invalid addresses/ports/arguments, rejected packet-information interface
+indices, and control-parse failures after address resolution, on C and LLVM.
+
 ## v0.1.724 — 2026-11-10
 
 The host calls whose arguments are a struct an `extern` cannot spell, kept in
