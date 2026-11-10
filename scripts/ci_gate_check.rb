@@ -12,6 +12,7 @@ module CIGates
   # not silently reduce the coverage while every remaining group is green.
   EXPECTED_CHECKS = 197
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
+  MAP_RUNNER_CHECK = "Validate RISC-V Map case scheduling"
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   FIRST_RUN = "first_run_check (the README, executed)"
   PARITY = "parity (interp / C / LLVM / wasm agree)"
@@ -106,6 +107,10 @@ module CIGates
     require!(!plan["continue-on-error"] && !plan.key?("if"), "gate assignment must be required")
     require!(plan.fetch("steps").any? { |s| s["run"] == "ruby scripts/ci_gate_check.rb --self-test" },
              "the assignment job must run the coverage and failure controls")
+    map_controls = plan.fetch("steps").select { |s| s["name"] == MAP_RUNNER_CHECK }
+    require!(map_controls.length == 1 && map_controls.first["run"] == "python3 scripts/rv_map_runner_check.py" &&
+             !map_controls.first.key?("if") && !map_controls.first["continue-on-error"],
+             "Map scheduling must retain required completeness and failure controls")
     shard = jobs.fetch("gate_shards")
     require!(shard["runs-on"] == "ubuntu-24.04", "integration checks must use the validated Ubuntu 24.04 image")
     require!(Array(shard["needs"]) == ["gate_plan"], "groups must wait for gate assignment")
@@ -318,6 +323,11 @@ module CIGates
     mutations["parity back in compiler"] = ->(c) {
       c[:steps].find { |s| s["name"] == PARITY }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}"
     }
+    mutations["missing Map scheduling controls"] = ->(c) { c[:plan]["steps"].reject! { |s| s["name"] == MAP_RUNNER_CHECK } }
+    mutations["bypassed Map scheduling controls"] = ->(c) { c[:map_control]["run"] = "true" }
+    mutations["optional Map scheduling controls"] = ->(c) { c[:map_control]["continue-on-error"] = true }
+    mutations["conditional Map scheduling controls"] = ->(c) { c[:map_control]["if"] = "false" }
+    mutations["duplicated Map scheduling controls"] = ->(c) { c[:plan]["steps"] << c[:map_control].dup }
     REBALANCED_CHECKS.each_key do |name|
       original = name.start_with?("contrib_ctest") ? "runtime" : "riscv"
       mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }
@@ -351,6 +361,8 @@ module CIGates
       shard = copy["jobs"]["gate_shards"]
       steps = shard["steps"]
       change.call({
+        plan: copy["jobs"]["gate_plan"],
+        map_control: copy["jobs"]["gate_plan"]["steps"].find { |s| s["name"] == MAP_RUNNER_CHECK },
         shard: shard, steps: steps, matrix: shard["strategy"]["matrix"],
         poison: steps.find { |s| s["name"] == "tool_preflight poison" },
         checkout: steps.find { |s| s["name"] == CHECKOUT },
