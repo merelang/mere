@@ -1640,6 +1640,7 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'coroutines' }}
         run: |
           python3 scripts/coro_runner_test.py
+          python3 scripts/coro_scan_stability_check.py
           CORO_TIMINGS="$RUNNER_TEMP/coro-rv-timings.tsv" MEMU="$RUNNER_TEMP/downstream/memu" sh scripts/coro_check.sh --poison
           awk -F '\t' 'NR > 1 { count[$1]++; seconds[$1] += $3 } END { for (phase in count) printf "coro timings: %s %d runs %.3f worker-seconds\n", phase, count[phase], seconds[phase] }' "$RUNNER_TEMP/coro-rv-timings.tsv"
 

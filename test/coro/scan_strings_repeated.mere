@@ -1,0 +1,41 @@
+// Native measurements are supplied by coro_scan_stability_check.py.
+extern fn scan_checkpoint: int -> unit;
+let require = fn (ok: bool) -> if ok then () else fail "scan stability: live root missing";
+let root = coro_root ();
+let argv = args ();
+let total = match argv with Cons (s, _) -> int_of_str s | Nil -> 32;
+let count = match argv with Cons (_, Cons (s, _)) -> int_of_str s | _ -> 1000;
+let name = fn (i: int) -> "held-" ++ str_of_int i ++ chr 0 ++ "tail";
+let worker = coro_new (fn _me -> fn (_u: unit) ->
+  let rec next = fn (i: int) ->
+    if i == total then coro_exit root () else
+    let step = region Held {
+      let _ = str_len (str_repeat "p" (bit_and i 7 * 512)) in
+      let text = name i in
+      let _ = coro_switch root in
+      let _ = require (str_eq text (name i)) in
+      i + 1
+    } in next step
+  in next 0);
+let rec candidates = fn (i: int) -> fn (xs: str list) ->
+  if i == count then xs else candidates (i + 1) (Cons ("unused-" ++ str_of_int i, xs));
+let rec collect = fn (i: int) ->
+  if i == total then () else (
+    let _ = coro_switch worker in
+    let _ = region Scratch {
+      let expected = name i in
+      let names = candidates 0 (Cons (expected, Nil)) in
+      let found = map_new () in
+      let _ = coro_scan_strings worker names (fn (s: str) -> map_set found s 1) in
+      let _ = require (map_has found expected) in
+      let _ = coro_scan_ints worker 0 100 (fn (_n: int) -> ()) in
+      let again = map_new () in
+      let _ = coro_scan_strings worker names (fn (s: str) -> map_set again s 1) in
+      require (map_has again expected)
+    } in
+    let _ = (if i == 15 || i == total - 1 then scan_checkpoint i else ()) in
+    collect (i + 1));
+let _ = collect 0;
+let _ = coro_switch worker;
+let _ = print "scan stability passed";
+()
