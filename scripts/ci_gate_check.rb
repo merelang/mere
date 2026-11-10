@@ -12,6 +12,8 @@ module CIGates
   # not silently reduce the coverage while every remaining group is green.
   EXPECTED_CHECKS = 197
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
+  LISTING_RUNNER_CHECK = "Validate RISC-V listing case scheduling"
+  LISTING = "rv listing (-rvs / -rvg are the binary, word for word)"
   MAP_RUNNER_CHECK = "Validate RISC-V Map case scheduling"
   FULL_TESTS = "Run tests (full, with the wasm toolchain present)"
   FIRST_RUN = "first_run_check (the README, executed)"
@@ -111,6 +113,10 @@ module CIGates
     require!(map_controls.length == 1 && map_controls.first["run"] == "python3 scripts/rv_map_runner_check.py" &&
              !map_controls.first.key?("if") && !map_controls.first["continue-on-error"],
              "Map scheduling must retain required completeness and failure controls")
+    listing_controls = plan.fetch("steps").select { |s| s["name"] == LISTING_RUNNER_CHECK }
+    require!(listing_controls.length == 1 && listing_controls.first["run"] == "python3 scripts/rv_listing_runner_check.py" &&
+             !listing_controls.first.key?("if") && !listing_controls.first["continue-on-error"],
+             "listing scheduling must retain required completeness and failure controls")
     shard = jobs.fetch("gate_shards")
     require!(shard["runs-on"] == "ubuntu-24.04", "integration checks must use the validated Ubuntu 24.04 image")
     require!(Array(shard["needs"]) == ["gate_plan"], "groups must wait for gate assignment")
@@ -123,6 +129,10 @@ module CIGates
              groups.all? { |g| g.is_a?(String) && /\A[a-z][a-z0-9_-]*\z/.match?(g) },
              "matrix groups must be unique nonempty names")
     steps = shard.fetch("steps")
+    listing = steps.select { |s| s["name"] == LISTING }
+    require!(listing.length == 1 && listing.first["run"] == "sh scripts/rv_listing_check.sh" &&
+             listing.first["if"] == "${{ !cancelled() && matrix.group == 'riscv' }}" && !listing.first["continue-on-error"],
+             "listing checks must run once in riscv with both widths and the wide fixture")
     start = steps.index { |s| s["name"] == PREFLIGHT }
     require!(start, "every group needs the required tool preflight")
     build = steps.index { |s| s["name"] == "Build" }
@@ -328,6 +338,16 @@ module CIGates
     mutations["optional Map scheduling controls"] = ->(c) { c[:map_control]["continue-on-error"] = true }
     mutations["conditional Map scheduling controls"] = ->(c) { c[:map_control]["if"] = "false" }
     mutations["duplicated Map scheduling controls"] = ->(c) { c[:plan]["steps"] << c[:map_control].dup }
+    mutations["missing listing scheduling controls"] = ->(c) { c[:plan]["steps"].reject! { |s| s["name"] == LISTING_RUNNER_CHECK } }
+    mutations["bypassed listing scheduling controls"] = ->(c) { c[:listing_control]["run"] = "true" }
+    mutations["optional listing scheduling controls"] = ->(c) { c[:listing_control]["continue-on-error"] = true }
+    mutations["conditional listing scheduling controls"] = ->(c) { c[:listing_control]["if"] = "false" }
+    mutations["duplicated listing scheduling controls"] = ->(c) { c[:plan]["steps"] << c[:listing_control].dup }
+    mutations["missing listing gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == LISTING } }
+    mutations["bypassed listing gate"] = ->(c) { c[:steps].find { |s| s["name"] == LISTING }["run"] = "true" }
+    mutations["serial-only listing gate"] = ->(c) { c[:steps].find { |s| s["name"] == LISTING }["run"] += " --workers 1" }
+    mutations["optional listing gate"] = ->(c) { c[:steps].find { |s| s["name"] == LISTING }["continue-on-error"] = true }
+    mutations["listing in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == LISTING }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" }
     REBALANCED_CHECKS.each_key do |name|
       original = name.start_with?("contrib_ctest") ? "runtime" : "riscv"
       mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }
@@ -363,6 +383,7 @@ module CIGates
       change.call({
         plan: copy["jobs"]["gate_plan"],
         map_control: copy["jobs"]["gate_plan"]["steps"].find { |s| s["name"] == MAP_RUNNER_CHECK },
+        listing_control: copy["jobs"]["gate_plan"]["steps"].find { |s| s["name"] == LISTING_RUNNER_CHECK },
         shard: shard, steps: steps, matrix: shard["strategy"]["matrix"],
         poison: steps.find { |s| s["name"] == "tool_preflight poison" },
         checkout: steps.find { |s| s["name"] == CHECKOUT },

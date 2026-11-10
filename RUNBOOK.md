@@ -346,6 +346,21 @@ complete ordered results, bounded scheduling and propagation
 of mismatches and timeouts. Compare actual full job durations as well as the
 Map step, since the slowest group can change between hosted runs.
 
+The RISC-V listing gate runs at most two independent width/program cases per
+batch, each with separate binary, listing, debug map and comparison files.
+It waits for the complete batch, reports results in catalogue order and stops
+scheduling on any failure. All parity programs still run at RV32 and RV64;
+backend refusals are skipped only when the binary itself cannot be built.
+The unchanged 6,000-function wide-layout fixture runs alone and must compile,
+contain encoded listing words and exercise `auipc+jalr`. Listing refusals,
+word mismatches, missing map symbols, empty listings and incomplete workers
+fail the gate. `sh scripts/rv_listing_check.sh --workers 1` uses the same checks
+serially for comparisons. Required `rv_listing_runner_check.py` controls check
+complete serial/parallel results, bounded overlap and injected failures. All
+197 integration checks, nine groups and four build configurations remain required.
+Report the listing step and complete hosted CI timings separately: another
+group may determine total latency after this step improves.
+
 ## Self-host semantic verification
 
 `scripts/selfhost_check.sh` rebuilds the CLI compiler in an isolated temporary
