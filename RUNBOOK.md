@@ -334,6 +334,18 @@ When comparing timings, use complete job durations including setup and report
 cache hits separately. Replaying old step durations with new assignments is an
 estimate; verify the change with complete hosted runs before claiming a gain.
 
+The Map ownership gate runs at most two independent fixtures at a time. Each
+has its own C output, reference executable and guest image, cleaned up as soon
+as that fixture ends; RV32 and RV64 run
+sequentially within that fixture. Results remain in catalogue order, and a
+failed batch stops further scheduling. All 254 fixtures, 528 checks with
+`--poison`, C comparisons, both widths and sequential poison probes remain
+required. `--workers 1` runs the same checks serially for timing comparisons.
+The gate assignment job requires `scripts/rv_map_runner_check.py`, which checks
+complete ordered results, bounded scheduling and propagation
+of mismatches and timeouts. Compare actual full job durations as well as the
+Map step, since the slowest group can change between hosted runs.
+
 ## Self-host semantic verification
 
 `scripts/selfhost_check.sh` rebuilds the CLI compiler in an isolated temporary
