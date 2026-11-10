@@ -1,12 +1,18 @@
-// v0.1.724: a peer's credentials, the interface list, and a descriptor
-// passed with SCM_RIGHTS over a socketpair -- on the C and LLVM backends
-// (scripts/host_io_check.sh). Loopback only: no network, no DNS.
+// v0.1.724: a peer's credentials, the interface list, a descriptor passed
+// with SCM_RIGHTS over a socketpair, and connect(2) on an existing socket
+// -- on the C and LLVM backends (scripts/host_io_check.sh). Loopback only:
+// no network, no DNS.
 extern fn sock_pair: int -> int;
 extern fn sock_peer_ids: int -> str;
 extern fn sock_ifaddrs: unit -> str;
 extern fn sock_sendmsg: int -> int -> int -> int -> str -> int;
 extern fn sock_recvmsg: int -> int -> int -> int -> int -> str;
 extern fn socket: int -> int -> int -> int;
+extern fn sock_connect: int -> str -> int -> int;
+extern fn sock_bind: int -> str -> int -> int;
+extern fn sock_local_addr: int -> str;
+extern fn sock_peer_addr: int -> str;
+extern fn tcp_listen_at: str -> int -> int -> int;
 extern fn fd_pipe: unit -> int;
 extern fn fd_write: int -> int -> int -> int;
 extern fn fd_read: int -> int -> int -> int;
@@ -99,4 +105,20 @@ let _ = fd_close rd;
 let _ = fd_close rd2;
 let _ = fd_close wr;
 let _ = fd_close lone;
-print "ancillary: peer ids, interfaces and SCM_RIGHTS passed"
+// 5. connect(2) on an existing socket: it keeps its descriptor and family
+let srv = tcp_listen_at "127.0.0.1" 0 16;
+let sport = int_of_str (nth (str_split (sock_local_addr srv) " ") 1);
+let t4 = socket 2 1 0;
+let _ = check "connect tcp" (sock_connect t4 "127.0.0.1" sport == 0 && str_eq (sock_peer_addr t4) ("inet " ++ str_of_int sport ++ " 127.0.0.1"));
+let _ = check "connect twice" (sock_connect t4 "127.0.0.1" sport == 0 - 1 && fd_last_errno () > 0);
+let u4 = socket 2 2 0;
+let _ = check "connect udp" (sock_connect u4 "127.0.0.1" 9 == 0 && str_starts_with (sock_local_addr u4) "inet ");
+let u6 = socket 2 2 0;
+let _ = check "another family" (sock_connect u6 "::1" 9 == 0 - 1 && fd_last_errno () > 0);
+let _ = check "a name" (sock_connect u6 "localhost" 9 == 0 - 2 && fd_last_errno () == 0);
+let _ = check "bad port" (sock_connect u6 "127.0.0.1" 70000 == 0 - 1 && fd_last_errno () == 22);
+let _ = fd_close t4;
+let _ = fd_close u4;
+let _ = fd_close u6;
+let _ = fd_close srv;
+print "ancillary: peer ids, interfaces, SCM_RIGHTS and connect passed"

@@ -7313,7 +7313,7 @@ let native_ffi_names =
        control data, which take a struct ucred / ifaddrs / msghdr; and a
        pseudo-terminal and the termios / winsize of any descriptor, which take
        a struct termios / winsize. The structs stay here and cross as text. *)
-    "sock_peer_ids"; "sock_ifaddrs"; "sock_sendmsg"; "sock_recvmsg";
+    "sock_peer_ids"; "sock_ifaddrs"; "sock_sendmsg"; "sock_recvmsg"; "sock_connect";
     "pty_open"; "tty_attrs"; "tty_set_attrs"; "tty_winsize"; "tty_set_winsize"; "tty_flush";
     (* v0.1.550: resource limits, scheduling priority and advisory file locks.
        Each is out of an `extern`'s reach for its own reason: getrlimit and
@@ -8076,6 +8076,36 @@ let native_ffi_runtime ~tls ~midi ~window ~audio ~filestat ~fdio ~proclimit =
       "  for (ai = res; ai != NULL; ai = ai->ai_next)";
       "    if (ai->ai_family == ss.ss_family) { pick = ai; break; }";
       "  int r = bind((int)fd, pick->ai_addr, pick->ai_addrlen);";
+      "  int err = errno;";
+      "  freeaddrinfo(res);";
+      "  __fd_errno = r == 0 ? 0 : err;";
+      "  return r == 0 ? 0 : -1;";
+      "}";
+      "";
+      (* v0.1.724 *)
+      "/* sock_connect: connect(2) an existing socket to a NUMERIC address in its";
+      "   own family (no lookup; a name is -2, errno 0), as sock_bind binds one --";
+      "   the socket keeps its descriptor, its family and what was set on it,";
+      "   where tcp_connect / udp_open make a socket of their own. 0, or -1 with";
+      "   errno kept: EINPROGRESS when a non-blocking socket has started the";
+      "   connection (ask SO_ERROR when it is writable), ECONNREFUSED, EISCONN. */";
+      "static long long sock_connect(long long fd, const char* host, long long port) {";
+      "  if (fd < 0 || fd > 0x7fffffff) { __fd_errno = EBADF; return -1; }";
+      "  if (port < 0 || port > 65535) { __fd_errno = EINVAL; return -1; }";
+      "  struct sockaddr_storage ss; socklen_t sl = sizeof ss;";
+      "  memset(&ss, 0, sizeof ss);";
+      "  if (getsockname((int)fd, (struct sockaddr*)&ss, &sl) != 0) { __fd_errno = errno; return -1; }";
+      "  struct addrinfo hints, *res, *ai, *pick = NULL; char portstr[16];";
+      "  memset(&hints, 0, sizeof hints);";
+      "  hints.ai_family = AF_UNSPEC;";
+      "  hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;";
+      "  snprintf(portstr, sizeof portstr, \"%lld\", port);";
+      "  if (host == NULL || host[0] == 0 || getaddrinfo(host, portstr, &hints, &res) != 0) { __fd_errno = 0; return -2; }";
+      "  for (ai = res; ai != NULL; ai = ai->ai_next)";
+      "    if (ai->ai_family == ss.ss_family) { pick = ai; break; }";
+      "  if (pick == NULL) { freeaddrinfo(res); __fd_errno = EAFNOSUPPORT; return -1; }";
+      "  int r;";
+      "  do { r = connect((int)fd, pick->ai_addr, pick->ai_addrlen); } while (r != 0 && errno == EINTR);";
       "  int err = errno;";
       "  freeaddrinfo(res);";
       "  __fd_errno = r == 0 ? 0 : err;";

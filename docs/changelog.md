@@ -11,7 +11,9 @@ the runtime and crossing as text, as `sock_getopt` and `sock_local_addr` do.
 `file_fstat fd` takes the same snapshot `file_stat` does from an open
 descriptor, so a file unlinked while open still has a size (RISC-V through
 `fstat`, syscall 80). `sock_peer_ids` is the peer's uid and gid
-(`getpeereid`, `SO_PEERCRED` on Linux), `sock_ifaddrs` the interface list a
+(`getpeereid`, `SO_PEERCRED` on Linux), `sock_connect` connects an existing
+socket to a numeric address of its family (keeping its descriptor, where
+`tcp_connect` / `udp_open` make their own), `sock_ifaddrs` the interface list a
 line per entry, and `sock_sendmsg` / `sock_recvmsg` carry control messages as
 `"level type hex"` lines -- `SCM_RIGHTS` passes a descriptor -- with the
 `CMSG_*` layout on the runtime's side.
