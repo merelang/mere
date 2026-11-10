@@ -30,3 +30,11 @@ callback allocation and running stacks. Native sparse/header fixtures check
 that unused registry entries do not keep themselves alive and that an
 optimized length-only use still keeps its string. `scripts/coro_check.sh`
 runs these with the existing coroutine and RSS gates.
+
+The RISC-V gate executes `scan_strings.mere` at both widths, including its
+allocating callback. `scan_strings_conservative.mere` checks the all-candidate
+contract on the interpreter, LLVM, RV32 and RV64: unstarted, running,
+suspended and finished targets, empty lists, duplicates, binary bytes
+and partial application. C keeps its separate sparse-root contract. At both
+RISC-V widths, poison probes omit the callback, omit the list tail or replace
+candidate bytes; each must make the conservative fixture fail.

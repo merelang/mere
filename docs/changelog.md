@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.723 — 2026-11-10
+
+`coro_scan_strings c candidates visit` exposes conservative candidate string
+roots to collectors. On C, suspended stacks match candidate bytes against the
+existing arena-pin pointer set, including copied strings, binary names and
+optimized header/interior references. Address reads stay within registered
+allocated spans, and matches are gathered before callbacks run. Candidate
+registries belong on the collector's stack. Running C stacks, the interpreter,
+LLVM and RISC-V retain all candidates; unstarted and finished C stacks retain
+none. This supplies root discovery without promising precise liveness or
+general Class/Module metadata reclamation.
+
+The coroutine gate executes string-root fixtures at RV32 and RV64, including
+allocating callbacks, partial application, duplicate and empty candidates,
+binary names and all coroutine states. Six poison probes at the two widths
+must detect a missing callback, omitted list tail or lost candidate bytes.
+Native sparse and optimized-header fixtures retain their separate C contract.
+
+Positive RISC-V coroutine fixtures use two isolated emulator workers. RSS
+measurements and poison probes remain serial, process families are cleaned up
+on completion, timeout or cancellation, and infrastructure failures fail the
+gate. CI retains all 196 required checks, nine integration groups and four
+build configurations while balancing the README, parity and RISC-V boundary
+checks across existing groups.
+
 ## v0.1.722 — 2026-11-09
 
 C libraries release cached temporary regions when a host-created pthread exits,

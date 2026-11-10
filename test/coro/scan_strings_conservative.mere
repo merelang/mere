@@ -1,0 +1,30 @@
+// These backends report every candidate, even for unstarted/finished stacks.
+// The native C matcher has a narrower contract and separate sparse fixtures.
+let assert_true = fn (ok: bool) -> if ok then () else fail "conservative string roots missing";
+let root = coro_root ();
+let worker = coro_new (fn _me -> fn (_u: unit) ->
+  let held = "held-" ++ str_of_int 4721 in
+  let _ = coro_switch root in
+  let _ = assert_true (str_eq held ("held-" ++ str_of_int 4721)) in
+  coro_exit root ());
+let check = fn (target: Coro[unit]) -> region Scratch {
+  let first = "unrelated-" ++ str_of_int 91 in
+  let last = "binary-" ++ chr 0 ++ str_of_int 4721 in
+  let names = Cons (first, Cons ("", Cons (first, Cons (last, Nil)))) in
+  let seen = map_new () in
+  // Partial application exercises the builtin as a value, too.
+  let scan = coro_scan_strings target names in
+  let _ = scan (fn (name: str) -> map_set seen (name ++ "") 1) in
+  let _ = assert_true (map_has seen first) in
+  let _ = assert_true (map_has seen "") in
+  let _ = assert_true (map_has seen last) in
+  coro_scan_strings target Nil (fn (_name: str) -> fail "empty candidate callback ran")
+};
+let _ = check worker;
+let _ = check root;
+let _ = coro_switch worker;
+let _ = check worker;
+let _ = coro_switch worker;
+let _ = check worker;
+let _ = print "conservative string roots passed";
+()

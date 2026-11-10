@@ -103,7 +103,8 @@ retire_moved|ic|300|0
 scan_outer|icl|all found;200880;0|0
 scan_strings|icl|string roots passed|0
 scan_strings_sparse|c|sparse string roots passed|0
-scan_strings_header|c|header string root passed|0'
+scan_strings_header|c|header string root passed|0
+scan_strings_conservative|il|conservative string roots passed|0'
 
 # The interpreter prints a failure with its position and a code frame; the
 # compiled program prints the message alone. The comparison is on the message.
@@ -278,7 +279,9 @@ region_copy_straddle|q|copies that straddled two blocks, wrong afterwards: 0|0
 region_loop_chain|r|22700|0
 builtins_as_values|r|42;7|0
 release_walk|r|2250|0
-scan_outer|r|all found;200880;0|0'
+scan_outer|r|all found;200880;0|0
+scan_strings|r|string roots passed|0
+scan_strings_conservative|r|conservative string roots passed|0'
 RV_LIMIT="${RV_LIMIT:-300}"
 have_rv=0
 if [ -n "${MEMU:-}" ] && [ -f "$MEMU/riscv-runc/rv64i_run.mere" ]; then
@@ -431,8 +434,9 @@ if [ "$MODE" = "--poison" ]; then
   poison_rss c "C 16 (an arena's stopped stack is never asked about again)" 's/^static int __lang_coro_unmoved(unsigned long long\* hs, int n, unsigned long ep) {$/static int __lang_coro_unmoved(unsigned long long* hs, int n, unsigned long ep) { return 1;/' retire_moved
   # v0.1.623: RISC-V. The runtime is prelude text, so the poison edits what
   # `mere --rv-prelude` prints and the fixture is built with it (RV64).
-  rv_poison() {  # $1 = label, $2 = sed expression, $3... = fixtures that must go red
-    label="$1"; ex="$2"; shift 2
+  rv_poison() { rv_poison_width 64 "$@"; }
+  rv_poison_width() {  # width, label, sed expression, fixtures that must go red
+    rv_width="$1"; label="$2"; ex="$3"; shift 3
     [ "$have_rv" = 1 ] || { printf '  SKIP  %s\n' "POISON $label (no MEMU)"; return; }
     if ! "$MERE" --rv-prelude > "$T/rv/prelude.mere"; then
       printf '  FAIL  %s\n' "POISON $label: prelude emission failed"; pfail=1; return
@@ -443,7 +447,7 @@ if [ "$MODE" = "--poison" ]; then
     fi
     for f in "$@"; do
       want=$(printf '%s\n' "$RV_CASES" | while IFS='|' read -r g b w rc; do [ "$g" = "$f" ] && printf '%s' "$w"; done)
-      if ! MERE_RV_PRELUDE_FILE="$T/rv/poisoned.mere" run_rv "$f" 64 > "$T/rv/result"; then
+      if ! MERE_RV_PRELUDE_FILE="$T/rv/poisoned.mere" run_rv "$f" "$rv_width" > "$T/rv/result"; then
         printf '  FAIL  %s\n' "POISON $label: $f: runner infrastructure failed"; pfail=1; continue
       fi
       got=$(cat "$T/rv/result")
@@ -492,6 +496,11 @@ if [ "$MODE" = "--poison" ]; then
   rv_poison "RV 12 (a scan follows only the innermost block)" 's/(if budget == 0 then __cget s 11 else __cget s 10)/__cget s 10/' scan_outer
   # v0.1.627: a finished coroutine's blocks go back only if it kept nothing
   rv_poison "RV 10 (a finished coroutine's blocks given back though it kept something)" 's/^  if first != 0 \&\& __cget s 17 == first \&\& __cget s 13 == first + 2 \* w then$/  if first != 0 then/' finished_keeps
+  for width in 64 32; do
+    rv_poison_width "$width" "RV$width strings (callback omitted)" 's/^  | Cons (s, rest) -> let _ = f s in rvcoro_scan_strings c rest f;$/  | Cons (s, rest) -> rvcoro_scan_strings c rest f;/' scan_strings_conservative
+    rv_poison_width "$width" "RV$width strings (tail omitted)" 's/^  | Cons (s, rest) -> let _ = f s in rvcoro_scan_strings c rest f;$/  | Cons (s, rest) -> f s;/' scan_strings_conservative
+    rv_poison_width "$width" "RV$width strings (candidate bytes lost)" 's/^  | Cons (s, rest) -> let _ = f s in rvcoro_scan_strings c rest f;$/  | Cons (s, rest) -> let _ = f "" in rvcoro_scan_strings c rest f;/' scan_strings_conservative
+  done
   if [ "$pfail" = 0 ] && [ "$fail" = 0 ]; then echo "coro --poison: ok (the gate can go red)"; else echo "coro --poison: FAILED"; pfail=1; fi
   exit "$pfail"
 fi
