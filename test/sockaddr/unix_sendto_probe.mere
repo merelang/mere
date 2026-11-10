@@ -1,0 +1,49 @@
+// A datagram to a filesystem path: an unbound, unconnected AF_UNIX datagram
+// socket sends to a bound one, which sees the bytes and an empty sender
+// path; a bound sender's path comes back. A path past sun_path is refused
+// before any syscall.
+extern fn socket: int -> int -> int -> int;
+extern fn sock_unix_bind: int -> str -> int;
+extern fn sock_unix_sendto: int -> int -> int -> int -> str -> int;
+extern fn sock_recvfrom: int -> int -> int -> int -> str;
+extern fn sock_peer_addr: int -> str;
+extern fn fd_close: int -> int;
+extern fn fd_last_errno: unit -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_copy_str: int -> int -> str -> int;
+extern fn mem_to_str: int -> int -> str;
+extern fn unlink: str -> int;
+extern fn getpid: unit -> int;
+
+let check = fn (label: str) -> fn (ok: bool) ->
+  if ok then () else (let _ = print ("FAIL " ++ label) in exit 1);
+// AF_UNIX is 1 and SOCK_DGRAM 2 on both Darwin and Linux.
+let base = "/tmp/mere-usend-" ++ str_of_int (getpid ());
+let server_path = base ++ "-s";
+let client_path = base ++ "-c";
+let _ = unlink server_path;
+let _ = unlink client_path;
+let buffer = mem_alloc 64;
+let server = socket 1 2 0;
+let client = socket 1 2 0;
+let _ = check "sockets" (server >= 0 && client >= 0);
+let _ = check "bind server" (sock_unix_bind server server_path == 0);
+let _ = mem_copy_str buffer 0 "hello";
+let _ = check "anonymous send" (sock_unix_sendto client buffer 5 0 server_path == 5 && fd_last_errno () == 0);
+let _ = check "client stays unconnected" (str_eq (sock_peer_addr client) "" && fd_last_errno () > 0);
+let got = sock_recvfrom server buffer 64 0;
+let _ = check "anonymous sender" (str_eq got "5 unix 0 " && str_eq (mem_to_str buffer 5) "hello");
+let _ = check "bind client" (sock_unix_bind client client_path == 0);
+let _ = mem_copy_str buffer 0 "again";
+let _ = check "bound send" (sock_unix_sendto client buffer 5 0 server_path == 5);
+let _ = check "bound sender" (str_eq (sock_recvfrom server buffer 64 0) ("5 unix 0 " ++ client_path));
+let _ = check "no such path" (sock_unix_sendto client buffer 5 0 (base ++ "-none") == 0 - 1 && fd_last_errno () > 0);
+let long = str_repeat "x" 200;
+let _ = check "too long" (sock_unix_sendto client buffer 5 0 long == 0 - 1 && (fd_last_errno () == 63 || fd_last_errno () == 36));
+let _ = check "bad descriptor" (sock_unix_sendto (0 - 1) buffer 5 0 server_path == 0 - 1 && fd_last_errno () == 9);
+let _ = check "bad range" (sock_unix_sendto client (0 - 1) 5 0 server_path == 0 - 1 && fd_last_errno () == 22);
+let _ = fd_close server;
+let _ = fd_close client;
+let _ = unlink server_path;
+let _ = unlink client_path;
+let _ = print "unix_sendto_probe passed";

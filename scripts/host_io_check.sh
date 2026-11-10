@@ -9,7 +9,7 @@ MERE="$ROOT/_build/default/bin/mere.exe"
 CC="${CC:-clang}"
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-for probe in sockaddr/ancillary_probe tty/pty_probe stdio/eagain_probe sockaddr/sendmsg_to_probe; do
+for probe in sockaddr/ancillary_probe tty/pty_probe stdio/eagain_probe sockaddr/sendmsg_to_probe sockaddr/unix_sendto_probe mmap/anon_probe; do
   P="$ROOT/test/$probe.mere"
   name=$(basename "$probe")
   "$MERE" -c "$P" > "$T/$name.c"
