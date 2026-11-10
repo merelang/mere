@@ -1,0 +1,34 @@
+// test/regionreclaim/nestdepth.mere — regions nested deeper than eight.
+//
+// An interpreter built on this runtime opens a region for a statement, a
+// method body and a block at each level of a call, so its regions nest some
+// dozens deep, over and over. Released regions go to a per-thread cache;
+// one released past the cache is freed, 1 MiB seed and all, and the next
+// acquire at that depth makes another -- on Darwin a kept mapping filled with
+// 0xAA as it is kept and zeroed as it is handed out (v0.1.702). Since
+// v0.1.727 the cache is 64 deep, so 40 levels opened and closed repeatedly
+// leave 40 regions cached at exit (MERE_REGION_STATS), where 8 did before.
+//
+// Usage: nestdepth DEPTH ITERATIONS
+// Prints the sum, so a backend can be checked to have run the computation.
+
+let argv = args ();
+
+let rec _nth = fn (xs: str list) -> fn (i: int) -> fn (d: int) ->
+  match xs with
+  | Nil -> d
+  | Cons (x, rest) -> if i <= 0 then int_of_str x else _nth rest (i - 1) d;
+
+let depth = _nth argv 0 40;
+let iters = _nth argv 1 1000;
+
+let rec deep = fn (d: int) ->
+  if d <= 0 then 0
+  else
+    let n = region R { let v = vec_new () in let _ = vec_push v d in vec_len v + deep (d - 1) } in
+    n;
+
+let rec spin = fn (i: int) -> fn (acc: int) ->
+  if i >= iters then acc else spin (i + 1) (acc + deep depth);
+
+print (show (spin 0 0))

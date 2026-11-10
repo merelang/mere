@@ -4,6 +4,31 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.727 — 2026-11-11
+
+The per-thread cache of released block regions is 64 deep instead of 8. An
+interpreter built on this runtime nests regions deeper than eight on every
+call (a statement's, a method body's, a block's, at each level), and a
+release past the cache freed the region's 1 MB seed, which on Darwin is a kept
+mapping filled with 0xAA as it is kept and zeroed as it is handed out again
+(v0.1.702): two 1 MB memsets per region, per call. mere-ruby's
+`Marshal.load(1)` spent 0.6 ms in them; with 64 it takes 0.1 ms, a loop of
+`Marshal.load` on an Addrinfo is 5x faster (24.7 s -> 4.7 s) and one of
+`UDPSocket#bind` on a closed socket 3x, and its 596 corpus programs run 2%
+faster with their peak RSS 11% lower summed (the largest the same, 1.29 GB). Past the first 8 a slot takes only a region whose
+block is the 1 MB seed: what the deeper slots can hold is bounded by 56 seeds,
+and `__LANG_REGION_KEEP_MAX` still bounds the 8 that may keep a grown block
+(`scripts/region_reclaim_check.sh` pins both).
+
+This change applies to the C backend. Cached payload is bounded by 184 MiB
+per thread (eight blocks of at most 16 MiB and 56 seeds of 1 MiB); this is
+capacity, not a bound on process RSS. The gate checks depths 8/9/40/63/64/65/80,
+C/LLVM result agreement, mixed seed/grown retention, thread isolation and
+actual normal/failed worker cleanup. Five mutations must fail, including
+removing the worker cache drain. LLVM's separate region implementation is
+unchanged.
+
+
 ## v0.1.726 — 2026-11-10
 
 Three host calls whose arguments are a struct or a platform constant no
