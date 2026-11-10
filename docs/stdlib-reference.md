@@ -283,9 +283,23 @@ and comes out as the text `getnameinfo(3)` writes, and the family comes out as a
 | `fd_pathconf` | `int -> str -> int` | `fd name`: `fpathconf(2)` (v0.1.726) of a variable asked for by name without its `_PC_` -- `"NAME_MAX"`, `"PIPE_BUF"`, `"LINK_MAX"` ... -- because the numbers differ between hosts. The value, `-1` with errno `0` when there is no limit, or `-1` with errno kept (`EINVAL` for a name this host does not have). C and LLVM only |
 | `fd_pathconf_var` | `str -> int` | The platform's `_PC_<name>` number, `-1` when it has none. For showing; `fd_pathconf` takes the name |
 | `fd_pathconf_names` | `unit -> str` | Every name `fd_pathconf` knows on this host, space-separated, in a fixed order |
+| `mmap_anon` | `int -> int -> int` | `len shared`: create a zero-filled anonymous mapping (v0.1.726); `len` must be positive and `shared` must be `0` (private) or `1` (shared across `fork`). Returns a handle, or `-1` with errno kept. C and LLVM only |
+| `mmap_size` | `int -> int` | The mapping's byte length, or `-1` with `EBADF` for an unmapped handle |
+| `mmap_get_u8` | `int -> int -> int` | `handle offset`: read a byte as 0..255, or `-1` with errno kept |
+| `mmap_set_u8` | `int -> int -> int -> int` | `handle offset value`: store the low eight bits of `value`; `0`, or `-1` with errno kept |
+| `mmap_to_str` | `int -> int -> int -> str` | `handle offset len`: copy exactly `len` bytes into a fresh string, preserving NUL bytes. Invalid handles or ranges return `""` with errno kept; a valid empty range returns `""` with errno 0 |
+| `mmap_copy_str` | `int -> int -> str -> int` | `handle offset text`: copy every byte, including NUL bytes, into the mapping. Returns the byte count, or `-1` without writing when the handle or range is invalid |
+| `mmap_unmap` | `int -> int` | Release the mapping; `0`, or `-1` with errno kept. An unmapped handle fails with `EBADF`. Handles may be reused, so stop using a handle after releasing it |
 | `sock_local_addr` | `int -> str` | `getsockname(2)` as `"<family> <port> <address>"` — `"inet 5000 127.0.0.1"`, `"inet6 5000 ::1"`, `"unix 0 <path>"` (the path last: it may hold spaces), `"other 0 "`. `""` on failure |
 | `sock_peer_addr` | `int -> str` | `getpeername(2)`, the same text; `""` with `ENOTCONN` for a socket with no peer |
 | `fd_last_errno` | `unit -> int` | The errno the last of these **and of the `fd_*` family** left, `0` when it succeeded. Per thread |
+
+**Mapped memory has an explicit lifetime.** All `mmap_*` entries are C/LLVM
+native shims. Mappings live outside regions and the byte arena, until
+`mmap_unmap`. Invalid handles set `EBADF`; invalid ranges and creation
+arguments set `EINVAL`, available through `fd_last_errno`. A zero-length range
+at the end is valid. Synchronize access with unmapping: reading or writing a
+mapping while another thread unmaps it is unsupported.
 
 The address text is what ruby's `Addrinfo#ip_address` says: a scoped IPv6 address
 keeps its `%zone`, a v4-mapped one its `::ffff:` prefix.
