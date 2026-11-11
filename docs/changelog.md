@@ -6,6 +6,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.729 — 2026-11-11
 
+**A cached region is handed out zeroed**, as a fresh block is. v0.1.727's
+64-deep cache reused regions past depth 8 that had always come from a fresh
+mapping (or a kept block zeroed as it was handed out), and the bump allocator
+leaves bytes it does not write under top -- padding, a container's spare
+capacity. The conservative scan reads them (a pointer's 16-word window, up to
+top), so the handles a previous use left there kept alive what they named in
+the collector of the program on top: mere-ruby's prism `snippets_test`
+peaked at 2.6 GB on v0.1.727 (1.5 GB at 8 deep) and went over CI's 2 GiB,
+with `test_trick` and net/http's `test_http`. A release into the cache now
+zeroes what this use wrote -- the current block up to top, or, when the block
+kept is an earlier one, that block whole -- and nothing when the region is
+freed instead. `snippets_test`: 1.49 GB, and 405 s where the 8-deep cache took
+524 s; `Marshal.load(1)` 0.14 ms (0.12 ms on v0.1.727, 0.64 ms at 8 deep).
+`scripts/region_cache_check.py` checks a reused seed and a region reduced
+from two blocks come back zero, and a sixth mutation (no zeroing) must fail.
+
 `mem_trim : unit -> unit` gives back what the runtime keeps for reuse, the
 way Go's `debug.FreeOSMemory` or glibc's `malloc_trim` does: on C, the
 per-thread region cache past its first 8 regions, and on Darwin the mapped

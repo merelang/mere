@@ -27,6 +27,7 @@ def main():
             "unbounded-grown": ("#define __LANG_REGION_KEEP_MAX (16 * 1024 * 1024)",
                                 "#define __LANG_REGION_KEEP_MAX (64 * 1024 * 1024)"),
             "worker-leak": ("while (__lang_region_cache_n > 0)", "while (0 && __lang_region_cache_n > 0)"),
+            "dirty-reuse": ("if (zlen) memset(zat, 0, zlen);", "if (0) memset(zat, 0, zlen);"),
         }
         for label, mutation in mutations.items():
             text = runtime
@@ -49,7 +50,7 @@ def main():
                     raise RuntimeError(run.stdout + run.stderr)
             elif run.returncode == 0:
                 raise RuntimeError(f"{label}: corrupted cache passed")
-        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup; 5 mutations caught")
+        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup, zeroed reuse; 6 mutations caught")
 
 
 if __name__ == "__main__":

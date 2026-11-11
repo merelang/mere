@@ -12637,6 +12637,19 @@ let region_runtime_helpers () =
          uses regions again should not hold it for the rest of the run. Above
          the cap this does what it always did. Both directions are pinned by
          tests; neither is a judgement call that can drift. *)
+      (* v0.1.729: what this use wrote, so a cached region is handed out
+         zeroed, as a fresh block is (mmap's pages, or a kept block zeroed as
+         it is handed out). The bump allocator leaves bytes it does not write
+         under top -- padding, a container's spare capacity -- and the
+         conservative scan reads them (a pointer's 16-word window, up to
+         top): left as they were, they are the handles a previous use wrote,
+         and the collector of the program on top keeps what they name.
+         mere-ruby's prism snippets_test peaked at 2.6 GB on v0.1.727's
+         64-deep cache, 1.5 GB at 8 deep or with these bytes zeroed
+         (test_trick 0.78 -> 0.38 GB at 8). Only the bytes used: the
+         current block up to top, or, when the block kept is an earlier one,
+         that block whole (it was filled before the next was made). *)
+      "  char* zat = r->base; size_t zlen = (size_t)(r->top - r->base);";
       "  if (r->blocks->prev) {";
       "    __lang_region_block* best = r->blocks; size_t bestcap = r->blocks->pad;";
       "    for (__lang_region_block* b = r->blocks; b; b = b->prev)";
@@ -12645,7 +12658,9 @@ let region_runtime_helpers () =
       "      /* one-off and enormous: give it back rather than hold it */";
       "      __lang_region_free(r);";
       "      __lang_region_init(r, 1 << 20);";
+      "      zlen = 0;";
       "    } else {";
+      "      if (best != r->blocks) { zat = (char*)(best + 1); zlen = best->pad; }";
       "      for (__lang_region_block* b = r->blocks; b; ) {";
       "        __lang_region_block* prev = b->prev;";
       "        if (b != best) __lang_blk_free(b);";
@@ -12659,9 +12674,10 @@ let region_runtime_helpers () =
       "  }";
       "  r->top = r->base;";
       "  if (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN";
-      "      || (__lang_region_cache_n < __LANG_REGION_CACHE_CAP && r->cap <= (1 << 20)))";
+      "      || (__lang_region_cache_n < __LANG_REGION_CACHE_CAP && r->cap <= (1 << 20))) {";
+      "    if (zlen) memset(zat, 0, zlen);";
       "    __lang_region_cache[__lang_region_cache_n++] = r;";
-      "  else { __lang_region_free(r); free(r); }";
+      "  } else { __lang_region_free(r); free(r); }";
       "}";
       (* v0.1.729: mem_trim -- give back what the runtime keeps for reuse,
          the way Go's debug.FreeOSMemory or glibc's malloc_trim does. Both

@@ -47,6 +47,25 @@ static void check(int count, size_t bytes, int grown) {
   if (total != bytes || large != grown) fprintf(stderr, "cache mismatch: count=%d bytes=%zu expected=%zu grown=%d expected=%d\n", count, total, bytes, large, grown);
   assert(total == bytes && large == grown);
 }
+/* v0.1.729: a cached region is handed out zeroed, as a fresh block is -- the
+   conservative scan reads bytes an allocation did not write under top. Both
+   the seed and a region reduced from two blocks to its largest. */
+static void zeroed(void) {
+  __lang_region *r = __lang_region_block_acquire("zeroed");
+  memset(__lang_region_alloc(r, 4096), 0xAB, 4096);
+  __lang_region_block_release(r);
+  r = __lang_region_block_acquire("zeroed");
+  for (size_t i = 0; i < r->cap; i++) assert(r->base[i] == 0);
+  memset(__lang_region_alloc(r, 4096), 0xAB, 4096);
+  memset(__lang_region_alloc(r, 4u << 20), 0xAB, 4u << 20);
+  assert(r->blocks->prev);
+  __lang_region_block_release(r);
+  r = __lang_region_block_acquire("zeroed");
+  assert(!r->blocks->prev && r->cap >= (4u << 20));
+  for (size_t i = 0; i < r->cap; i++) assert(r->base[i] == 0);
+  __lang_region_block_release(r);
+  drain();
+}
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 static int ready, go;
@@ -82,6 +101,7 @@ int main(void) {
   fill(80, 12, (4u << 20), 0); check(64, (size_t)64 << 20, 0); drain();
   fill(80, 8, (16u << 20), 1); check(64, (size_t)184 << 20, 8); drain();
   fill(9, 1, (16u << 20) + 1, 1); check(9, (size_t)9 << 20, 0); drain();
+  zeroed();
   fill(9, 0, 0, 0); check(9, (size_t)9 << 20, 0);
   __lang_threads_started = 1;
   pthread_t threads[2]; int fail[2] = {0, 1};
