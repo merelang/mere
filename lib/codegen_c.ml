@@ -12259,7 +12259,14 @@ let region_runtime_helpers () =
          Past the first 8 a slot takes only a region whose block is the
          1 MB seed, so what the deeper slots can hold is 56 MB of seeds
          touched as far as they were used, never 56 grown blocks. *)
+      "#ifdef MERE_REGION_CACHE_CAP";
+      "#define __LANG_REGION_CACHE_CAP MERE_REGION_CACHE_CAP";
+      "#else";
       "#define __LANG_REGION_CACHE_CAP 64";
+      "#endif";
+      "#if __LANG_REGION_CACHE_CAP < 1 || __LANG_REGION_CACHE_CAP > 64";
+      "#error MERE_REGION_CACHE_CAP must be between 1 and 64";
+      "#endif";
       "#define __LANG_REGION_CACHE_GROWN 8";
       (* v0.1.475: how much a recycled region may hold on to. Eight cached
          regions may hold a grown block, so this bounds that retention at
@@ -12337,8 +12344,10 @@ let region_runtime_helpers () =
       (* v0.1.729: and the mapped blocks Darwin keeps for reuse (v0.1.702),
          which are resident -- what mem_trim unmaps *)
       "#if defined(__APPLE__)";
+      "  pthread_mutex_lock(&__lang_blk_keep_lock);";
       "  fprintf(stderr, \"region-stats kept: blocks=%d bytes=%zu\\n\",";
       "          __lang_blk_keep_len, __lang_blk_keep_bytes);";
+      "  pthread_mutex_unlock(&__lang_blk_keep_lock);";
       "#endif";
       "}";
       "";
@@ -12637,18 +12646,10 @@ let region_runtime_helpers () =
          uses regions again should not hold it for the rest of the run. Above
          the cap this does what it always did. Both directions are pinned by
          tests; neither is a judgement call that can drift. *)
-      (* v0.1.729: what this use wrote, so a cached region is handed out
-         zeroed, as a fresh block is (mmap's pages, or a kept block zeroed as
-         it is handed out). The bump allocator leaves bytes it does not write
-         under top -- padding, a container's spare capacity -- and the
-         conservative scan reads them (a pointer's 16-word window, up to
-         top): left as they were, they are the handles a previous use wrote,
-         and the collector of the program on top keeps what they name.
-         mere-ruby's prism snippets_test peaked at 2.6 GB on v0.1.727's
-         64-deep cache, 1.5 GB at 8 deep or with these bytes zeroed
-         (test_trick 0.78 -> 0.38 GB at 8). Only the bytes used: the
-         current block up to top, or, when the block kept is an earlier one,
-         that block whole (it was filled before the next was made). *)
+      (* Clear the used bytes before caching: padding and spare capacity may
+         otherwise expose handles from an earlier use to a conservative scan.
+         An older retained block is cleared whole; the current bump block only
+         through top. Discarded regions do not need clearing. *)
       "  char* zat = r->base; size_t zlen = (size_t)(r->top - r->base);";
       "  if (r->blocks->prev) {";
       "    __lang_region_block* best = r->blocks; size_t bestcap = r->blocks->pad;";
@@ -12673,26 +12674,15 @@ let region_runtime_helpers () =
       "    }";
       "  }";
       "  r->top = r->base;";
-      "  if (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN";
-      "      || (__lang_region_cache_n < __LANG_REGION_CACHE_CAP && r->cap <= (1 << 20))) {";
+      "  if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP";
+      "      && (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN || r->cap <= (1 << 20))) {";
       "    if (zlen) memset(zat, 0, zlen);";
       "    __lang_region_cache[__lang_region_cache_n++] = r;";
       "  } else { __lang_region_free(r); free(r); }";
       "}";
-      (* v0.1.729: mem_trim -- give back what the runtime keeps for reuse,
-         the way Go's debug.FreeOSMemory or glibc's malloc_trim does. Both
-         caches are bounded, so a program never needs this to finish; it is
-         for a program that reads its own resident size after a burst (a
-         collector's explicit collection, a leak check that compares RSS
-         before and after a loop). mere-ruby's GC.start: the 100,000 evals of
-         test_kwarg_eval_memory_leak left 16 MB in kept blocks that the
-         run's start had not had yet, and read 67 -> 88 MB (limit 1.2x);
-         with the blocks unmapped, 66 -> 69 MB. madvise does not do this on
-         Darwin: MADV_FREE_REUSABLE / MADV_DONTNEED leave ps's RSS where it
-         was until the pages are wanted elsewhere; only munmap lowers it.
-         Order matters: the cached regions are freed first, since their
-         seeds go into the kept list on the way out. The first 8 cached
-         regions stay -- the cache any program has without deep nesting. *)
+      (* Release inactive cached regions first: their freed blocks may enter
+         Darwin's shared kept pool. Drain that pool under its existing lock.
+         Active data is unaffected; other threads may refill the shared pool. *)
       "__attribute__((unused)) static int __lang_mem_trim(void) {";
       "  while (__lang_region_cache_n > __LANG_REGION_CACHE_GROWN) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";

@@ -92,6 +92,8 @@ static void *worker(void *env) {
   return NULL;
 }
 int main(void) {
+  /* Match generated-program startup before exercising mapped seeds. */
+  __lang_malloc_tune();
   const int depths[] = {8, 9, 40, 63, 64, 65, 80, 128};
   for (unsigned i = 0; i < sizeof depths / sizeof *depths; i++) {
     int n = depths[i] < 64 ? depths[i] : 64;

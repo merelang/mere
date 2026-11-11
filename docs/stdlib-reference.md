@@ -1876,7 +1876,7 @@ snapshot across replacement and compaction.
 
 | builtin | signature | notes |
 |---|---|---|
-| `mem_trim` | `unit -> unit` | Give back what the runtime keeps for reuse, like Go's `debug.FreeOSMemory`: on C, the thread's region cache past its first 8 regions and, on Darwin, the mapped blocks kept for the next request of the same size (up to 16 MB, resident); on glibc, `malloc_trim(0)`. Both caches are bounded, so nothing needs it to finish; call it before reading your own RSS after a burst (a collector's explicit collection). A no-op on the interpreter, LLVM, Wasm and RISC-V (v0.1.729) |
+| `mem_trim` | `unit -> unit` | On C, release inactive cached regions beyond the calling thread's first eight. Also drain Darwin's shared pool of reusable mapped blocks, or request `malloc_trim(0)` on glibc. Active region data stays live; the call makes no guarantee about process RSS, and other threads may refill shared pools. Other backends evaluate the argument and return unit without trimming (v0.1.729). |
 
 **`snapshot : 'a -> 'a` (v0.1.712) copies an immutable plain value** into the enclosing
 allocation scope, using the same deep copy as a region result. It supports

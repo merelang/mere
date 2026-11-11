@@ -12,6 +12,8 @@ module CIGates
   # not silently reduce the coverage while every remaining group is green.
   EXPECTED_CHECKS = 197
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
+  WASM_EXTERN_GATE = "wasm_stub (which builtins answer without reaching the host)"
+  WASM_EXTERN_COMMAND = "sh scripts/wasm_stub_check.sh\npython3 scripts/wasm_extern_check.py\n"
   LISTING_RUNNER_CHECK = "Validate RISC-V listing case scheduling"
   LISTING = "rv listing (-rvs / -rvg are the binary, word for word)"
   MAP_RUNNER_CHECK = "Validate RISC-V Map case scheduling"
@@ -133,6 +135,10 @@ module CIGates
     require!(listing.length == 1 && listing.first["run"] == "sh scripts/rv_listing_check.sh" &&
              listing.first["if"] == "${{ !cancelled() && matrix.group == 'riscv' }}" && !listing.first["continue-on-error"],
              "listing checks must run once in riscv with both widths and the wide fixture")
+    extern_gate = steps.select { |s| s["name"] == WASM_EXTERN_GATE }
+    require!(extern_gate.length == 1 && extern_gate.first["run"] == WASM_EXTERN_COMMAND &&
+             extern_gate.first["if"] == "${{ !cancelled() && matrix.group == 'runtime' }}" && !extern_gate.first["continue-on-error"],
+             "Wasm host coverage must retain required extern ABI and mutation checks")
     start = steps.index { |s| s["name"] == PREFLIGHT }
     require!(start, "every group needs the required tool preflight")
     build = steps.index { |s| s["name"] == "Build" }
@@ -348,6 +354,11 @@ module CIGates
     mutations["serial-only listing gate"] = ->(c) { c[:steps].find { |s| s["name"] == LISTING }["run"] += " --workers 1" }
     mutations["optional listing gate"] = ->(c) { c[:steps].find { |s| s["name"] == LISTING }["continue-on-error"] = true }
     mutations["listing in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == LISTING }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" }
+    mutations["missing Wasm extern ABI checks"] = ->(c) { c[:steps].find { |s| s["name"] == WASM_EXTERN_GATE }["run"] = "sh scripts/wasm_stub_check.sh\n" }
+    mutations["missing Wasm host probes"] = ->(c) { c[:steps].find { |s| s["name"] == WASM_EXTERN_GATE }["run"] = "python3 scripts/wasm_extern_check.py\n" }
+    mutations["optional Wasm extern ABI checks"] = ->(c) { c[:steps].find { |s| s["name"] == WASM_EXTERN_GATE }["continue-on-error"] = true }
+    mutations["Wasm extern ABI checks in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == WASM_EXTERN_GATE }["if"] = "${{ !cancelled() && matrix.group == 'web' }}" }
+    mutations["deleted Wasm host gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == WASM_EXTERN_GATE } }
     REBALANCED_CHECKS.each_key do |name|
       original = name.start_with?("contrib_ctest") ? "runtime" : "riscv"
       mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }

@@ -6,45 +6,52 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.729 — 2026-11-11
 
-**A cached region is handed out zeroed**, as a fresh block is. v0.1.727's
-64-deep cache reused regions past depth 8 that had always come from a fresh
-mapping (or a kept block zeroed as it was handed out), and the bump allocator
-leaves bytes it does not write under top -- padding, a container's spare
-capacity. The conservative scan reads them (a pointer's 16-word window, up to
-top), so the handles a previous use left there kept alive what they named in
-the collector of the program on top: mere-ruby's prism `snippets_test`
-peaked at 2.6 GB on v0.1.727 (1.5 GB at 8 deep) and went over CI's 2 GiB,
-with `test_trick` and net/http's `test_http`. A release into the cache now
-zeroes what this use wrote -- the current block up to top, or, when the block
-kept is an earlier one, that block whole -- and nothing when the region is
-freed instead. `snippets_test`: 1.49 GB, and 405 s where the 8-deep cache took
-524 s; `Marshal.load(1)` 0.14 ms (0.12 ms on v0.1.727, 0.64 ms at 8 deep).
-`scripts/region_cache_check.py` checks a reused seed and a region reduced
-from two blocks come back zero, and a sixth mutation (no zeroing) must fail.
+Cached C regions clear the used bytes of their retained block before reuse.
+The 64-deep cache introduced in v0.1.727 could otherwise expose handles from
+an earlier use through padding or spare container capacity, causing a
+conservative collector to retain objects unnecessarily. If an earlier block
+is retained instead of the current bump block, its whole payload is cleared.
+Regions discarded instead of cached do not pay for this clearing.
 
-`mem_trim : unit -> unit` gives back what the runtime keeps for reuse, the
-way Go's `debug.FreeOSMemory` or glibc's `malloc_trim` does: on C, the
-per-thread region cache past its first 8 regions, and on Darwin the mapped
-blocks kept for the next request of the same size (v0.1.702, up to 256 of
-them and 16 MB, resident because they were used and are filled with 0xAA as
-they are kept); on glibc it calls `malloc_trim(0)`. Both caches are bounded, so
-a program never needs it to finish. It is for one that reads its own resident
-size after a burst: mere-ruby's `GC.start`, where the 100,000 evals of CRuby's
-`test_kwarg_eval_memory_leak` left 16 MB in kept blocks that the run's start
-had not had yet and read 67 -> 88 MB against a limit of 1.2x; with them
-unmapped, 66 -> 69 MB. `madvise` does not do it on Darwin:
-`MADV_FREE_REUSABLE` and `MADV_DONTNEED` leave the RSS `ps` reports where it
-was until the pages are wanted elsewhere, and only `munmap` lowers it.
+Native builds can select a cache depth from 1 through 64 with
+`-DMERE_REGION_CACHE_CAP=N`. The default remains 64; at most eight slots
+retain grown blocks, each capped at 16 MiB. The configured total bound is
+checked before admitting a grown block, including depths below eight.
 
-The interpreter, LLVM, Wasm and RISC-V keep no such cache, and it is a no-op
-there. `MERE_REGION_STATS` prints the kept list on Darwin
-(`region-stats kept: blocks= bytes=`), and `scripts/region_reclaim_check.sh`'s
-nestdepth leg checks that 80 levels then a trim leave 8 regions cached and, on
-Darwin, nothing kept, where without it the kept list is not empty (a `mem_trim`
-that does nothing fails it). (v0.1.728 is being prepared separately; this
-takes the next number.)
+`mem_trim : unit -> unit` releases inactive regions beyond the calling
+thread's first eight cached regions. On Darwin it also unmaps the shared
+pool of reusable mapped blocks; on glibc it requests `malloc_trim(0)`.
+Active region data remains live. This is an explicit request to return
+retained memory after a burst, not a guarantee about process RSS.
+Other backends evaluate the argument and return unit without a trim action.
+
+The required cache gate checks zeroed seed and grown-block reuse, six
+mutations, configured depths 1/4/8/64 and rejection of invalid depths.
+The reclamation gate checks trimming after 80 nested regions, retained
+cache counts and, on Darwin, that the kept-block pool is empty when idle.
 
 ---
+
+## v0.1.728 — 2026-11-11
+
+Wasm `extern fn` results declared `int` are sign-extended from the host's i32
+to Mere's internal i64. A host returning `-1` previously produced
+`4294967295`, so a failure check such as `status < 0` took the success path.
+The host import signatures remain i32; this does not widen the host ABI.
+String pointers and opaque references retain all 32 bits by zero-extension;
+bool and unit keep their existing representation. Code treating an integer
+result as an unsigned 32-bit word can use `bit_and result 0xffffffff`.
+
+Regression checks execute negative and boundary results, integer aliases,
+comparisons and partial application. They also probe high-bit string and
+opaque values without dereferencing them or allocating a large memory.
+Per-emission bytes and bytes/Vec bridge flags are also reset. Otherwise a
+previous compilation could leave bridge functions in a later module without
+the Vec runtime they require; the repeated-emission regression now primes
+those flags before generating and executing a scalar module.
+
+The required Wasm host gate rejects five altered ABIs: unsigned integer or
+partial-call results, signed pointer/reference results and dropped arguments.
 
 ## v0.1.727 — 2026-11-11
 
