@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import resource
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,9 +70,11 @@ def main():
                                    capture_output=True, text=True, timeout=90)
             if not built.returncode or "must be between 1 and 64" not in built.stderr:
                 raise RuntimeError(f"invalid cap {cap}: was not rejected by the runtime bound")
-        def contract(name, text, cap=None, rejected=False):
+        def contract(name, text, cap=None, rejected=False, sanitize=False):
             (tmp / "runtime.c").write_text(text)
             command = [CC, "-O1", "-w", "-pthread"]
+            if sanitize:
+                command.extend(["-fsanitize=address,undefined", "-fno-sanitize-recover=all"])
             if cap is not None:
                 command.append(f"-DMERE_REGION_CACHE_CAP={cap}")
             subprocess.run(command + ["-I", str(tmp), str(ROOT / "test/regionreclaim" / name),
@@ -84,6 +87,15 @@ def main():
                 raise RuntimeError(name + ": " + run.stdout + run.stderr)
 
         contract("cache_zero_contract.c", runtime)
+        if sys.platform == "darwin":
+            contract("mapped_pool_zero_contract.c", runtime)
+            contract("mapped_pool_zero_contract.c", runtime, sanitize=True)
+            old = "    memset(p, 0, total);"
+            if runtime.count(old) != 1:
+                raise RuntimeError("mapped pool scrub mutation must match exactly once")
+            contract("mapped_pool_zero_contract.c",
+                     runtime.replace(old, "    /* missing pool scrub */"),
+                     rejected=True)
         for cap in [1, 4, 8, 64]:
             contract("trim_contract.c", runtime, cap=cap)
         old = "while (__lang_region_cache_n > __LANG_REGION_CACHE_GROWN)"
@@ -91,7 +103,8 @@ def main():
             raise RuntimeError("trim mutation must match exactly once")
         contract("trim_contract.c", runtime.replace(old, "while (0 && __lang_region_cache_n > __LANG_REGION_CACHE_GROWN)"),
                  rejected=True)
-        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup, zeroed reuse; 6 mutations caught; configured caps 1/4/8/64 pass, invalid caps rejected; zeroing paths and active/concurrent trim contracts pass; trim mutation caught")
+        suffix = "; Darwin mapped-pool zeroing and ASan/UBSan pass; missing scrub mutation caught" if sys.platform == "darwin" else ""
+        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup, zeroed reuse; 6 mutations caught; configured caps 1/4/8/64 pass, invalid caps rejected; zeroing paths and active/concurrent trim contracts pass; trim mutation caught" + suffix)
 
 
 if __name__ == "__main__":

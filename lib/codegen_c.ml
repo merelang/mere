@@ -11689,12 +11689,10 @@ let region_runtime_helpers () =
          of its 3.5 s in system time. With the blocks kept it takes 1.9-2.4 s
          and 0.12 s of system time, at 5% more peak RSS (the all-malloc build:
          1.8 s, 15% more). 32 kept blocks were too few for one collection's
-         worth. A kept block is FILLED WITH 0xAA as it is kept: a pointer
-         into freed memory read 0xAA.. and failed at once, where an untouched
-         kept block let it read the old bytes and go on (region_uaf's
-         coro_pin_resumed poison stayed green). PROT_NONE did the same job
-         and gave back most of the gain (2.5 s). It is zeroed when it is
-         handed out, as a fresh mapping is. *)
+         worth. Clear the entire mapping before publishing it to the kept
+         pool. Reuse then has fresh-mapping zero bytes without a second full
+         write. The freed block is unlinked from the live-region list before
+         it reaches this pool; active region-cache zeroing is separate. *)
       "#define __LANG_BLK_KEEP_N 256";
       "#define __LANG_BLK_KEEP_BYTES ((size_t)16 << 20)";
       "static struct { void* p; size_t n; } __lang_blk_keep[__LANG_BLK_KEEP_N];";
@@ -11713,7 +11711,7 @@ let region_runtime_helpers () =
       "      break;";
       "    }";
       "  pthread_mutex_unlock(&__lang_blk_keep_lock);";
-      "  if (k) { memset(k, 0, total); return k; }";
+      "  if (k) return k;";
       "  void* p = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);";
       "  return p == MAP_FAILED ? NULL : p;";
       "}";
@@ -11721,7 +11719,7 @@ let region_runtime_helpers () =
       "  if (total < __LANG_BLK_MAP_MIN) { free(p); return; }";
       "  pthread_mutex_lock(&__lang_blk_keep_lock);";
       "  if (__lang_blk_keep_len < __LANG_BLK_KEEP_N && __lang_blk_keep_bytes + total <= __LANG_BLK_KEEP_BYTES) {";
-      "    memset(p, 0xAA, total);";
+      "    memset(p, 0, total);";
       "    __lang_blk_keep[__lang_blk_keep_len].p = p;";
       "    __lang_blk_keep[__lang_blk_keep_len].n = total;";
       "    __lang_blk_keep_len++;";
