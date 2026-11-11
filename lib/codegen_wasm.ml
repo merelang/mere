@@ -12813,6 +12813,9 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
         Printf.sprintf "(call $%s_h%s)" name call_args in
       let body = match ret with
         | Ast.TyUnit -> call
+        (* An integer status is signed; pointers and opaque references still
+           need all 32 address bits when lifted into the internal i64 ABI. *)
+        | Ast.TyInt -> Printf.sprintf "(i64.extend_i32_s %s)" call
         | _ -> Printf.sprintf "(i64.extend_i32_u %s)" call in
       (* Phase 3 sockets: in a command component, the mhttp-style socket /
          raw-memory externs are backed by in-module _h helpers (p2 wasi:sockets

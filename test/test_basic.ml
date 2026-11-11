@@ -6036,6 +6036,12 @@ let () =
     "call $two";
   assert_wasm_runtime "wasm: emits (module"
     (wasm "42") "(module";
+  assert_wasm "wasm: extern integer results retain their sign"
+    (wasm_with_decls "extern fn ffi_status: unit -> int; ffi_status ()")
+    "(i64.extend_i32_s (call $ffi_status_h))";
+  assert_wasm "wasm: extern string pointers retain their address bits"
+    (wasm_with_decls "extern fn ffi_text: unit -> str; ffi_text ()")
+    "(i64.extend_i32_u (call $ffi_text_h))";
   assert_wasm_runtime "wasm: exports main with i32 result"
     (wasm "42") "(func $main (export \"main\") (result i32)";
   (* Q-012 step 3b-4f: a non-threaded program keeps its own unshared memory;
@@ -12872,7 +12878,7 @@ let () =
   let have_node =
     Sys.command "command -v node > /dev/null 2>&1" = 0 in
 
-  let run_wasm wat =
+  let run_wasm ?(host = "") wat =
     let wat_path = Filename.temp_file "mere_cross_" ".wat" in
     let wasm_path = wat_path ^ ".wasm" in
     let oc = open_out wat_path in
@@ -12900,11 +12906,11 @@ let () =
          (~500KB) overflows well before completion. *)
       let runner = Printf.sprintf
         "node --stack-size=65500 -e \"const fs=require('fs'); \
-         const env = new Proxy({}, { get: () => () => 0 }); \
+         const env = new Proxy({%s}, { get: (o,k) => k in o ? o[k] : () => 0 }); \
          WebAssembly.instantiate(fs.readFileSync('%s'), {env}) \
          .then(({instance})=>console.log(instance.exports.main())) \
          .catch(e=>console.log('TRAP:'+e.message));\""
-        wasm_path in
+        host wasm_path in
       let ic = Unix.open_process_in runner in
       let line = try input_line ic with End_of_file -> "" in
       let _ = Unix.close_process_in ic in
@@ -13210,6 +13216,17 @@ let () =
   in
 
   if have_wat2wasm && have_node then begin
+    let source =
+      "extern fn ffi_echo: int -> int;\n\
+       extern fn ffi_first: int -> int -> int;\n\
+       let partial = ffi_first (0 - 1);\n\
+       if ffi_echo (0 - 1) == (0 - 1)\n\
+          && ffi_echo (0 - 2147483648) == (0 - 2147483648)\n\
+          && ffi_echo 0 == 0 && ffi_echo 2147483647 == 2147483647\n\
+          && partial 42 == (0 - 1) then 42 else 0" in
+    check "wasm: signed extern results survive comparisons and partial application"
+      (run_wasm ~host:"ffi_echo: x => x, ffi_first: (x,y) => x"
+         (wasm_with_decls source)) "42";
     List.iter (fun (name, input, expected) -> cross_emit name input expected) (pattern_cases @ semantic_cases);
     let choice_size n =
       let values = String.concat ", " (List.init n (fun _ -> "2")) in
