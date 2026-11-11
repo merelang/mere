@@ -6953,6 +6953,9 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     header ^ " {\n  size_t n = __lang_str_size(v);\n  \
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
+  | Ast.TyBytes ->
+    bytes_used := true;
+    header ^ " { return __lang_bytes_copy_at(r, v); }"
   (* v0.1.567: a Map or a Vec can move its storage to an arena of its own
      (map_recycle, map_compact, vec_compact) -- and then `region` names that arena
      while the struct the handle points at still lives where it was made. Keeping
@@ -7033,6 +7036,9 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
     header ^ " {\n  size_t n = __lang_str_size(v);\n  \
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
+  | Ast.TyBytes ->
+    bytes_used := true;
+    header ^ " { return __lang_bytes_copy_at(r, v); }"
   | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
     let k_tag = ty_tag k_ty and v_tag = ty_tag v_ty in
     let m = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
@@ -13373,6 +13379,14 @@ let bytes_runtime ~arena =
       "static mere_bytes* __lang_bytes_alloc(long long len) {";
       "  mere_bytes* b = (mere_bytes*)__lang_region_alloc(__lang_current_region, sizeof(mere_bytes) + (size_t)len);";
       "  b->len = len;";
+      "  return b;";
+      "}";
+      "static mere_bytes* __lang_bytes_copy_at(__lang_region* r, mere_bytes* v) {";
+      "  size_t n = (size_t)v->len;";
+      "  if (v->len < 0 || n > (size_t)-1 - sizeof(mere_bytes)) __lang_fail_impl(\"out of memory\");";
+      "  mere_bytes* b = (mere_bytes*)__lang_region_alloc(r, sizeof(mere_bytes) + n);";
+      "  b->len = v->len;";
+      "  memcpy(b->data, v->data, n);";
       "  return b;";
       "}";
       ]

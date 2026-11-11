@@ -27,4 +27,12 @@ let n = region RS loop y {
   | None -> Continue 1
   | Some k -> if k >= 5 then Done (k * 10) else Continue (k + 1)
 } in
-print ("live: " ++ str_of_int total ++ " n: " ++ str_of_int n ++ "\n")
+let _ = print ("live: " ++ str_of_int total ++ " n: " ++ str_of_int n ++ "\n");
+// The bytes payload must be copied at Continue and again at Done.
+let carried = region Bytes loop payload {
+  match payload with
+  | None -> Continue (0, bytes_of_hex "610062ff")
+  | Some (iteration, data) ->
+    if iteration == 3 then Done data else Continue (iteration + 1, data)
+};
+print (hex_of_bytes carried)

@@ -13,6 +13,13 @@ conservative collector to retain objects unnecessarily. If an earlier block
 is retained instead of the current bump block, its whole payload is cleared.
 Regions discarded instead of cached do not pay for this clearing.
 
+Immutable `bytes` values are now copied with their length and payload when
+leaving a C region, being stored in an outer container, or crossing a
+region-loop iteration. Previously these copy paths passed the pointer
+through; clearing the released region exposed the resulting lifetime bug.
+Regression cases preserve embedded zero bytes, empty payloads and nested
+values after the source region is reclaimed and reused.
+
 Native builds can select a cache depth from 1 through 64 with
 `-DMERE_REGION_CACHE_CAP=N`. The default remains 64; at most eight slots
 retain grown blocks, each capped at 16 MiB. The configured total bound is
