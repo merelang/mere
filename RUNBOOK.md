@@ -460,3 +460,16 @@ gh release edit <tag> --repo merelang/mere --draft=false --latest
 The asset checker detects known patterns; review remains necessary for
 confidential material that a pattern cannot identify. Keep private detection
 rules and review records outside the public source tree.
+
+### Selecting native region-cache depth
+
+Generated C retains up to 64 region seeds by default; the first eight cache
+slots can hold grown blocks (at most 16 MiB each). For an application with
+a tighter steady-state RSS budget, compile its generated C with
+`-DMERE_REGION_CACHE_CAP=8`, or another integer from 1 through 64. At most
+`min(cap, 8)` slots can then retain grown blocks. The compile-time setting
+does not change allocation lifetimes, collection semantics, or Wasm output.
+
+The default-depth mutation and worker-cleanup checks remain in
+`scripts/region_cache_check.py`; the same generated runtime is also compiled
+with depths 1, 4, 8, and 64, and invalid depths must fail compilation.
