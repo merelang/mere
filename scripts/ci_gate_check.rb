@@ -10,7 +10,7 @@ module CIGates
 
   # Update deliberately when adding or removing checks. A deleted step must
   # not silently reduce the coverage while every remaining group is green.
-  EXPECTED_CHECKS = 197
+  EXPECTED_CHECKS = 198
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   WASM_EXTERN_GATE = "wasm_stub (which builtins answer without reaching the host)"
   WASM_EXTERN_COMMAND = "sh scripts/wasm_stub_check.sh\npython3 scripts/wasm_extern_check.py\n"
