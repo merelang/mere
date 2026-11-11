@@ -11615,6 +11615,8 @@ let emit_program ?(main_ty = Ast.TyInt) ?(component = false) (prog : Ast.program
   vec_higher_order_used := false;
   strbuf_used := false;
   bytebuf_used := false;
+  bytes_used := false;
+  bytes_vec_used := false;
   bytes_file_used := false;
   write_file_bytes_used := false;
   logger_used := false;

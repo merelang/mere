@@ -13216,6 +13216,13 @@ let () =
   in
 
   if have_wat2wasm && have_node then begin
+    let bytes_module = wasm
+      "let v = vec_new () in let _ = vec_push v 65 in bytes_of_vec v" in
+    check "wasm: bytes/Vec bridge is emitted when used"
+      (string_of_bool (idx_of bytes_module "(func $__lang_bytes_of_vec" >= 0)) "true";
+    let scalar_module = wasm "42" in
+    check "wasm: a later scalar module does not inherit the bytes/Vec bridge"
+      (run_wasm_stdout scalar_module) "42";
     let source =
       "extern fn ffi_echo: int -> int;\n\
        extern fn ffi_first: int -> int -> int;\n\
