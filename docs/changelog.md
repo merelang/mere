@@ -4,6 +4,41 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.729 — 2026-11-11
+
+Cached C regions clear the used bytes of their retained block before reuse.
+The 64-deep cache introduced in v0.1.727 could otherwise expose handles from
+an earlier use through padding or spare container capacity, causing a
+conservative collector to retain objects unnecessarily. If an earlier block
+is retained instead of the current bump block, its whole payload is cleared.
+Regions discarded instead of cached do not pay for this clearing.
+
+Immutable `bytes` values are now copied with their length and payload when
+leaving a C region, being stored in an outer container, or crossing a
+region-loop iteration. Previously these copy paths passed the pointer
+through; clearing the released region exposed the resulting lifetime bug.
+Regression cases preserve embedded zero bytes, empty payloads and nested
+values after the source region is reclaimed and reused.
+
+Native builds can select a cache depth from 1 through 64 with
+`-DMERE_REGION_CACHE_CAP=N`. The default remains 64; at most eight slots
+retain grown blocks, each capped at 16 MiB. The configured total bound is
+checked before admitting a grown block, including depths below eight.
+
+`mem_trim : unit -> unit` releases inactive regions beyond the calling
+thread's first eight cached regions. On Darwin it also unmaps the shared
+pool of reusable mapped blocks; on glibc it requests `malloc_trim(0)`.
+Active region data remains live. This is an explicit request to return
+retained memory after a burst, not a guarantee about process RSS.
+Other backends evaluate the argument and return unit without a trim action.
+
+The required cache gate checks zeroed seed and grown-block reuse, six
+mutations, configured depths 1/4/8/64 and rejection of invalid depths.
+The reclamation gate checks trimming after 80 nested regions, retained
+cache counts and, on Darwin, that the kept-block pool is empty when idle.
+
+---
+
 ## v0.1.728 — 2026-11-11
 
 Wasm `extern fn` results declared `int` are sign-extended from the host's i32

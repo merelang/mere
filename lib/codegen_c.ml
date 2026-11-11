@@ -3951,6 +3951,8 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((void)(%s), __lang_tty_no_signal_keys())" (emit_expr arg)
      | Ast.Var "tty_restore" when not (user_shadows "tty_restore") ->
        Printf.sprintf "((void)(%s), __lang_tty_restore())" (emit_expr arg)
+     | Ast.Var "mem_trim" when not (user_shadows "mem_trim") ->
+       Printf.sprintf "((void)(%s), __lang_mem_trim())" (emit_expr arg)
      | Ast.Var "read_key" when not (user_shadows "read_key") ->
        Printf.sprintf "((void)(%s), __lang_read_key())" (emit_expr arg)
      | Ast.Var "stdin_byte" when not (user_shadows "stdin_byte") ->
@@ -6951,6 +6953,9 @@ let emit_copy_fn (tag : string) (t : Ast.ty) : string =
     header ^ " {\n  size_t n = __lang_str_size(v);\n  \
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
+  | Ast.TyBytes ->
+    bytes_used := true;
+    header ^ " { return __lang_bytes_copy_at(r, v); }"
   (* v0.1.567: a Map or a Vec can move its storage to an arena of its own
      (map_recycle, map_compact, vec_compact) -- and then `region` names that arena
      while the struct the handle points at still lives where it was made. Keeping
@@ -7031,6 +7036,9 @@ let emit_deep_copy_fn (tag : string) (t : Ast.ty) : string =
     header ^ " {\n  size_t n = __lang_str_size(v);\n  \
               char* s = __lang_str_alloc(r, n);\n  \
               memcpy(s, v, n);\n  return s;\n}"
+  | Ast.TyBytes ->
+    bytes_used := true;
+    header ^ " { return __lang_bytes_copy_at(r, v); }"
   | Ast.TyCon ("Map", [_; k_ty; v_ty]) ->
     let k_tag = ty_tag k_ty and v_tag = ty_tag v_ty in
     let m = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
@@ -12339,6 +12347,14 @@ let region_runtime_helpers () =
       "    cached_bytes += __lang_region_bytes(__lang_region_cache[i]);";
       "  fprintf(stderr, \"region-stats cache: regions=%d retained=%zu\\n\",";
       "          __lang_region_cache_n, cached_bytes);";
+      (* v0.1.729: and the mapped blocks Darwin keeps for reuse (v0.1.702),
+         which are resident -- what mem_trim unmaps *)
+      "#if defined(__APPLE__)";
+      "  pthread_mutex_lock(&__lang_blk_keep_lock);";
+      "  fprintf(stderr, \"region-stats kept: blocks=%d bytes=%zu\\n\",";
+      "          __lang_blk_keep_len, __lang_blk_keep_bytes);";
+      "  pthread_mutex_unlock(&__lang_blk_keep_lock);";
+      "#endif";
       "}";
       "";
       "static void __lang_region_deps_drop(__lang_region* home);";
@@ -12636,6 +12652,11 @@ let region_runtime_helpers () =
          uses regions again should not hold it for the rest of the run. Above
          the cap this does what it always did. Both directions are pinned by
          tests; neither is a judgement call that can drift. *)
+      (* Clear the used bytes before caching: padding and spare capacity may
+         otherwise expose handles from an earlier use to a conservative scan.
+         An older retained block is cleared whole; the current bump block only
+         through top. Discarded regions do not need clearing. *)
+      "  char* zat = r->base; size_t zlen = (size_t)(r->top - r->base);";
       "  if (r->blocks->prev) {";
       "    __lang_region_block* best = r->blocks; size_t bestcap = r->blocks->pad;";
       "    for (__lang_region_block* b = r->blocks; b; b = b->prev)";
@@ -12644,7 +12665,9 @@ let region_runtime_helpers () =
       "      /* one-off and enormous: give it back rather than hold it */";
       "      __lang_region_free(r);";
       "      __lang_region_init(r, 1 << 20);";
+      "      zlen = 0;";
       "    } else {";
+      "      if (best != r->blocks) { zat = (char*)(best + 1); zlen = best->pad; }";
       "      for (__lang_region_block* b = r->blocks; b; ) {";
       "        __lang_region_block* prev = b->prev;";
       "        if (b != best) __lang_blk_free(b);";
@@ -12658,9 +12681,31 @@ let region_runtime_helpers () =
       "  }";
       "  r->top = r->base;";
       "  if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP";
-      "      && (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN || r->cap <= (1 << 20)))";
+      "      && (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN || r->cap <= (1 << 20))) {";
+      "    if (zlen) memset(zat, 0, zlen);";
       "    __lang_region_cache[__lang_region_cache_n++] = r;";
-      "  else { __lang_region_free(r); free(r); }";
+      "  } else { __lang_region_free(r); free(r); }";
+      "}";
+      (* Release inactive cached regions first: their freed blocks may enter
+         Darwin's shared kept pool. Drain that pool under its existing lock.
+         Active data is unaffected; other threads may refill the shared pool. *)
+      "__attribute__((unused)) static int __lang_mem_trim(void) {";
+      "  while (__lang_region_cache_n > __LANG_REGION_CACHE_GROWN) {";
+      "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
+      "    __lang_region_free(r); free(r);";
+      "  }";
+      "#if defined(__APPLE__)";
+      "  pthread_mutex_lock(&__lang_blk_keep_lock);";
+      "  while (__lang_blk_keep_len > 0) {";
+      "    __lang_blk_keep_len--;";
+      "    munmap(__lang_blk_keep[__lang_blk_keep_len].p, __lang_blk_keep[__lang_blk_keep_len].n);";
+      "  }";
+      "  __lang_blk_keep_bytes = 0;";
+      "  pthread_mutex_unlock(&__lang_blk_keep_lock);";
+      "#elif defined(__GLIBC__)";
+      "  malloc_trim(0);";
+      "#endif";
+      "  return 0;";
       "}" ]
 
 (* Phase 15.10: Map[R, K, V] runtime — region-allocated linear-scan
@@ -13334,6 +13379,14 @@ let bytes_runtime ~arena =
       "static mere_bytes* __lang_bytes_alloc(long long len) {";
       "  mere_bytes* b = (mere_bytes*)__lang_region_alloc(__lang_current_region, sizeof(mere_bytes) + (size_t)len);";
       "  b->len = len;";
+      "  return b;";
+      "}";
+      "static mere_bytes* __lang_bytes_copy_at(__lang_region* r, mere_bytes* v) {";
+      "  size_t n = (size_t)v->len;";
+      "  if (v->len < 0 || n > (size_t)-1 - sizeof(mere_bytes)) __lang_fail_impl(\"out of memory\");";
+      "  mere_bytes* b = (mere_bytes*)__lang_region_alloc(r, sizeof(mere_bytes) + n);";
+      "  b->len = v->len;";
+      "  memcpy(b->data, v->data, n);";
       "  return b;";
       "}";
       ]

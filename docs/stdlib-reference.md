@@ -1874,6 +1874,10 @@ protects stopped stacks separately. The
 [suffix fixture](../test/parity/map_set_suffix.mere) checks a copied list
 snapshot across replacement and compaction.
 
+| builtin | signature | notes |
+|---|---|---|
+| `mem_trim` | `unit -> unit` | On C, release inactive cached regions beyond the calling thread's first eight. Also drain Darwin's shared pool of reusable mapped blocks, or request `malloc_trim(0)` on glibc. Active region data stays live; the call makes no guarantee about process RSS, and other threads may refill shared pools. Other backends evaluate the argument and return unit without trimming (v0.1.729). |
+
 **`snapshot : 'a -> 'a` (v0.1.712) copies an immutable plain value** into the enclosing
 allocation scope, using the same deep copy as a region result. It supports
 scalars, strings, bytes, SIMD values, tuples, and records/variants/lists whose

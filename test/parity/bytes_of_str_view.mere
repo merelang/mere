@@ -4,4 +4,16 @@
 let s = "abc" ++ str_of_int 42;
 let b = bytes_of_str s;
 let r = region R { let t = "in" ++ str_of_int 7 in bytes_of_str t };
-print (str_of_int (bytes_len b) ++ " " ++ str_of_bytes b ++ " " ++ str_of_bytes r ++ " " ++ str_of_int (bytes_get b 0))
+let _ = print (str_of_int (bytes_len b) ++ " " ++ str_of_bytes b ++ " " ++ str_of_bytes r ++ " " ++ str_of_int (bytes_get b 0));
+// Copying a nested immutable value and storing into an outer container must
+// preserve bytes after the source region is cleared and reused.
+type Parcel = { payload: bytes, tail: bytes list };
+let saved = region Packet {
+  Parcel { payload = bytes_of_hex "006180ff", tail = [bytes_of_str "tail", bytes_of_str ""] }
+};
+let stored = vec_new ();
+let _ = region Store { vec_push stored (bytes_of_hex "00017f80ff") };
+let _ = region Reuse { str_repeat "x" 4096 };
+let _ = print (hex_of_bytes saved.payload);
+let _ = print (str_join "/" (list_map saved.tail hex_of_bytes));
+print (hex_of_bytes (vec_get stored 0))

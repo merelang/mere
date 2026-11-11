@@ -166,6 +166,7 @@ machine rather than a host.
 | `log` | yes | yes | yes | yes |
 | `map_new` | yes | yes | yes | yes |
 | `max` | yes | yes | yes | yes |
+| `mem_trim` | yes | yes | yes | yes |
 | `min` | yes | yes | yes | yes |
 | `mk_logger` | yes | yes | yes | yes |
 | `mk_metrics` | yes | yes | yes | yes |

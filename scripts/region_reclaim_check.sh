@@ -315,6 +315,26 @@ if "$MERE" -c "$NDSRC" > "$TMP/nd.c" 2>"$TMP/nd.err" &&
     fi
     checked=$((checked + 1))
   done
+  # mem_trim (v0.1.729): 80 levels fill the cache's 64 and, on Darwin, put
+  # the seeds freed past it in the kept list; a trim leaves 8 cached and
+  # nothing kept. Without it the kept list is not empty -- so the check can
+  # see what it is checking.
+  nd_t="$(MERE_REGION_STATS=1 "$TMP/ndbin" 80 3 1 2>&1)"; nd_t_rc=$?
+  nd_tll="$("$TMP/ndll" 80 3 1)"; nd_tll_rc=$?
+  nd_n="$(MERE_REGION_STATS=1 "$TMP/ndbin" 80 3 0 2>&1)"
+  nd_t_regions="$(printf '%s\n' "$nd_t" | sed -n 's/^region-stats cache: regions=\([0-9]*\) retained=[0-9]*$/\1/p' | tail -1)"
+  nd_t_kept="$(printf '%s\n' "$nd_t" | sed -n 's/^region-stats kept: blocks=\([0-9]*\) bytes=[0-9]*$/\1/p' | tail -1)"
+  nd_n_kept="$(printf '%s\n' "$nd_n" | sed -n 's/^region-stats kept: blocks=\([0-9]*\) bytes=[0-9]*$/\1/p' | tail -1)"
+  if [ "$nd_t_rc" != 0 ] || [ "$nd_tll_rc" != 0 ] ||
+     [ "$(printf '%s\n' "$nd_t" | sed -n '1p')" != 240 ] || [ "$nd_tll" != 240 ] ||
+     [ "$nd_t_regions" != 8 ]; then
+    echo "FAIL region_reclaim/nestdepth trim: C=$(printf '%s\n' "$nd_t" | sed -n '1p') LLVM=$nd_tll cached=${nd_t_regions:-missing}"
+    fail=1
+  elif [ "$(uname -s)" = Darwin ] && { [ "$nd_t_kept" != 0 ] || [ "${nd_n_kept:-0}" -le 0 ]; }; then
+    echo "FAIL region_reclaim/nestdepth trim: kept blocks ${nd_n_kept:-missing} untrimmed, ${nd_t_kept:-missing} trimmed (want >0 and 0)"
+    fail=1
+  fi
+  checked=$((checked + 1))
 else
   echo "FAIL region_reclaim/nestdepth: C or LLVM did not build"; head -3 "$TMP/nd.err"; fail=1
 fi

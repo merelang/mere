@@ -33,6 +33,7 @@ static void exercise(int grown) {
   drain();
 }
 int main(void) {
+  __lang_malloc_tune();
   exercise(0);
   exercise(1);
   exercise(0);

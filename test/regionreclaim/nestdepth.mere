@@ -9,8 +9,10 @@
 // v0.1.727 the cache is 64 deep, so 40 levels opened and closed repeatedly
 // leave 40 regions cached at exit (MERE_REGION_STATS), where 8 did before.
 //
-// Usage: nestdepth DEPTH ITERATIONS
+// Usage: nestdepth DEPTH ITERATIONS [TRIM]
 // Prints the sum, so a backend can be checked to have run the computation.
+// TRIM 1 calls mem_trim (v0.1.729) after the last iteration: the cache keeps
+// its first 8 regions and, on Darwin, no kept mapping is left.
 
 let argv = args ();
 
@@ -21,6 +23,7 @@ let rec _nth = fn (xs: str list) -> fn (i: int) -> fn (d: int) ->
 
 let depth = _nth argv 0 40;
 let iters = _nth argv 1 1000;
+let trim = _nth argv 2 0;
 
 let rec deep = fn (d: int) ->
   if d <= 0 then 0
@@ -31,4 +34,6 @@ let rec deep = fn (d: int) ->
 let rec spin = fn (i: int) -> fn (acc: int) ->
   if i >= iters then acc else spin (i + 1) (acc + deep depth);
 
-print (show (spin 0 0))
+let total = spin 0 0;
+let _ = (if trim == 1 then mem_trim () else ());
+print (show total)

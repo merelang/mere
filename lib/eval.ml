@@ -852,6 +852,14 @@ let builtin_tty_restore =
       V_unit
     | _ -> failwith "tty_restore: expected unit")
 
+(* v0.1.729: mem_trim gives back what the C runtime keeps for reuse; the
+   interpreter keeps nothing of its own, so here it only checks its argument. *)
+let builtin_mem_trim =
+  V_builtin ("mem_trim", fun v ->
+    match v with
+    | V_unit -> V_unit
+    | _ -> failwith "mem_trim: expected unit")
+
 let builtin_read_key =
   V_builtin ("read_key", fun v ->
     match v with
@@ -4302,6 +4310,7 @@ let initial_env : env =
     ("tty_raw", ref builtin_tty_raw);
     ("tty_no_signal_keys", ref builtin_tty_no_signal_keys);
     ("tty_restore", ref builtin_tty_restore);
+    ("mem_trim", ref builtin_mem_trim);
     ("read_key", ref builtin_read_key);
     ("file_size", ref builtin_file_size);
     ("time", ref builtin_time);
