@@ -82,6 +82,14 @@ jobs:
       - name: Run tests
         run: opam exec -- dune runtest
 
+      - name: Check Darwin mapped block reuse and sanitizer contracts
+        if: ${{ runner.os == 'macOS' && matrix.ocaml-version == '5.4' }}
+        run: opam exec -- python3 scripts/region_cache_check.py
+
+      - name: Check Darwin region lifetime and poison controls
+        if: ${{ runner.os == 'macOS' && matrix.ocaml-version == '5.4' }}
+        run: opam exec -- sh scripts/region_uaf_check.sh --poison
+
       - name: Release asset checker negative controls
         run: python3 scripts/release_asset_check.py --self-test
 
@@ -121,7 +129,8 @@ jobs:
   # run through scripts/gate.sh, which turns 3 into 0 and says so, so a green
   # job means each step passed or was optional and said it did not run.
   #
-  # Linux only, and that is deliberate rather than a shortcut: development
+  # The Darwin pool and lifetime controls also run in the macOS build matrix.
+  # The remaining gates are Linux only: development
   # happens on macOS, where these are run before every commit, so the two
   # platforms end up covered between CI and the working copy.
   gate_plan:
