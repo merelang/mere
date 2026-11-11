@@ -4,6 +4,21 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.730 — 2026-11-11
+
+C maps hash string keys in bounded words rather than multiplying once per
+byte. Long keys use MurmurHash64A; short keys mix bounded first and last
+words. Unaligned and big-endian loads are handled explicitly. This changes
+only the private index hash: full byte equality, binary strings, insertion
+order, composite keys and the Map layout retain their existing behavior.
+
+The required containers gate checks lookup, deletion, reinsertion,
+compaction and recycling under O2 and ASan/UBSan, and places every string
+length through one page against inaccessible pages to check read bounds.
+A shared fixture also compares interpreter, C, LLVM and Wasm results.
+
+---
+
 ## v0.1.729 — 2026-11-11
 
 Cached C regions clear the used bytes of their retained block before reuse.

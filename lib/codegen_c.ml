@@ -12712,20 +12712,66 @@ let region_runtime_helpers () =
    associative array. K supports only int / str; V is any concrete type.
    Storage is two parallel arrays (keys[], values[]); when cap is hit, a
    new array is allocated in the same region (arena semantics). *)
-(* Shared hash helpers for the map runtimes (emitted once, before them).
-   splitmix64-style avalanche for scalar keys, FNV-1a for strings. *)
-let map_hash_helpers =
-  String.concat "\n"
-    [ "static unsigned long long __lang_hash_u64(unsigned long long x) {";
-      "  x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;";
-      "  x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33; return x;";
-      "}";
-      "static unsigned long long __lang_hash_str(const char* s) {";
-      "  unsigned long long h = 1469598103934665603ULL;";
-      "  size_t n = __lang_str_size(s);";
-      "  for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }";
-      "  return h;";
-      "}" ]
+(* Private map-index hashes. String comparison still checks the complete
+   length and bytes; map iteration still follows the dense insertion order.
+   Work in words instead of a dependent multiply for every string byte. *)
+let map_hash_helpers = {|
+static unsigned long long __lang_hash_u64(unsigned long long x) {
+  x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33; return x;
+}
+/* Longer strings use MurmurHash64A by Austin Appleby (public domain):
+ * https://github.com/aappleby/smhasher/blob/07bb4de10a63e8cc2e1724865454eba635742383/src/MurmurHash2.cpp
+ * Short strings mix bounded first/last words with the scalar avalanche.
+ * memcpy avoids alignment/aliasing assumptions; every read is in bounds.
+ * This hash is private to the index: dense slots preserve insertion order. */
+static unsigned long long __lang_hash_str(const char* s) {
+  size_t n = __lang_str_size(s);
+  if (n < 8) {
+    const unsigned char* p = (const unsigned char*)s;
+    if (n == 0) return 1469598103934665603ULL;
+    if (n == 1) return (1469598103934665603ULL ^ p[0]) * 1099511628211ULL;
+    unsigned long long word;
+    if (n >= 4) {
+      uint32_t first, last;
+      memcpy(&first, p, 4); memcpy(&last, p + n - 4, 4);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      first = __builtin_bswap32(first); last = __builtin_bswap32(last);
+#endif
+      word = (unsigned long long)first | ((unsigned long long)last << 32);
+    } else {
+      word = (unsigned long long)p[0] | ((unsigned long long)p[1] << 8);
+      if (n == 3) word |= (unsigned long long)p[2] << 16;
+    }
+    return __lang_hash_u64(word ^ (1469598103934665603ULL + n * 0x9e3779b97f4a7c15ULL));
+  }
+  const unsigned long long m = 0xc6a4a7935bd1e995ULL;
+  unsigned long long h = 1469598103934665603ULL ^ ((unsigned long long)n * m);
+  const unsigned char* p = (const unsigned char*)s;
+  size_t remaining = n;
+  while (remaining >= 8) {
+    unsigned long long k;
+    memcpy(&k, p, 8);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    k = __builtin_bswap64(k);
+#endif
+    k *= m; k ^= k >> 47; k *= m;
+    h ^= k; h *= m;
+    p += 8; remaining -= 8;
+  }
+  switch (remaining) {
+    case 7: h ^= (unsigned long long)p[6] << 48;
+    case 6: h ^= (unsigned long long)p[5] << 40;
+    case 5: h ^= (unsigned long long)p[4] << 32;
+    case 4: h ^= (unsigned long long)p[3] << 24;
+    case 3: h ^= (unsigned long long)p[2] << 16;
+    case 2: h ^= (unsigned long long)p[1] << 8;
+    case 1: h ^= (unsigned long long)p[0]; h *= m;
+  }
+  h ^= h >> 47; h *= m; h ^= h >> 47;
+  return h;
+}
+|}
 
 (* v0.1.709: the constructor a recursive variant continues through -- List's
    Cons, whose payload's last field is the list again -- as (tag, constructor,

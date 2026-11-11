@@ -1,0 +1,57 @@
+// Short/long binary keys, copied queries and compound keys use identical
+// equality semantics. Hash layout must not change insertion order.
+let base = "é" ++ chr 0 ++ chr 255 ++ str_repeat "abcdefghijk" 12;
+let key = fn (i: int) ->
+  if i < 80 then substring base 0 i
+  else "AnonClass_" ++ str_of_int i ++ "#initialize";
+let m = map_new ();
+let rec insert = fn (i: int) ->
+  if i == 512 then () else (let _ = map_set m (key i) i in insert (i + 1));
+let _ = insert 0;
+let rec lookup = fn (i: int) ->
+  if i == 512 then true else
+    let found = region Query {
+      let copied = str_of_bytes (bytes_of_str (key i)) in
+      map_has m copied && map_get m copied == i
+    } in found && lookup (i + 1);
+let _ = print_bool (map_len m == 512 && lookup 0);
+let rec erase = fn (i: int) ->
+  if i >= 512 then () else (let _ = map_delete m (key i) in erase (i + 3));
+let _ = erase 0;
+let rec absence = fn (i: int) ->
+  if i >= 512 then true else not (map_has m (key i)) && absence (i + 3);
+let _ = print_bool (absence 0 && map_len m == 341);
+let rec reinsert = fn (i: int) ->
+  if i < 0 then () else
+    let _ = (if i % 3 == 0 then map_set m (key i) (i + 1000) else ()) in
+    reinsert (i - 1);
+let _ = reinsert 511;
+let order = vec_new ();
+let _ = map_iter m (fn (_k: str) -> fn (v: int) -> vec_push order v);
+let rec surviving_order = fn (i: int) -> fn (at: int) ->
+  if i == 512 then at == 341
+  else if i % 3 == 0 then surviving_order (i + 1) at
+  else vec_get order at == i && surviving_order (i + 1) (at + 1);
+let rec appended_order = fn (i: int) -> fn (at: int) ->
+  if i < 0 then at == 512
+  else if i % 3 != 0 then appended_order (i - 1) at
+  else vec_get order at == i + 1000 && appended_order (i - 1) (at + 1);
+let _ = print_bool (vec_len order == 512 && surviving_order 0 0 && appended_order 511 341);
+let _ = map_compact m;
+let rec after_compact = fn (i: int) ->
+  if i == 512 then true else
+    map_get m (key i) == (if i % 3 == 0 then i + 1000 else i)
+    && after_compact (i + 1);
+let _ = print_bool (after_compact 0);
+let compound = map_new ();
+let rec insert_compound = fn (i: int) ->
+  if i == 128 then () else
+    let _ = map_set compound (key i, i) (i * 7) in insert_compound (i + 1);
+let _ = insert_compound 0;
+let rec lookup_compound = fn (i: int) ->
+  if i == 128 then true else
+    let copied = str_of_bytes (bytes_of_str (key i)) in
+    map_get compound (copied, i) == i * 7 && lookup_compound (i + 1);
+let _ = print_bool (lookup_compound 0);
+let _ = map_recycle m;
+print_bool (map_len m == 0 && not (map_has m (key 511)))

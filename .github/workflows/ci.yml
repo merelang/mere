@@ -1713,6 +1713,9 @@ jobs:
       - name: small_map_compact (small-map slack, growth and recycle under O2 and ASan)
         if: ${{ !cancelled() && matrix.group == 'containers' }}
         run: python3 scripts/small_map_compact_check.py
+      - name: map_string_hash (binary keys, insertion order and bounded reads under sanitizers)
+        if: ${{ !cancelled() && matrix.group == 'containers' }}
+        run: python3 scripts/map_string_hash_check.py
 
       - name: map_read (Map read boundaries on interpreter, C, LLVM and Wasm)
         if: ${{ !cancelled() && matrix.group == 'containers' }}
