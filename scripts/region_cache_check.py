@@ -40,6 +40,8 @@ def main():
             built = subprocess.run([CC, "-O1", "-w", "-pthread", "-I", str(tmp), str(fixture), "-o", str(binary)],
                                    capture_output=True, text=True, timeout=90)
             if built.returncode:
+                if label == "over-depth" and "must be between 1 and 64" in built.stderr:
+                    continue
                 raise RuntimeError(f"{label}: fixture did not compile\n" + built.stderr)
             env = dict(os.environ)
             env.pop("MERE_REGION_STATS", None)
@@ -49,7 +51,24 @@ def main():
                     raise RuntimeError(run.stdout + run.stderr)
             elif run.returncode == 0:
                 raise RuntimeError(f"{label}: corrupted cache passed")
-        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup; 5 mutations caught")
+        (tmp / "runtime.c").write_text(runtime)
+        configured_fixture = ROOT / "test/regionreclaim/cache_config_contract.c"
+        for cap in [1, 4, 8, 64]:
+            built = subprocess.run([CC, "-O1", "-w", "-pthread", f"-DMERE_REGION_CACHE_CAP={cap}",
+                                    "-I", str(tmp), str(configured_fixture), "-o", str(binary)],
+                                   capture_output=True, text=True, timeout=90)
+            if built.returncode:
+                raise RuntimeError(f"configured cap {cap}: did not compile\n" + built.stderr)
+            run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30, env=env)
+            if run.returncode or "configured region cache contracts passed" not in run.stdout:
+                raise RuntimeError(f"configured cap {cap}: " + run.stdout + run.stderr)
+        for cap in [0, -1, 65]:
+            built = subprocess.run([CC, "-O1", "-w", "-pthread", f"-DMERE_REGION_CACHE_CAP={cap}",
+                                    "-I", str(tmp), str(configured_fixture), "-o", str(binary)],
+                                   capture_output=True, text=True, timeout=90)
+            if not built.returncode or "must be between 1 and 64" not in built.stderr:
+                raise RuntimeError(f"invalid cap {cap}: was not rejected by the runtime bound")
+        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup; 5 mutations caught; configured caps 1/4/8/64 pass, invalid caps rejected")
 
 
 if __name__ == "__main__":

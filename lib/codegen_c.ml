@@ -12257,7 +12257,14 @@ let region_runtime_helpers () =
          Past the first 8 a slot takes only a region whose block is the
          1 MB seed, so what the deeper slots can hold is 56 MB of seeds
          touched as far as they were used, never 56 grown blocks. *)
+      "#ifdef MERE_REGION_CACHE_CAP";
+      "#define __LANG_REGION_CACHE_CAP MERE_REGION_CACHE_CAP";
+      "#else";
       "#define __LANG_REGION_CACHE_CAP 64";
+      "#endif";
+      "#if __LANG_REGION_CACHE_CAP < 1 || __LANG_REGION_CACHE_CAP > 64";
+      "#error MERE_REGION_CACHE_CAP must be between 1 and 64";
+      "#endif";
       "#define __LANG_REGION_CACHE_GROWN 8";
       (* v0.1.475: how much a recycled region may hold on to. Eight cached
          regions may hold a grown block, so this bounds that retention at
@@ -12650,8 +12657,8 @@ let region_runtime_helpers () =
       "    }";
       "  }";
       "  r->top = r->base;";
-      "  if (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN";
-      "      || (__lang_region_cache_n < __LANG_REGION_CACHE_CAP && r->cap <= (1 << 20)))";
+      "  if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP";
+      "      && (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN || r->cap <= (1 << 20)))";
       "    __lang_region_cache[__lang_region_cache_n++] = r;";
       "  else { __lang_region_free(r); free(r); }";
       "}" ]
