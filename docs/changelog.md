@@ -4,6 +4,22 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.731 — 2026-11-11
+
+The Darwin C runtime scrubs an inactive mapped block to zero before
+publishing it to the shared reuse pool. A reused mapping already has
+fresh-mapping contents, so allocation no longer clears the same bytes a
+second time. Freed mappings use zero scrubbing in place of the old 0xAA
+fill. Region-cache zeroing, cache capacities, the mapped-pool byte bound,
+active allocations and other backends keep their existing behavior.
+
+The required cache gate checks the zeroed pool before and after reuse,
+shorter writes, thread handoffs, and ASan/UBSan execution. Removing the
+release scrub must fail that contract. The existing use-after-free suite
+and all thirteen poison controls continue to detect their original faults.
+
+---
+
 ## v0.1.730 — 2026-11-11
 
 C maps hash string keys in bounded words rather than multiplying once per
