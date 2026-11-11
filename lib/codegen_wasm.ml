@@ -3995,6 +3995,12 @@ and emit_expr ?(let_body_top = false) (e : Ast.expr) : unit =
     emit_instr "call $tty_restore_h";
     emit_instr "drop";
     emit_instr "i64.const 0"
+  (* v0.1.729: linear memory only grows; nothing here to give back *)
+  | Ast.App ({ node = Ast.Var "mem_trim"; _ }, u_e)
+    when not (user_shadows_wasm "mem_trim") ->
+    emit_expr u_e;
+    emit_instr "drop";
+    emit_instr "i64.const 0"
   | Ast.App ({ node = Ast.Var "read_key"; _ }, u_e)
     when not (user_shadows_wasm "read_key") ->
     wasm_tty_host_used := true;

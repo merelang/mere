@@ -1874,6 +1874,10 @@ protects stopped stacks separately. The
 [suffix fixture](../test/parity/map_set_suffix.mere) checks a copied list
 snapshot across replacement and compaction.
 
+| builtin | signature | notes |
+|---|---|---|
+| `mem_trim` | `unit -> unit` | Give back what the runtime keeps for reuse, like Go's `debug.FreeOSMemory`: on C, the thread's region cache past its first 8 regions and, on Darwin, the mapped blocks kept for the next request of the same size (up to 16 MB, resident); on glibc, `malloc_trim(0)`. Both caches are bounded, so nothing needs it to finish; call it before reading your own RSS after a burst (a collector's explicit collection). A no-op on the interpreter, LLVM, Wasm and RISC-V (v0.1.729) |
+
 **`snapshot : 'a -> 'a` (v0.1.712) copies an immutable plain value** into the enclosing
 allocation scope, using the same deep copy as a region result. It supports
 scalars, strings, bytes, SIMD values, tuples, and records/variants/lists whose

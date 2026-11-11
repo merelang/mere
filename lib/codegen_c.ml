@@ -3951,6 +3951,8 @@ let rec emit_expr (e : Ast.expr) : string =
        Printf.sprintf "((void)(%s), __lang_tty_no_signal_keys())" (emit_expr arg)
      | Ast.Var "tty_restore" when not (user_shadows "tty_restore") ->
        Printf.sprintf "((void)(%s), __lang_tty_restore())" (emit_expr arg)
+     | Ast.Var "mem_trim" when not (user_shadows "mem_trim") ->
+       Printf.sprintf "((void)(%s), __lang_mem_trim())" (emit_expr arg)
      | Ast.Var "read_key" when not (user_shadows "read_key") ->
        Printf.sprintf "((void)(%s), __lang_read_key())" (emit_expr arg)
      | Ast.Var "stdin_byte" when not (user_shadows "stdin_byte") ->
@@ -12332,6 +12334,12 @@ let region_runtime_helpers () =
       "    cached_bytes += __lang_region_bytes(__lang_region_cache[i]);";
       "  fprintf(stderr, \"region-stats cache: regions=%d retained=%zu\\n\",";
       "          __lang_region_cache_n, cached_bytes);";
+      (* v0.1.729: and the mapped blocks Darwin keeps for reuse (v0.1.702),
+         which are resident -- what mem_trim unmaps *)
+      "#if defined(__APPLE__)";
+      "  fprintf(stderr, \"region-stats kept: blocks=%d bytes=%zu\\n\",";
+      "          __lang_blk_keep_len, __lang_blk_keep_bytes);";
+      "#endif";
       "}";
       "";
       "static void __lang_region_deps_drop(__lang_region* home);";
@@ -12654,6 +12662,38 @@ let region_runtime_helpers () =
       "      || (__lang_region_cache_n < __LANG_REGION_CACHE_CAP && r->cap <= (1 << 20)))";
       "    __lang_region_cache[__lang_region_cache_n++] = r;";
       "  else { __lang_region_free(r); free(r); }";
+      "}";
+      (* v0.1.729: mem_trim -- give back what the runtime keeps for reuse,
+         the way Go's debug.FreeOSMemory or glibc's malloc_trim does. Both
+         caches are bounded, so a program never needs this to finish; it is
+         for a program that reads its own resident size after a burst (a
+         collector's explicit collection, a leak check that compares RSS
+         before and after a loop). mere-ruby's GC.start: the 100,000 evals of
+         test_kwarg_eval_memory_leak left 16 MB in kept blocks that the
+         run's start had not had yet, and read 67 -> 88 MB (limit 1.2x);
+         with the blocks unmapped, 66 -> 69 MB. madvise does not do this on
+         Darwin: MADV_FREE_REUSABLE / MADV_DONTNEED leave ps's RSS where it
+         was until the pages are wanted elsewhere; only munmap lowers it.
+         Order matters: the cached regions are freed first, since their
+         seeds go into the kept list on the way out. The first 8 cached
+         regions stay -- the cache any program has without deep nesting. *)
+      "__attribute__((unused)) static int __lang_mem_trim(void) {";
+      "  while (__lang_region_cache_n > __LANG_REGION_CACHE_GROWN) {";
+      "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
+      "    __lang_region_free(r); free(r);";
+      "  }";
+      "#if defined(__APPLE__)";
+      "  pthread_mutex_lock(&__lang_blk_keep_lock);";
+      "  while (__lang_blk_keep_len > 0) {";
+      "    __lang_blk_keep_len--;";
+      "    munmap(__lang_blk_keep[__lang_blk_keep_len].p, __lang_blk_keep[__lang_blk_keep_len].n);";
+      "  }";
+      "  __lang_blk_keep_bytes = 0;";
+      "  pthread_mutex_unlock(&__lang_blk_keep_lock);";
+      "#elif defined(__GLIBC__)";
+      "  malloc_trim(0);";
+      "#endif";
+      "  return 0;";
       "}" ]
 
 (* Phase 15.10: Map[R, K, V] runtime — region-allocated linear-scan

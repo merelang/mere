@@ -3217,6 +3217,7 @@ let initial_env : env =
        Ctrl-C is a cost and only some TUIs want to pay it. *)
     ("tty_no_signal_keys", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
     ("tty_restore", mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
+    ("mem_trim",    mono (Ast.TyArrow (Ast.TyUnit, Ast.TyUnit)));
     ("read_key",    mono (Ast.TyArrow (Ast.TyUnit, Ast.TyStr)));
     (* v0.1.21 (mwasm dogfood): a binary file's true byte length (stat).
        Native str_len is strlen and lies about NUL-ful buffers. *)

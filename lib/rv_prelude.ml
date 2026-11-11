@@ -125,6 +125,8 @@ let args = fn (u: unit) -> __rv_args_go 0 (__rv_argc ());
 // there and the slurp ignores close's answer, which is the right amount of
 // caring about closing stdin.
 let read_stdin = fn (u: unit) -> __rv_read_all 0;
+// v0.1.729: the RISC-V runtime keeps no cache to give back
+let mem_trim = fn (u: unit) -> ();
 // Q-110: `bytes` IS represented here since v0.1.426 -- the str block layout
 // ([len word][bytes], word-padded) -- and bytes_of_str / str_of_bytes /
 // bytes_len / bytes_get / bytes_slice / bytes_concat / bytes_of_hex lower in

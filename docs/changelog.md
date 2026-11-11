@@ -4,6 +4,32 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.729 — 2026-11-11
+
+`mem_trim : unit -> unit` gives back what the runtime keeps for reuse, the
+way Go's `debug.FreeOSMemory` or glibc's `malloc_trim` does: on C, the
+per-thread region cache past its first 8 regions, and on Darwin the mapped
+blocks kept for the next request of the same size (v0.1.702, up to 256 of
+them and 16 MB, resident because they were used and are filled with 0xAA as
+they are kept); on glibc it calls `malloc_trim(0)`. Both caches are bounded, so
+a program never needs it to finish. It is for one that reads its own resident
+size after a burst: mere-ruby's `GC.start`, where the 100,000 evals of CRuby's
+`test_kwarg_eval_memory_leak` left 16 MB in kept blocks that the run's start
+had not had yet and read 67 -> 88 MB against a limit of 1.2x; with them
+unmapped, 66 -> 69 MB. `madvise` does not do it on Darwin:
+`MADV_FREE_REUSABLE` and `MADV_DONTNEED` leave the RSS `ps` reports where it
+was until the pages are wanted elsewhere, and only `munmap` lowers it.
+
+The interpreter, LLVM, Wasm and RISC-V keep no such cache, and it is a no-op
+there. `MERE_REGION_STATS` prints the kept list on Darwin
+(`region-stats kept: blocks= bytes=`), and `scripts/region_reclaim_check.sh`'s
+nestdepth leg checks that 80 levels then a trim leave 8 regions cached and, on
+Darwin, nothing kept, where without it the kept list is not empty (a `mem_trim`
+that does nothing fails it). (v0.1.728 is being prepared separately; this
+takes the next number.)
+
+---
+
 ## v0.1.727 — 2026-11-11
 
 The per-thread cache of released block regions is 64 deep instead of 8. An

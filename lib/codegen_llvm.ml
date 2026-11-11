@@ -6600,6 +6600,10 @@ let rec emit_expr ?(let_body_top = false) (env : env) (e : Ast.expr) : string =
     ignore (emit_expr env u_e);
     emit_instr "  call i64 @__lang_tty_restore()";
     "0"
+  (* v0.1.729: LLVM keeps no region cache or block list to give back *)
+  | Ast.App ({ node = Ast.Var "mem_trim"; _ }, u_e) when not (user_shadows_llvm env "mem_trim") ->
+    ignore (emit_expr env u_e);
+    "0"
   | Ast.App ({ node = Ast.Var "read_key"; _ }, u_e) when not (user_shadows_llvm env "read_key") ->
     Hashtbl.replace host_misc_used_llvm "read_key" ();
     ignore (emit_expr env u_e);
