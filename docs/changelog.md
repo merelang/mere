@@ -4,6 +4,27 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.728 — 2026-11-11
+
+Wasm `extern fn` results declared `int` are sign-extended from the host's i32
+to Mere's internal i64. A host returning `-1` previously produced
+`4294967295`, so a failure check such as `status < 0` took the success path.
+The host import signatures remain i32; this does not widen the host ABI.
+String pointers and opaque references retain all 32 bits by zero-extension;
+bool and unit keep their existing representation. Code treating an integer
+result as an unsigned 32-bit word can use `bit_and result 0xffffffff`.
+
+Regression checks execute negative and boundary results, integer aliases,
+comparisons and partial application. They also probe high-bit string and
+opaque values without dereferencing them or allocating a large memory.
+Per-emission bytes and bytes/Vec bridge flags are also reset. Otherwise a
+previous compilation could leave bridge functions in a later module without
+the Vec runtime they require; the repeated-emission regression now primes
+those flags before generating and executing a scalar module.
+
+The required Wasm host gate rejects five altered ABIs: unsigned integer or
+partial-call results, signed pointer/reference results and dropped arguments.
+
 ## v0.1.727 — 2026-11-11
 
 The per-thread cache of released block regions is 64 deep instead of 8. An

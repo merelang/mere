@@ -1,0 +1,19 @@
+// Host externs use i32; Mere values and captured arguments use i64.
+extern type Handle;
+type Count = int;
+extern fn ffi_echo: int -> int;
+extern fn ffi_alias: unit -> Count;
+extern fn ffi_first: int -> int -> int;
+extern fn ffi_text: unit -> str;
+extern fn ffi_handle: unit -> Handle;
+extern fn ffi_bool: bool -> bool;
+extern fn ffi_unit: unit -> unit;
+let partial = ffi_first (0 - 1);
+let _ = ffi_unit ();
+if ffi_echo (0 - 1) == (0 - 1)
+   && ffi_echo (0 - 2147483648) == (0 - 2147483648)
+   && ffi_echo 0 == 0 && ffi_echo 2147483647 == 2147483647
+   && ffi_alias () == (0 - 1) && partial 42 == (0 - 1)
+   && (bit_and (ffi_echo (0 - 1)) 0xffffffff) == 4294967295
+   && ffi_bool true && ffi_bool false == false
+then 42 else 0

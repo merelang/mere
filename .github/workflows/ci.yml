@@ -623,7 +623,9 @@ jobs:
 
       - name: wasm_stub (which builtins answer without reaching the host)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
-        run: sh scripts/wasm_stub_check.sh
+        run: |
+          sh scripts/wasm_stub_check.sh
+          python3 scripts/wasm_extern_check.py
 
       - name: wasm_stub poison (the gate can still go red)
         if: ${{ !cancelled() && matrix.group == 'runtime' }}
