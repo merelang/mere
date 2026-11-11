@@ -12878,7 +12878,7 @@ let () =
   let have_node =
     Sys.command "command -v node > /dev/null 2>&1" = 0 in
 
-  let run_wasm ?(host = "") wat =
+  let run_wasm wat =
     let wat_path = Filename.temp_file "mere_cross_" ".wat" in
     let wasm_path = wat_path ^ ".wasm" in
     let oc = open_out wat_path in
@@ -12906,11 +12906,11 @@ let () =
          (~500KB) overflows well before completion. *)
       let runner = Printf.sprintf
         "node --stack-size=65500 -e \"const fs=require('fs'); \
-         const env = new Proxy({%s}, { get: (o,k) => k in o ? o[k] : () => 0 }); \
+         const env = new Proxy({}, { get: () => () => 0 }); \
          WebAssembly.instantiate(fs.readFileSync('%s'), {env}) \
          .then(({instance})=>console.log(instance.exports.main())) \
          .catch(e=>console.log('TRAP:'+e.message));\""
-        host wasm_path in
+        wasm_path in
       let ic = Unix.open_process_in runner in
       let line = try input_line ic with End_of_file -> "" in
       let _ = Unix.close_process_in ic in
@@ -12964,7 +12964,7 @@ let () =
   (* Run WAT and capture the LAST puts-stdout line instead of main's
      return value. Show-family tests print via puts (side effect) and
      return 0 from main, so main-return can't distinguish outcomes. *)
-  let run_wasm_stdout wat =
+  let run_wasm_stdout ?(host = "") wat =
     let wat_path = Filename.temp_file "mere_typed_" ".wat" in
     let wasm_path = wat_path ^ ".wasm" in
     let oc = open_out wat_path in
@@ -12982,12 +12982,12 @@ let () =
            let e = p; while (e < b.length && b[e] !== 0) e++; \
            return Buffer.from(b.subarray(p, e)).toString('utf8'); }; \
          const env = new Proxy({ \
-           puts: p => process.stdout.write(readCStr(p) + '\\\\n') \
+           puts: p => process.stdout.write(readCStr(p) + '\\\\n'), %s \
          }, { get: (o, k) => k in o ? o[k] : () => 0 }); \
          WebAssembly.instantiate(fs.readFileSync('%s'), {env}) \
          .then(({instance})=>{ mem=instance.exports.memory; instance.exports.main(); }) \
          .catch(e=>console.log('TRAP:'+e.message));\""
-        wasm_path in
+        host wasm_path in
       let ic = Unix.open_process_in runner in
       let buf = Buffer.create 64 in
       (try while true do
@@ -13224,9 +13224,10 @@ let () =
           && ffi_echo (0 - 2147483648) == (0 - 2147483648)\n\
           && ffi_echo 0 == 0 && ffi_echo 2147483647 == 2147483647\n\
           && partial 42 == (0 - 1) then 42 else 0" in
+    let prog, main_ty = Pipeline.infer_program source in
     check "wasm: signed extern results survive comparisons and partial application"
-      (run_wasm ~host:"ffi_echo: x => x, ffi_first: (x,y) => x"
-         (wasm_with_decls source)) "42";
+      (run_wasm_stdout ~host:"ffi_echo: x => x, ffi_first: (x,y) => x"
+         (Codegen_wasm.emit_program ~main_ty prog)) "42";
     List.iter (fun (name, input, expected) -> cross_emit name input expected) (pattern_cases @ semantic_cases);
     let choice_size n =
       let values = String.concat ", " (List.init n (fun _ -> "2")) in
