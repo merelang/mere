@@ -12720,6 +12720,14 @@ static unsigned long long __lang_hash_u64(unsigned long long x) {
   x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
   x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33; return x;
 }
+/* A successful string-key map_has can hand its dense position to map_get.
+ * This is a verified hint, not a key/value cache. It owns no language value,
+ * and each thread has its own slot. The reader rechecks the current map's
+ * range, tombstone and complete key, even after mutation or address reuse. */
+static _Thread_local struct {
+  uintptr_t map;
+  int row;
+} __lang_map_read_hint __attribute__((unused));
 /* Longer strings use MurmurHash64A by Austin Appleby (public domain):
  * https://github.com/aappleby/smhasher/blob/07bb4de10a63e8cc2e1724865454eba635742383/src/MurmurHash2.cpp
  * Short strings mix bounded first/last words with the scalar avalanche.
@@ -12902,6 +12910,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
     | _ -> Printf.sprintf "__lang_hash_u64((unsigned long long)(%s))" a
   in
   let key_hash_expr a = key_hash_for k_ty a in
+  let string_key = match Ast.walk k_ty with Ast.TyStr -> true | _ -> false in
   String.concat "\n"
     [ Printf.sprintf "typedef struct %s {" struct_name;
       Printf.sprintf "  %s* keys;" c_k;
@@ -13301,6 +13310,15 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
         c_v struct_name struct_name c_k;
       "  __LANG_READ(m);";
       "  if (m->live == 0) __lang_fail_impl(\"map_get: key not found in Map (use map_has to check first)\");";
+      (if string_key then
+         String.concat "\n"
+           [ "  uintptr_t hinted_map = __lang_map_read_hint.map;";
+             "  int hinted_row = __lang_map_read_hint.row;";
+             "  __lang_map_read_hint.map = 0;";
+             "  if (hinted_map == (uintptr_t)m && hinted_row >= 0 && hinted_row < m->len";
+             "      && !m->dead[hinted_row] && __lang_str_eq(m->keys[hinted_row], __mk))";
+             "    return m->values[hinted_row];" ]
+       else "");
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
@@ -13326,8 +13344,12 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (i >= 0 && %s) return 1;"
-        (key_eq_expr "m->keys[i]" "__mk");
+      (if string_key then
+         Printf.sprintf "    if (i >= 0 && %s) { __lang_map_read_hint.map = (uintptr_t)m; __lang_map_read_hint.row = i; return 1; }"
+           (key_eq_expr "m->keys[i]" "__mk")
+       else
+         Printf.sprintf "    if (i >= 0 && %s) return 1;"
+           (key_eq_expr "m->keys[i]" "__mk"));
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  return 0;";
