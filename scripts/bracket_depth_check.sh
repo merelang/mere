@@ -49,8 +49,11 @@ if command -v clang >/dev/null 2>&1; then
   # Distinct names ensure this checks global initialization, not local shadowing.
   awk 'BEGIN{for(i=0;i<1000;i++){if(i==0) printf "let g0 = 0;\n"; else printf "let g%d = f%d () + 1;\n", i, i-1; printf "let f%d = fn () -> g%d;\nlet _ = f%d ();\n", i, i, i} printf "print_int (f999 ())\n"}' \
     > "$TMP/globals.mere"
+  # A literal is a Cons spine, rather than a runtime range construction.
+  awk 'BEGIN{printf "let xs = ["; for(i=0;i<1000;i++) printf "%s%d",(i?", ":""),i; printf "];\nlet _ = print_int (len xs);\nprint_int (list_fold xs 0 (fn i -> fn x -> if i == x then i + 1 else 0 - 1))\n"}' \
+    > "$TMP/list.mere"
 
-  for probe in chain conj casc globals; do
+  for probe in chain conj casc globals list; do
     if ! "$MERE" -c "$TMP/$probe.mere" > "$TMP/$probe.c" 2>"$TMP/$probe.emit.err"; then
       echo "FAIL bracket_depth: mere -c refused the $probe probe"; sed -n '1,5p' "$TMP/$probe.emit.err"; fail=1; continue
     fi
@@ -80,6 +83,16 @@ if command -v clang >/dev/null 2>&1; then
     sed -n '1,3p' "$TMP/globals.link.err"
     fail=1
   fi
+  if clang -O2 -fbracket-depth=256 -w "$TMP/list.c" -lm -o "$TMP/list" \
+       2>"$TMP/list.link.err" \
+       && "$TMP/list" > "$TMP/list.out" \
+       && [ "$(cat "$TMP/list.out")" = "$(printf '1000\n1000')" ]; then
+    echo "bracket_depth: all 1000 list elements retain their order and values"
+  else
+    echo "FAIL bracket_depth: the list literal did not retain its length and element order"
+    sed -n '1,3p' "$TMP/list.link.err"
+    fail=1
+  fi
 else
   echo "bracket_depth: SKIP depth half (no clang; gcc has no bracket limit to ask about)"
 fi
@@ -88,7 +101,8 @@ fi
 # One compiler cannot disagree with itself. Build the same emitted C with every C
 # compiler on this machine and require all of them to match the interpreter.
 for P in "$ROOT/test/parity/eval_order_operands.mere" \
-         "$ROOT/test/parity/top_global_initializers.mere"; do
+         "$ROOT/test/parity/top_global_initializers.mere" \
+         "$ROOT/test/parity/list_construction_order.mere"; do
 if [ -f "$P" ]; then
   "$MERE" "$P" > "$TMP/interp.out" 2>&1 || { echo "FAIL bracket_depth: interp refused the order probe"; fail=1; }
   "$MERE" -c "$P" > "$TMP/order.c" 2>"$TMP/order.err" || { echo "FAIL bracket_depth: mere -c on the order probe"; sed -n '1,5p' "$TMP/order.err"; fail=1; }

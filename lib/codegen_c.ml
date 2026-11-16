@@ -1883,6 +1883,29 @@ let vec_join_store (e : Ast.expr) =
       when tmp = used && vn <> tmp && not (Hashtbl.mem top_globals tmp) -> Some (v, sep, xs)
   | _ -> None
 
+(* Recognize the built-in list spine, including explicit Cons/:: with an open
+   tail. Constructor spelling alone is insufficient: a user variant can also
+   have a constructor named Cons. *)
+let list_cons_parts (e : Ast.expr) =
+  match e.Ast.node, Option.map Ast.walk e.Ast.ty with
+  | Ast.Constr (raw, Some { Ast.node = Ast.Tuple [head; tail]; _ }),
+    Some (Ast.TyCon ("list", [_])) when Ast.canonical_ctor raw = "Cons" ->
+    let info = match Hashtbl.find_opt Typer.constructors raw with
+      | Some info -> Some info
+      | None -> Hashtbl.find_opt Typer.constructors "Cons" in
+    (match info with
+     | Some info when info.Typer.type_name = "list" -> Some (head, tail)
+     | _ -> None)
+  | _ -> None
+
+let list_cons_spine e =
+  let rec collect heads cur =
+    match list_cons_parts cur with
+    | Some (head, tail) -> collect (head :: heads) tail
+    | None -> List.rev heads, cur
+  in
+  collect [] e
+
 let rec emit_expr (e : Ast.expr) : string =
   if !region_sites && e.loc.Loc.line > 0 then last_emit_loc := e.loc;
   (* Q-029: tail position belongs to where this expression sits, so take it
@@ -4945,6 +4968,37 @@ let rec emit_expr (e : Ast.expr) : string =
         identifiers. *)
      | Ast.Var name -> emit_user_call name
      | _ -> emit_closure_call ()))))
+  | Ast.Constr _ when Option.is_some (list_cons_parts e) ->
+    (* A list literal is a Cons spine. Nesting a statement expression and a
+       tuple initializer per cell hits clang's depth limit at 128 elements.
+       Sibling blocks keep depth constant and reuse the node temporary.
+
+       Allocate each cell in the current region before evaluating its head,
+       as the ordinary constructor path does. Evaluate heads from left to
+       right, then the open tail exactly once. The result is private until
+       construction finishes; a slot points to the next tail field to fill.
+       Emitting heads in that same order also preserves literal interning
+       and closure registration order. *)
+    let heads, tail = list_cons_spine e in
+    let cty = !c_type_of_fwd (Option.get e.Ast.ty) in
+    let tag = Hashtbl.find variant_tags "Cons" in
+    let result = fresh_bin_tmp () in
+    let slot = fresh_bin_tmp () in
+    let buf = Buffer.create 256 in
+    Buffer.add_string buf (Printf.sprintf "({ %s %s; %s* %s = &%s; "
+      cty result cty slot result);
+    List.iter (fun head ->
+      c_tail_pos := false;
+      let head_c = emit_expr head in
+      Buffer.add_string buf (Printf.sprintf
+        "{ %s_node* __p = (%s_node*)__lang_region_alloc_type(__lang_current_region, %s_node); \
+         __p->payload.Cons.f0 = %s; *%s = %s__mk(%d, __p); \
+         %s = &__p->payload.Cons.f1; } "
+        cty cty cty head_c slot cty tag slot)) heads;
+    c_tail_pos := false;
+    let tail_c = emit_expr tail in
+    Buffer.add_string buf (Printf.sprintf "*%s = %s; %s; })" slot tail_c result);
+    Buffer.contents buf
   | Ast.Constr (raw_name, arg_opt) ->
     (* Phase 41 + 42: since alias_ctor also registers `Traffic.Red` in
        Typer.constructors, look up the qualified raw_name **first** (to
