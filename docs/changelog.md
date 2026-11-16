@@ -4,6 +4,25 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
+## v0.1.732 — 2026-11-17
+
+The required downstream group now links and executes two existing consumers
+through C and LLVM at O2. Twelve executions compare exact exit status, stdout
+and stderr with independent expectations. The binary inspector reads NUL bytes,
+exports and a multi-byte section length, and refuses short or invalid headers.
+The formatting consumer calls the actual library and its declared dependency;
+Python arithmetic supplies independent factorial and Fibonacci answers.
+
+Twenty-three negative controls require complete case scheduling, missing inputs,
+emission and compilation errors, unresolved symbols, altered downstream behavior,
+wrong output or diagnostics, wrong exit status, signals and timeouts to fail for
+their own reason. A timed-out
+process family must leave no surviving descendant. The assignment validator
+requires the complete execution and control command after dependency preparation,
+with a five-minute step limit. All 199 checks across nine groups remain required.
+
+---
+
 ## v0.1.731 — 2026-11-17
 
 C global initializers use assignments in a flat statement sequence. Programs

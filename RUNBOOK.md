@@ -236,7 +236,7 @@ compile-only RISC-V prelude checks run in downstream. The latter needs no emulat
 independent RISC-V oracles stay in the RISC-V group. These assignments spread
 the longer checks across existing groups. Their names, full commands and
 destinations are pinned by the assignment validator, including controls for missing corpus, poison and oracle
-coverage. All 197 checks and all nine groups remain required.
+coverage. All 199 checks and all nine groups remain required.
 Common tools are installed in every group; QEMU and the RISC-V disassembler are
 installed only in the RISC-V group. Network setup has bounded timeouts and retries.
 Required-tool preflights derive each group's tools from its assigned gates;
@@ -261,6 +261,20 @@ seconds; concurrent worker times must not be mistaken for elapsed gate time.
 Run `ruby scripts/ci_gate_check.rb --self-test` to validate assignments and
 failure propagation after editing the workflow. Both `ci.yml` and `pages.yml`
 must be green before a release.
+
+The downstream group also runs
+`MERE_DOWNSTREAM=<checkouts> python3 scripts/downstream_exec_check.py --poison`
+after dependency preparation. It emits, compiles and links fresh C and LLVM
+executables at O2 for the binary inspector and a consumer of the formatting
+library. Twelve executions compare exact status, stdout and stderr with explicit
+answers; no compile-cache hit can substitute for execution. Twenty-three controls
+exercise missing or duplicate executions, missing checkouts, emission,
+compilation, link and runtime failures, including actual behavior changes in
+both downstreams on both backends. Each emission, compilation and link has a
+120-second deadline; each execution has ten
+seconds. The runner kills each invocation's process group and reaps the direct
+child on completion, timeout or interruption. CI bounds the complete step to
+five minutes and requires all fixtures, both backends and the controls.
 
 The build matrix, integration groups, Pages and shared distribution build
 allow up to 30 minutes for compiler setup and 15 minutes for dependencies.
