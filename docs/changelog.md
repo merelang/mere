@@ -4,7 +4,29 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ---
 
-## v0.1.731 — 2026-11-11
+## v0.1.731 — 2026-11-17
+
+C global initializers use assignments in a flat statement sequence. Programs
+with many values read by functions no longer open a nested C scope for every
+initializer and intervening effect. Source order and local shadowing are
+preserved. On one fixed large downstream snapshot, clang's required bracket
+depth falls from 895 to 221.
+
+Built-in list literals and explicit Cons/`::` spines use sibling blocks linked
+through their tail fields. Each head is evaluated once from left to right,
+followed by the final tail once, with allocation in the current region and
+cleanup at the original positions. A 1,000-element literal needs clang depth
+15 instead of 2006; the same downstream snapshot now needs 111. Other deeply
+nested expressions and recursive data constructors can still require a larger
+compiler limit.
+
+The required depth gate compiles and runs 1,000 dependent global initializers
+and a 1,000-element list at depth 256. Separate parity witnesses check order,
+shadowing, failure and region results against the interpreter, LLVM and Wasm;
+sanitizer and existing lifetime/poison checks also pass. Distribution builds run
+the depth gate with the staged compiler and again with the downloaded draft
+asset. Clang is required for these distribution checks; the stock-Ubuntu
+runtime smoke checks remain separate and install no additional packages.
 
 The Darwin C runtime scrubs an inactive mapped block to zero before
 publishing it to the shared reuse pool. A reused mapping already has

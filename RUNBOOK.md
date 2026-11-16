@@ -435,6 +435,14 @@ emission without installing additional packages. The macOS arm64 binary uses
 the same build workflow and native runtime check. PR runs retain the checked
 binaries as short-lived Actions artifacts for inspection.
 
+The build host also runs `scripts/bracket_depth_check.sh --require-clang`
+with `MERE` pointing to the staged binary, then repeats it with the downloaded
+draft asset before the checksum job. It compiles 1,000 dependent globals and a
+1,000-element list at an explicit clang depth of 256, executes their value/order
+checks, and compares the order fixtures with the interpreter. Missing clang
+fails this check. C compilation runs on the build host; the stock Ubuntu
+runtime images continue to require no additional packages.
+
 Push a version tag only after verifying its source and release notes.
 The Release workflow creates or reuses a **draft**, strips build metadata,
 checks the binaries for credential patterns and home-directory paths, then
