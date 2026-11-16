@@ -2361,10 +2361,15 @@ let rec emit_expr (e : Ast.expr) : string =
          ends the run and the rest nests as before -- one level, where the old shape
          had one per binding.
 
-         SO DOES ANYTHING THAT IS NOT A PLAIN BINDING: a tuple or constructor pattern,
-         an owned-vec binding that wants a scope-end free, a global whose initializer is
-         not the one recorded. Those keep their old emission exactly, and the chain
-         resumes underneath them.
+         GLOBAL INITIALIZERS ARE ASSIGNMENTS in this same sequence. Their file-scope
+         declarations already provide storage; opening a scope per assignment only
+         makes the depth grow with the number of globals. The physical initializer
+         check distinguishes these from a local binding that shadows a global.
+
+         ANYTHING THAT NEEDS ITS OWN SCOPE STOPS IT: a tuple or constructor pattern,
+         an owned-vec binding that wants a scope-end free, or a local shadow of a
+         global. Those keep their old emission exactly, and the chain resumes
+         underneath them.
 
          AND THE FIRST LINK DECIDES. If it is not flattenable this guard does not fire
          at all and the original code below runs unchanged, which is what makes the two
@@ -2372,10 +2377,11 @@ let rec emit_expr (e : Ast.expr) : string =
       (match pat0.pnode, value0.Ast.node with
        | Ast.P_var n, Ast.Fun _ -> Hashtbl.mem inner_lifts n
        | Ast.P_var n, _ ->
-         (not (Hashtbl.mem top_globals n))
-         && (match value0.Ast.node with
-             | Ast.App ({ Ast.node = Ast.Var "owned_vec_new"; _ }, _) -> false
-             | _ -> true)
+         (Hashtbl.mem top_globals n && List.memq value0 !top_global_init_values)
+         || ((not (Hashtbl.mem top_globals n))
+             && (match value0.Ast.node with
+                 | Ast.App ({ Ast.node = Ast.Var "owned_vec_new"; _ }, _) -> false
+                 | _ -> true))
        | (Ast.P_wild | Ast.P_unit), _ -> true
        | _ -> false) ->
     let stmts = ref [] in
@@ -2392,6 +2398,17 @@ let rec emit_expr (e : Ast.expr) : string =
          | Ast.P_var name when
              (match value.Ast.node with Ast.Fun _ -> true | _ -> false)
              && Hashtbl.mem inner_lifts name ->
+           c_tail_pos := __in_tail; chain body
+         | Ast.P_var name when Hashtbl.mem top_globals name
+                               && List.memq value !top_global_init_values ->
+           c_tail_pos := false;
+           let value_c = emit_expr value in
+           let bind_ty =
+             match value.Ast.ty with Some t -> Ast.walk t | None -> Ast.TyInt in
+           current_var_types := VtMap.add name bind_ty !current_var_types;
+           current_env_subst :=
+             List.filter (fun (n, _) -> n <> name) !current_env_subst;
+           stmts := Printf.sprintf "%s = %s;" (c_safe_name name) value_c :: !stmts;
            c_tail_pos := __in_tail; chain body
          | Ast.P_var name
            when (not (Hashtbl.mem bound name))
