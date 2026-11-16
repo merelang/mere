@@ -612,6 +612,72 @@ module CIGates
     end
   end
 
+  def self.check_release_codegen(workflows)
+    steps = workflows.fetch("release-build.yml").fetch("jobs").fetch("binary").fetch("steps")
+    stages = steps.select { |s| s["name"] == "Check C nesting regressions in the staged binary" }
+    require!(stages.length == 1, "distribution C regressions must run once before upload")
+    stage = stages.first
+    require!(stage["run"] == 'MERE="$PWD/dist/$ASSET_NAME" sh scripts/bracket_depth_check.sh --require-clang',
+             "distribution C regressions must use the staged binary and require clang")
+    require!(!stage.key?("if") && !stage["continue-on-error"],
+             "distribution C regressions must remain required")
+    require!(stage["timeout-minutes"].is_a?(Integer) && (1..5).cover?(stage["timeout-minutes"]),
+             "distribution C regressions need a bounded timeout")
+    artifact = steps.find { |s| s["uses"].to_s.start_with?("actions/upload-artifact@") }
+    upload = steps.find { |s| s["name"] == "Upload to draft release and verify the served bytes" }
+    require!(artifact && upload && steps.index(stage) < steps.index(artifact) && steps.index(stage) < steps.index(upload),
+             "distribution C regressions must precede inspection and release uploads")
+    served = 'MERE="$PWD/roundtrip/$ASSET_NAME" sh scripts/bracket_depth_check.sh --require-clang'
+    lines = upload.fetch("run").lines.map(&:strip)
+    executable = lines.index('chmod 755 "roundtrip/$ASSET_NAME"')
+    require!(executable && lines.count(served) == 1 && lines.index(served) > executable,
+             "downloaded assets must repeat C regressions with the served binary")
+  end
+
+  def self.release_codegen_self_test(workflows)
+    checks = 0
+    %w[missing wrong-binary optional skipped unbounded strict late served-missing served-wrong-binary served-strict served-early served-not-executable].each do |poison|
+      copy = Marshal.load(Marshal.dump(workflows))
+      steps = copy.fetch("release-build.yml").fetch("jobs").fetch("binary").fetch("steps")
+      stage = steps.find { |s| s["name"] == "Check C nesting regressions in the staged binary" }
+      upload = steps.find { |s| s["name"] == "Upload to draft release and verify the served bytes" }
+      case poison
+      when "missing" then steps.delete(stage)
+      when "wrong-binary" then stage["run"].sub!("dist/$ASSET_NAME", "_build/default/bin/mere.exe")
+      when "optional" then stage["continue-on-error"] = true
+      when "skipped" then stage["if"] = false
+      when "unbounded" then stage.delete("timeout-minutes")
+      when "strict" then stage["run"].sub!(" --require-clang", "")
+      when "late" then steps.delete(stage); steps.push(stage)
+      when "served-missing" then upload["run"] = upload["run"].lines.reject { |line| line.include?("bracket_depth_check.sh") }.join
+      when "served-wrong-binary" then upload["run"].sub!("$PWD/roundtrip/$ASSET_NAME", "$PWD/dist/$ASSET_NAME")
+      when "served-strict" then upload["run"].sub!(" --require-clang", "")
+      when "served-early"
+        line = upload["run"].lines.find { |s| s.include?("bracket_depth_check.sh") }
+        upload["run"] = line + upload["run"].lines.reject { |s| s.include?("bracket_depth_check.sh") }.join
+      when "served-not-executable" then upload["run"] = upload["run"].lines.reject { |s| s.include?('chmod 755 "roundtrip/$ASSET_NAME"') }.join
+      end
+      begin
+        check_release_codegen(copy)
+      rescue Invalid, KeyError
+        checks += 1
+        next
+      end
+      raise Invalid, "distribution C regression control stayed green: #{poison}"
+    end
+    Dir.mktmpdir("mere-required-clang-") do |tmp|
+      fake = File.join(tmp, "mere")
+      File.write(fake, "#!/bin/sh\nexit 17\n")
+      FileUtils.chmod(0o755, fake)
+      FileUtils.ln_s("/usr/bin/dirname", File.join(tmp, "dirname"))
+      script = File.expand_path("bracket_depth_check.sh", __dir__)
+      stdout, stderr, status = Open3.capture3({"PATH" => tmp, "MERE" => fake}, "/bin/sh", script, "--require-clang")
+      require!(status.exitstatus == 2 && (stdout + stderr).include?("clang is required"),
+               "distribution C regression gate must reject a missing clang")
+    end
+    puts "ci_gates: #{checks} distribution C regression routing controls caught; missing clang rejected"
+  end
+
   def self.setup_self_test(workflows)
     checks = 0
     [["ci.yml", "build"], ["pages.yml", "build"], ["release-build.yml", "binary"]].each do |file, name|
@@ -774,12 +840,14 @@ if $PROGRAM_NAME == __FILE__
       workflows[name] = YAML.safe_load(File.read(File.join(File.dirname(path), name)), aliases: false)
     end
     CIGates.check_setup(workflows)
+    CIGates.check_release_codegen(workflows)
     CIGates.check_opam_setup(workflows)
     CIGates.check_release_tools(workflows)
     puts "ci_gates: #{assigned.values.sum(&:length)} checks assigned exactly once across #{assigned.length} groups"
     assigned.each { |group, checks| puts "  #{group}: #{checks.length}" }
     CIGates.self_test(workflow) if ARGV.include?("--self-test")
     CIGates.setup_self_test(workflows) if ARGV.include?("--self-test")
+    CIGates.release_codegen_self_test(workflows) if ARGV.include?("--self-test")
     CIGates.opam_setup_self_test(workflows) if ARGV.include?("--self-test")
     CIGates.release_tools_self_test(workflows) if ARGV.include?("--self-test")
   rescue CIGates::Invalid, KeyError, Psych::Exception => e

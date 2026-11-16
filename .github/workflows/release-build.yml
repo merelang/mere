@@ -100,6 +100,10 @@ jobs:
           [ "$RUNNER_OS" != Linux ] || mode=--linux
           sh scripts/release_runtime_check.sh "$mode" "dist/$ASSET_NAME" "$MERE_RELEASE_VERSION"
 
+      - name: Check C nesting regressions in the staged binary
+        timeout-minutes: 5
+        run: MERE="$PWD/dist/$ASSET_NAME" sh scripts/bracket_depth_check.sh --require-clang
+
       - name: Keep the checked binary for inspection
         timeout-minutes: 5
         if: ${{ !inputs.publish-draft }}
@@ -130,3 +134,4 @@ jobs:
           mode=--native
           [ "$RUNNER_OS" != Linux ] || mode=--linux
           sh scripts/release_runtime_check.sh "$mode" "roundtrip/$ASSET_NAME" "$MERE_RELEASE_VERSION"
+          MERE="$PWD/roundtrip/$ASSET_NAME" sh scripts/bracket_depth_check.sh --require-clang

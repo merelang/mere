@@ -23,9 +23,19 @@
 # compiler cannot show a disagreement between two. With only clang present the order
 # half reports what it skipped; it does not pass silently.
 set -u
+require_clang=0
+if [ "${1:-}" = --require-clang ]; then
+  require_clang=1
+  shift
+fi
+[ "$#" -eq 0 ] || { echo "usage: $0 [--require-clang]" >&2; exit 2; }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "bracket_depth_check: $MERE not found — run 'dune build'" >&2; exit 1; }
+if [ "$require_clang" -eq 1 ] && ! command -v clang >/dev/null 2>&1; then
+  echo "bracket_depth_check: clang is required for distribution regression checks" >&2
+  exit 2
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
