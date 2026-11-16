@@ -1,0 +1,33 @@
+// Initializers and intervening effects run in source order. A local binding
+// with the same name as a global must retain its own scope and captures.
+let events = vec_new ();
+let record = fn (n: int) -> let _ = vec_push events n in n;
+let first = record 1;
+let read_first = fn () -> first;
+let _ = record 2;
+let second = region R { let _ = record 3 in read_first () + 10 };
+let read_second = fn () -> second;
+let amount = record 4;
+let read_amount = fn () -> amount;
+let shadow = fn (amount: int) ->
+  let amount = amount + 10 in
+  let f = fn (n: int) -> amount + n in
+  f (read_amount ());
+let owned = owned_vec_new ();
+let _ = owned_vec_push owned 5;
+let read_owned = fn () -> owned_vec_get owned 0;
+let scoped = fn () ->
+  let local = owned_vec_new () in
+  let _ = owned_vec_push local (read_amount ()) in
+  owned_vec_get local 0;
+drop type resource = { close: unit -> unit };
+let cleaned = with h = resource { close = fn () -> let _ = record 7 in () } in
+  region R { let _ = record 6 in read_second () };
+let read_cleaned = fn () -> cleaned;
+let _ = print_int (shadow 20);
+let _ = print_int (read_amount ());
+let _ = print_int (read_owned ());
+let _ = print_int (scoped ());
+let _ = print_int (read_cleaned ());
+let _ = print (show (vec_to_list events));
+()

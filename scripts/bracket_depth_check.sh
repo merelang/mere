@@ -24,7 +24,7 @@
 # half reports what it skipped; it does not pass silently.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MERE="$ROOT/_build/default/bin/mere.exe"
+MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "bracket_depth_check: $MERE not found — run 'dune build'" >&2; exit 1; }
 
 TMP="$(mktemp -d)"
@@ -44,13 +44,18 @@ if command -v clang >/dev/null 2>&1; then
     > "$TMP/conj.mere"
   awk -v n=$N 'BEGIN{printf "let f = fn (k: int) -> if k == 0 then 0"; for(i=1;i<n;i++){printf " else if k == %d then %d", i, i} printf " else -1;\nlet _ = print_int (f 9);\n0\n"}' \
     > "$TMP/casc.mere"
+  # Every value is read by a lifted function, so it really becomes a C global.
+  # Alternating with effects used to open two nested scopes per initializer.
+  # Distinct names ensure this checks global initialization, not local shadowing.
+  awk 'BEGIN{for(i=0;i<1000;i++){if(i==0) printf "let g0 = 0;\n"; else printf "let g%d = f%d () + 1;\n", i, i-1; printf "let f%d = fn () -> g%d;\nlet _ = f%d ();\n", i, i, i} printf "print_int (f999 ())\n"}' \
+    > "$TMP/globals.mere"
 
-  for probe in chain conj casc; do
+  for probe in chain conj casc globals; do
     if ! "$MERE" -c "$TMP/$probe.mere" > "$TMP/$probe.c" 2>"$TMP/$probe.emit.err"; then
       echo "FAIL bracket_depth: mere -c refused the $probe probe"; sed -n '1,5p' "$TMP/$probe.emit.err"; fail=1; continue
     fi
     if clang -fsyntax-only -fbracket-depth=256 -w "$TMP/$probe.c" 2>"$TMP/$probe.cc.err"; then
-      echo "bracket_depth: $probe ($N links) fits at clang's default depth"
+      echo "bracket_depth: $probe fits at clang's default depth"
     else
       echo "FAIL bracket_depth: clang refused the $probe probe at -fbracket-depth=256"
       grep -i "bracket\|error" "$TMP/$probe.cc.err" | head -3
@@ -64,6 +69,17 @@ if command -v clang >/dev/null 2>&1; then
       fail=1
     fi
   done
+  # Each initializer reads the preceding one: 999 depends on all 1,000 running.
+  if clang -O2 -fbracket-depth=256 -w "$TMP/globals.c" -lm -o "$TMP/globals" \
+       2>"$TMP/globals.link.err" \
+       && "$TMP/globals" > "$TMP/globals.out" \
+       && [ "$(cat "$TMP/globals.out")" = 999 ]; then
+    echo "bracket_depth: all 1000 global initializers run"
+  else
+    echo "FAIL bracket_depth: the global initialization probe did not return 999"
+    sed -n '1,3p' "$TMP/globals.link.err"
+    fail=1
+  fi
 else
   echo "bracket_depth: SKIP depth half (no clang; gcc has no bracket limit to ask about)"
 fi
@@ -71,11 +87,13 @@ fi
 # --- part 2: order -------------------------------------------------------------
 # One compiler cannot disagree with itself. Build the same emitted C with every C
 # compiler on this machine and require all of them to match the interpreter.
-P="$ROOT/test/parity/eval_order_operands.mere"
+for P in "$ROOT/test/parity/eval_order_operands.mere" \
+         "$ROOT/test/parity/top_global_initializers.mere"; do
 if [ -f "$P" ]; then
   "$MERE" "$P" > "$TMP/interp.out" 2>&1 || { echo "FAIL bracket_depth: interp refused the order probe"; fail=1; }
   "$MERE" -c "$P" > "$TMP/order.c" 2>"$TMP/order.err" || { echo "FAIL bracket_depth: mere -c on the order probe"; sed -n '1,5p' "$TMP/order.err"; fail=1; }
   found=0
+  seen=""
   for cc in clang gcc cc; do
     command -v "$cc" >/dev/null 2>&1 || continue
     # Identity, not path: on macOS `gcc` and `cc` are both Apple clang, and three names
@@ -89,7 +107,7 @@ if [ -f "$P" ]; then
     fi
     "$TMP/order.$cc" > "$TMP/order.$cc.out" 2>&1
     if cmp -s "$TMP/interp.out" "$TMP/order.$cc.out"; then
-      echo "bracket_depth: $cc evaluates the operands in the interpreter's order"
+      echo "bracket_depth: $cc agrees with the interpreter on ${P##*/}"
     else
       echo "FAIL bracket_depth: $cc disagrees with the interpreter on operand order"
       diff "$TMP/interp.out" "$TMP/order.$cc.out" | head -8
@@ -100,6 +118,7 @@ if [ -f "$P" ]; then
 else
   echo "FAIL bracket_depth: $P is missing"; fail=1
 fi
+done
 
 [ "$fail" -eq 0 ] || exit 1
 echo "bracket_depth_check: ok"

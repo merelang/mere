@@ -206,34 +206,29 @@ clang sample.c -o sample
 ./sample
 ```
 
-### A large program may need `-fbracket-depth`
+### C nesting limits
 
-An `if / else if / ...` chain in Mere becomes NESTED TERNARIES in the emitted C,
-one level per arm, so the C nests as deep as the chain is long. Measured, with a
-synthetic n-way chain:
+Long `if / else if / ...` cascades with a representable result type use flat
+`else if` statements. Long operator chains and ordinary `let` chains also use
+sequenced statements inside a single statement expression.
 
-| arms | max nesting in the emitted C |
-|---|---|
-| 5 | 23 |
-| 50 | 54 |
-| 100 | 104 |
-| 200 | 204 |
+Top-level values read by functions have file-scope storage. Their initializers
+are assignments in that same flat sequence, interleaved with other bindings
+and effects in source order. Adding globals does not add a C scope per global.
+Local bindings that shadow a global still have their own scope. Tuple and
+constructor patterns, repeated local names, and scope-bound OwnedVec cleanup
+also retain the scopes their existing emission requires. Explicit regions and
+`with` cleanup keep their lifetime boundaries.
 
-Mainline clang caps bracket nesting at **256**, so a chain of roughly 250 arms
-or more fails to compile with
+Deeply nested expressions and data literals can still exceed clang's bracket
+limit. `-fbracket-depth=1024` can raise that limit when needed; it is not required
+just because a program has many globals or a long `else if` cascade.
 
-```
-fatal error: bracket nesting level exceeded maximum of 256
-```
-
-Apple's clang allows more, which is why this does not show up on macOS. Pass
-`-fbracket-depth=1024` (or higher) where it does. `mere-ruby`'s dispatch tables
-reach 613 and need it; ordinary programs sit around 23 and never will.
-
-This is a property of the emitted code and not a bug in the C it emits -- the
-program is correct, the compiler's default limit is simply below it. It is
-written down here because it was found by compiling a large Mere program on
-Linux for the first time, and nothing said so.
+`scripts/bracket_depth_check.sh` asks clang to accept generated operator chains,
+cascades and 1,000 alternating global initializers/effects at an explicit depth
+of 256. The same files must fail at depth 4, so the gate also checks that the
+compiler enforces the requested bound. Runtime comparisons cover initializer
+order, local shadowing and cleanup in `test/parity/top_global_initializers.mere`.
 
 ---
 
