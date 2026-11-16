@@ -1,0 +1,46 @@
+// Heads and an open tail are evaluated once, from left to right. Nested
+// construction, failure and cleanup must keep that same order.
+let events = vec_new ();
+let mark = fn (n: int) -> let _ = vec_push events n in n;
+let tail = fn () -> let _ = mark 99 in [9, 10];
+let xs = mark 1 :: mark 2 :: mark 3 :: tail ();
+let _ = print (show xs);
+let explicit = Cons (mark 4, Cons (mark 5, Nil));
+let _ = print (show explicit);
+let stopped = try_or (fn () -> [mark 6, fail "stop", mark 7]) [0 - 1];
+let _ = print (show stopped);
+drop type Resource = { close: unit -> unit };
+let cleaned = [
+  (with r = Resource { close = fn () -> let _ = mark 9 in () } in mark 8),
+  mark 10
+];
+let _ = print (show cleaned);
+let nested = [[mark 11, mark 12], [mark 13]];
+let _ = print (show nested);
+
+// Immutable results survive region reuse, including nested payloads.
+type Pair = { text: str, number: int };
+let pairs = region R {
+  [Pair { text = "a" ++ str_of_int 1, number = 1 },
+   Pair { text = "b" ++ str_of_int 2, number = 2 }]
+};
+let binary = region R { [bytes_of_hex "0001ff", bytes_of_hex "ff0000"] };
+let scoped_heads = [(region H { "head" ++ str_of_int (mark 14) }),
+                    "outer" ++ str_of_int (mark 15)];
+let scoped_tail = ("prefix" ++ str_of_int (mark 16)) ::
+  region T { let _ = mark 17 in ["tail" ++ str_of_int (mark 18)] };
+let churn = region S { ["overwrite" ++ str_of_int 3, "again" ++ str_of_int 4] };
+let _ = print (show (list_map pairs (fn (p: Pair) -> p.text)));
+let _ = print (show (list_map binary (fn b -> hex_of_bytes b)));
+let _ = print (show scoped_heads);
+let _ = print (show scoped_tail);
+let _ = print (show churn);
+let make = fn x -> [x, x];
+let _ = print (show (make (1, "tuple")));
+let _ = print (show (make 1.5));
+let functions = [fn (x: int) -> x + 1, fn (x: int) -> x * 2];
+let _ = print (show (list_map functions (fn f -> f 10)));
+let empty = ([] : int list);
+let _ = print_int (len empty);
+let _ = print (show (vec_to_list events));
+()

@@ -220,15 +220,24 @@ constructor patterns, repeated local names, and scope-bound OwnedVec cleanup
 also retain the scopes their existing emission requires. Explicit regions and
 `with` cleanup keep their lifetime boundaries.
 
-Deeply nested expressions and data literals can still exceed clang's bracket
-limit. `-fbracket-depth=1024` can raise that limit when needed; it is not required
-just because a program has many globals or a long `else if` cascade.
+Built-in list literals and explicit `Cons`/`::` spines use sibling blocks inside
+one statement expression. Each cell is allocated in the current region, heads
+are evaluated from left to right, and the final tail is evaluated once after
+the heads. A list's length does not increase C nesting depth. Regions and
+cleanup inside an element or tail are evaluated at their original positions.
+
+Deeply nested expressions and other recursive data constructors can still
+exceed clang's bracket limit. `-fbracket-depth=1024` can raise that limit when
+needed; a program's number of globals, list elements or `else if` arms does not
+require a larger limit by itself.
 
 `scripts/bracket_depth_check.sh` asks clang to accept generated operator chains,
-cascades and 1,000 alternating global initializers/effects at an explicit depth
-of 256. The same files must fail at depth 4, so the gate also checks that the
-compiler enforces the requested bound. Runtime comparisons cover initializer
-order, local shadowing and cleanup in `test/parity/top_global_initializers.mere`.
+cascades, 1,000 alternating global initializers/effects and a 1,000-element list
+literal at an explicit depth of 256. The same files must fail at depth 4, so the
+gate also checks that the compiler enforces the requested bound. Runtime
+comparisons cover initializer order, local shadowing and cleanup in
+`test/parity/top_global_initializers.mere`, and list element/tail order, failure
+and region results in `test/parity/list_construction_order.mere`.
 
 ---
 
