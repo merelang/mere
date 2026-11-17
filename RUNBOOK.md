@@ -276,6 +276,16 @@ seconds. The runner kills each invocation's process group and reaps the direct
 child on completion, timeout or interruption. CI bounds the complete step to
 five minutes and requires all fixtures, both backends and the controls.
 
+The downstream compile table deliberately tightens the large consumer's older
+depth workaround to `-fbracket-depth=256`. This C row and its checkout are
+required. Missing or duplicate rows and missing, raised or conflicting depth
+flags fail before a compile-cache entry can be used. The existing compile
+poison gate also asks clang to accept 64 nested parentheses, refuse 300 for
+the nesting limit, and accept that same deep source at 1024. Its cache-key
+control prevents a previous 1024 result from satisfying the 256 check.
+The assignment validator requires both full compile commands in the downstream
+group after checkout and dependency preparation, including the poison run.
+
 The build matrix, integration groups, Pages and shared distribution build
 allow up to 30 minutes for compiler setup and 15 minutes for dependencies.
 Build, Pages and distribution jobs have a 60-minute limit; integration groups
