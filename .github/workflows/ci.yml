@@ -1634,6 +1634,11 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'downstream' }}
         run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_cc_check.sh
 
+      - name: downstream_exec (C and LLVM programs link and run)
+        if: ${{ !cancelled() && matrix.group == 'downstream' }}
+        timeout-minutes: 5
+        run: MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" python3 scripts/downstream_exec_check.py --poison
+
       # memu is already among the dogfood clones above, so the RISC-V
       # differential points at that checkout rather than fetching it twice.
       # Without it, qemu_virt runs the QEMU half only -- and used to report

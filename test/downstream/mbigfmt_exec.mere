@@ -1,0 +1,16 @@
+// Appended to the downstream library so its exported functions execute.
+let _ = print (Bigfmt.group "");
+let _ = print (Bigfmt.group "0");
+let _ = print (Bigfmt.group "12");
+let _ = print (Bigfmt.group "123");
+let _ = print (Bigfmt.group "1234");
+let _ = print (Bigfmt.group "001234");
+let _ = print (Bigfmt.group "1234567");
+let _ = print (Bigfmt.group (str_repeat "123" 400));
+let _ = print (Bigfmt.fact 0);
+let _ = print (Bigfmt.fact 1);
+let _ = print (Bigfmt.fact 30);
+let _ = print (Bigfmt.fact 100);
+let _ = print (Bigfmt.fib 0);
+let _ = print (Bigfmt.fib 1);
+print (Bigfmt.fib 200)

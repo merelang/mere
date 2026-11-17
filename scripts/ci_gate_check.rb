@@ -10,7 +10,7 @@ module CIGates
 
   # Update deliberately when adding or removing checks. A deleted step must
   # not silently reduce the coverage while every remaining group is green.
-  EXPECTED_CHECKS = 198
+  EXPECTED_CHECKS = 199
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   WASM_EXTERN_GATE = "wasm_stub (which builtins answer without reaching the host)"
   WASM_EXTERN_COMMAND = "sh scripts/wasm_stub_check.sh\npython3 scripts/wasm_extern_check.py\n"
@@ -21,6 +21,8 @@ module CIGates
   FIRST_RUN = "first_run_check (the README, executed)"
   PARITY = "parity (interp / C / LLVM / wasm agree)"
   COROUTINES = "coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)"
+  DOWNSTREAM_EXEC = "downstream_exec (C and LLVM programs link and run)"
+  DOWNSTREAM_EXEC_COMMAND = 'MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" python3 scripts/downstream_exec_check.py --poison'
   COROUTINE_COMMAND = <<~'SH'.freeze
     python3 scripts/coro_runner_test.py
     python3 scripts/coro_scan_stability_check.py
@@ -172,6 +174,7 @@ module CIGates
              "all three RISC-V execution partitions must run once")
     require!(checks.count { |s| s["name"] == FIRST_RUN } == 1, "the README execution gate must run once")
     require!(checks.count { |s| s["name"] == COROUTINES } == 1, "the coroutine gate must run once")
+    require!(checks.count { |s| s["name"] == DOWNSTREAM_EXEC } == 1, "downstream execution must run once")
     require!(FORMATTERS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both formatter gates must run once")
     require!(BALANCED_CHECKS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
@@ -207,6 +210,16 @@ module CIGates
         require!(step["run"] == COROUTINE_COMMAND && !step["continue-on-error"],
                  "coroutines must retain runner controls, both widths, poison probes and timings")
         assigned.fetch("coroutines") << name
+      when DOWNSTREAM_EXEC
+        require!(selected == ["downstream"] && step["run"] == DOWNSTREAM_EXEC_COMMAND,
+                 "downstream execution must retain both backends, fixtures and poison controls")
+        require!(!step["continue-on-error"] && step["timeout-minutes"].is_a?(Integer) &&
+                 (1..5).cover?(step["timeout-minutes"]), "downstream execution must be required and bounded")
+        checkout = checks.index { |s| s["name"] == CHECKOUT }
+        deps = checks.index { |s| s["name"] == "downstream_check (their code is still a program)" }
+        require!(checkout && deps && checks.index(step) > checkout && checks.index(step) > deps,
+                 "downstream execution needs the checkouts and resolved dependencies first")
+        assigned.fetch("downstream") << name
       when *FORMATTERS.keys
         require!(selected == ["downstream"], "formatter corpus gates belong to downstream")
         script = FORMATTERS.fetch(name)
@@ -369,6 +382,20 @@ module CIGates
       mutations["duplicated #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["if"] = "${{ !cancelled() && (matrix.group == 'downstream' || matrix.group == '#{original}') }}" }
     end
     mutations["missing coroutine gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == COROUTINES } }
+    mutations["missing downstream execution"] = ->(c) { c[:steps].reject! { |s| s["name"] == DOWNSTREAM_EXEC } }
+    mutations["renamed downstream execution"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["name"] = "execution renamed" }
+    mutations["optional downstream execution"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["continue-on-error"] = true }
+    mutations["wrong downstream execution group"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" }
+    mutations["downstream execution bypassed"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["run"] = "true" }
+    mutations["downstream poison removed"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["run"].sub!(" --poison", "") }
+    mutations["downstream checkouts disconnected"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["run"].sub!('MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" ', "") }
+    mutations["unbounded downstream execution"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }.delete("timeout-minutes") }
+    mutations["excessive downstream execution deadline"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["timeout-minutes"] = 6 }
+    mutations["downstream execution before setup"] = ->(c) {
+      step = c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }
+      c[:steps].delete(step)
+      c[:steps].insert(c[:steps].index(c[:checkout]), step)
+    }
     mutations["renamed coroutine gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["name"] = "coroutines renamed" }
     mutations["coroutines in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" }
     mutations["optional coroutines"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINES }["continue-on-error"] = true }
