@@ -6,6 +6,15 @@ Major implementation milestones recorded per-slice (newest first). See `git log`
 
 ## v0.1.732 — 2026-11-17
 
+The large downstream C compilation now requires an explicit clang bracket
+depth of 256 instead of the former 1024 workaround. The row and its checkout
+are required; missing, duplicated, raised or conflicting depth settings fail
+before cache reuse. Real clang probes accept a shallow source, refuse a
+300-parenthesis source specifically for nesting at 256, and accept that same
+source at 1024. Cache controls require different keys for the two limits.
+The assignment validator retains both complete compilation commands and their
+required downstream placement after dependency preparation.
+
 The required downstream group now links and executes two existing consumers
 through C and LLVM at O2. Twelve executions compare exact exit status, stdout
 and stderr with independent expectations. The binary inspector reads NUL bytes,

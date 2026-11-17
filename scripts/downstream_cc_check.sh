@@ -56,13 +56,44 @@ sdl_flags() { command -v sdl2-config >/dev/null 2>&1 && sdl2-config --cflags; }
 cc_version=$("$CC" --version 2>/dev/null | head -1)
 hash_of() { { cat "$1"; echo "$cc_version"; echo "$2"; } | shasum -a 256 | cut -c1-40; }
 
+depth_flags_valid() {
+  depth_seen=0
+  for depth_arg in $1; do
+    case "$depth_arg" in
+      -fbracket-depth*)
+        [ "$depth_arg" = -fbracket-depth=256 ] || return 1
+        depth_seen=$((depth_seen + 1)) ;;
+    esac
+  done
+  [ "$depth_seen" -eq 1 ]
+}
+target_flags() {
+  awk '$1 == "mere-ruby" && $2 == "c" {
+    n++; for (i=3; i<=NF; i++) printf "%s%s", (i>3 ? " " : ""), $i
+  } END { if (n != 1) exit 1; print "" }' "$1"
+}
+if ! mr_flags=$(target_flags "$TABLE"); then
+  echo "FAIL downstream_cc: exactly one required mere-ruby C row must be declared"; exit 1
+fi
+if ! depth_flags_valid "$mr_flags"; then
+  echo "FAIL downstream_cc: mere-ruby requires exactly one -fbracket-depth=256"; exit 1
+fi
+
 # one row -> prints a status line, returns 0 ok / 1 failed / 2 absent
 # $1 repo $2 backend $3 flags $4 use cache (1/0) $5 sed expression or "" $6 CC override or ""
 row() {
   repo=$1 be=$2 raw=$3 usecache=$4 poison=${5:-} cc=${6:-$CC}
+  if [ "$repo:$be" = mere-ruby:c ] && ! depth_flags_valid "$raw"; then
+    echo "FAIL downstream_cc[$repo]: requires exactly one -fbracket-depth=256"; return 1
+  fi
   entry=$(awk -v r="$repo" '$1 == r { print $2; exit }' "$REPOS")
   [ -n "$entry" ] || { echo "FAIL downstream_cc[$repo]: not a row of test/downstream/REPOS"; return 1; }
-  [ -d "$DIR/$repo" ] || { echo "  skip  $repo $be (not in \$MERE_DOWNSTREAM)"; return 2; }
+  if [ ! -d "$DIR/$repo" ]; then
+    if [ "$repo" = mere-ruby ]; then
+      echo "FAIL downstream_cc[$repo]: required checkout missing"; return 1
+    fi
+    echo "  skip  $repo $be (not in \$MERE_DOWNSTREAM)"; return 2
+  fi
   flags=""
   for f in $raw; do
     case "$f" in
@@ -128,8 +159,54 @@ if [ "$MODE" = poison ]; then
   printf '#!/bin/sh\necho "clang: error: unable to execute command: Killed: 9" >&2\nexit 1\n' > "$T/drvcc"; chmod +x "$T/drvcc"
   expect "the driver reports its frontend killed" "killed by signal 9" mkv c "-O2 -w" 0 "" "$T/drvcc"
   BOUND=1 expect "the compiler is too slow" "c timeout" medit2 c "-O2 -Wno-conditional-type-mismatch" 0
+
+  expect "missing depth flag" "requires exactly one -fbracket-depth=256" mere-ruby c "-O2 -w" 0
+  expect "raised depth flag" "requires exactly one -fbracket-depth=256" mere-ruby c "-O2 -w -fbracket-depth=1024" 0
+  expect "later depth override" "requires exactly one -fbracket-depth=256" mere-ruby c "$mr_flags -fbracket-depth=1024" 0
+  DIR="$T/absent" expect "missing required checkout" "required checkout missing" mere-ruby c "$mr_flags" 0
+  sed '/^mere-ruby[[:space:]]/d' "$TABLE" > "$T/missing-table"
+  cat "$TABLE" > "$T/duplicate-table"
+  printf 'mere-ruby c %s\n' "$mr_flags" >> "$T/duplicate-table"
+  for table in "$T/missing-table" "$T/duplicate-table"; do
+    if target_flags "$table" > /dev/null; then
+      echo "  FAIL  POISON (missing or duplicated required row was accepted)"; pf=1
+    else
+      echo "  ok    POISON (missing or duplicated required row refused)"
+    fi
+  done
+
+  # Use the actual table flags, even on Apple clang whose default is larger.
+  # The same deep source must parse with 1024, so an unrelated syntax error or
+  # a compiler that always fails cannot satisfy the depth refusal.
+  for depth in 64 300; do
+    awk -v n="$depth" 'BEGIN { printf "int depth_probe(void) { return ";
+      for(i=0;i<n;i++) printf "("; printf "0";
+      for(i=0;i<n;i++) printf ")"; print "; }" }' > "$T/depth-$depth.c"
+  done
+  wider=$(printf '%s\n' "$mr_flags" | sed 's/-fbracket-depth=256/-fbracket-depth=1024/')
+  # shellcheck disable=SC2086
+  if ! sh "$ROOT/scripts/bounded.sh" 10 "$CC" $mr_flags -fsyntax-only "$T/depth-64.c" > "$T/depth.out" 2>&1; then
+    echo "  FAIL  POISON (valid shallow source did not compile)"; pf=1
+  fi
+  # shellcheck disable=SC2086
+  if sh "$ROOT/scripts/bounded.sh" 10 "$CC" $mr_flags -fsyntax-only "$T/depth-300.c" > "$T/depth.out" 2>&1; then
+    echo "  FAIL  POISON (table flags accepted 300 nested parentheses)"; pf=1
+  elif ! command grep -q 'bracket nesting level exceeded' "$T/depth.out"; then
+    echo "  FAIL  POISON (deep source failed for an unrelated reason)"; pf=1
+  else
+    echo "  ok    POISON (actual table flags refuse excessive nesting)"
+  fi
+  # shellcheck disable=SC2086
+  if ! sh "$ROOT/scripts/bounded.sh" 10 "$CC" $wider -fsyntax-only "$T/depth-300.c" > "$T/depth.out" 2>&1; then
+    echo "  FAIL  POISON (the same deep source did not compile at 1024)"; pf=1
+  fi
+  if [ "$(hash_of "$T/depth-64.c" "c $mr_flags")" = "$(hash_of "$T/depth-64.c" "c $wider")" ]; then
+    echo "  FAIL  POISON (a depth-1024 cache entry could satisfy depth 256)"; pf=1
+  else
+    echo "  ok    POISON (depth flags distinguish compile cache entries)"
+  fi
   [ "$pf" = 0 ] || { echo "downstream_cc --poison: FAILED"; exit 1; }
-  echo "downstream_cc --poison: ok (each failure says what it was)"
+  echo "downstream_cc --poison: ok (failure classes, strict depth 256 and cache identity)"
   exit 0
 fi
 

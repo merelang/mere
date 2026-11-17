@@ -23,6 +23,12 @@ module CIGates
   COROUTINES = "coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)"
   DOWNSTREAM_EXEC = "downstream_exec (C and LLVM programs link and run)"
   DOWNSTREAM_EXEC_COMMAND = 'MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" python3 scripts/downstream_exec_check.py --poison'
+  DOWNSTREAM_COMPILE = {
+    "downstream_cc_check --poison (a failure says whether it was an error, a timeout or a kill)" =>
+      'MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_cc_check.sh --poison',
+    "downstream_cc_check (their emitted code still compiles)" =>
+      'MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" sh scripts/gate.sh scripts/downstream_cc_check.sh'
+  }.freeze
   COROUTINE_COMMAND = <<~'SH'.freeze
     python3 scripts/coro_runner_test.py
     python3 scripts/coro_scan_stability_check.py
@@ -175,6 +181,8 @@ module CIGates
     require!(checks.count { |s| s["name"] == FIRST_RUN } == 1, "the README execution gate must run once")
     require!(checks.count { |s| s["name"] == COROUTINES } == 1, "the coroutine gate must run once")
     require!(checks.count { |s| s["name"] == DOWNSTREAM_EXEC } == 1, "downstream execution must run once")
+    require!(DOWNSTREAM_COMPILE.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
+             "downstream object compilation and its controls must both run once")
     require!(FORMATTERS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "both formatter gates must run once")
     require!(BALANCED_CHECKS.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
@@ -219,6 +227,14 @@ module CIGates
         deps = checks.index { |s| s["name"] == "downstream_check (their code is still a program)" }
         require!(checkout && deps && checks.index(step) > checkout && checks.index(step) > deps,
                  "downstream execution needs the checkouts and resolved dependencies first")
+        assigned.fetch("downstream") << name
+      when *DOWNSTREAM_COMPILE.keys
+        require!(selected == ["downstream"] && step["run"] == DOWNSTREAM_COMPILE.fetch(name) &&
+                 !step["continue-on-error"], "downstream compilation must retain complete required commands")
+        checkout = checks.index { |s| s["name"] == CHECKOUT }
+        deps = checks.index { |s| s["name"] == "downstream_check (their code is still a program)" }
+        require!(checkout && deps && checks.index(step) > checkout && checks.index(step) > deps,
+                 "downstream compilation needs checkouts and dependencies first")
         assigned.fetch("downstream") << name
       when *FORMATTERS.keys
         require!(selected == ["downstream"], "formatter corpus gates belong to downstream")
@@ -383,6 +399,23 @@ module CIGates
     end
     mutations["missing coroutine gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == COROUTINES } }
     mutations["missing downstream execution"] = ->(c) { c[:steps].reject! { |s| s["name"] == DOWNSTREAM_EXEC } }
+    DOWNSTREAM_COMPILE.each_key do |name|
+      mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }
+      mutations["renamed #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["name"] = "compile gate renamed" }
+      mutations["optional #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["continue-on-error"] = true }
+      mutations["wrong group for #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" }
+      mutations["bypassed #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["run"] = "true" }
+      mutations["disconnected checkout for #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["run"].sub!('MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" ', "") }
+      [CHECKOUT, "downstream_check (their code is still a program)"].each do |before|
+        mutations["#{name} before #{before}"] = ->(c) {
+          step = c[:steps].find { |s| s["name"] == name }
+          c[:steps].delete(step)
+          c[:steps].insert(c[:steps].index { |s| s["name"] == before }, step)
+        }
+      end
+    end
+    mutations["downstream compile controls replaced by normal compilation"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_COMPILE.keys.first }["run"] = DOWNSTREAM_COMPILE.values.last }
+    mutations["downstream normal compilation replaced by controls"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_COMPILE.keys.last }["run"] = DOWNSTREAM_COMPILE.values.first }
     mutations["renamed downstream execution"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["name"] = "execution renamed" }
     mutations["optional downstream execution"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["continue-on-error"] = true }
     mutations["wrong downstream execution group"] = ->(c) { c[:steps].find { |s| s["name"] == DOWNSTREAM_EXEC }["if"] = "${{ !cancelled() && matrix.group == 'compiler' }}" }
