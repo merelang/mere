@@ -136,3 +136,53 @@ startup and still grow faster than linearly: the change reduces snapshot work,
 not all coroutine pin/reachability costs. These are local measurements, not an
 end-to-end CI speedup. The reproducible workload is
 [`bench/enumerator_steps.rb`](https://github.com/284km/mere-ruby/blob/244ca028/bench/enumerator_steps.rb).
+
+## Unsigned pin-word sorting
+
+Large coroutine pin lists now use stable least-significant-byte radix passes
+instead of comparison sorting. A pass is skipped when every input has the same
+byte. Lists below 256 words keep `qsort`; an unsuccessful scratch allocation
+also falls back to `qsort` before changing any input. Scratch is one temporary
+array, freed before returning. The sorted unsigned sequence retains every
+word and its multiplicity, including duplicates and high bits. Pin collection,
+reachability, cache invalidation and region retirement are unchanged.
+
+Both pin collection paths use the same helper: direct pin gathering and the
+pin collection performed by a suspended coroutine's integer-root scan.
+
+```sh
+python3 scripts/coro_pin_sort_check.py
+```
+
+The contract compares the entire output against an independent comparison
+sort, including empty/singleton lists, the 255/256/257 boundary, full-width
+random values, duplicate-heavy inputs, sorted/reverse order, common high bytes
+and one varying byte at every position. Guard words must remain untouched;
+large varying inputs must avoid `qsort`, fallback must work under forced
+allocation failure, and scratch must be released after every call. Executable
+and library runtime modes run at O2 and under ASan/UBSan.
+
+Six mutations must each produce their specific assertion witness: skipping
+the highest byte, an unstable digit pass, omitted copy-back, broken allocation
+fallback, retained scratch, and replacing the large-list path with comparison
+sorting. Crashes without that witness and timeouts do not count as detection.
+CI runs this as its own required coroutine gate.
+
+The same downstream source (`12ca1df2`) and O2 build were compared again on
+arm64 macOS 26.7.1 with Apple Clang, using the previous snapshot-update runtime
+(`40761fb8`) as control and adding only pin-word sorting. Three fresh processes
+per size and compiler alternated control/candidate, reversing order in the
+second repetition. The full regression workload finished before timing began.
+All outputs matched Ruby 4.0.9, including the generator retained across the loop.
+
+| Generators | Previous runtime median [range] seconds | With radix sorting median [range] seconds | Median peak RSS previous / radix MiB |
+|---:|---:|---:|---:|
+| 1,000 | 0.515 [0.502, 0.562] | 0.460 [0.408, 0.509] | 280.94 / 280.92 |
+| 2,000 | 2.660 [2.657, 2.700] | 1.966 [1.914, 1.971] | 340.03 / 340.89 |
+| 4,000 | 9.318 [9.192, 9.387] | 6.977 [6.855, 7.619] | 411.98 / 412.48 |
+
+At 4,000 generators the median is 25.1% shorter than the already optimized
+snapshot runtime, with comparable peak RSS. These fresh paired measurements
+isolate the sorting change; the earlier snapshot table is a separate run.
+Times include startup and still grow faster than linearly. No end-to-end CI
+speedup or linear scaling is claimed.
