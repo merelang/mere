@@ -11711,6 +11711,7 @@ let region_runtime_helpers () =
       "/* bumped whenever either list changes, so a scan can keep its sorted copy */";
       "static _Thread_local unsigned long __lang_blk_tl_gen = 1;";
       "static unsigned long __lang_blk_dl_gen = 1;";
+      "static _Thread_local void (*__lang_scan_note_block)(__lang_region_block*, int) = NULL;";
       "static void __lang_blk_link(__lang_region* r, __lang_region_block* b) {";
       "  b->dflt = (r == &__lang_default_region || r->xthread);";
       "  b->owner = r;";
@@ -11723,6 +11724,7 @@ let region_runtime_helpers () =
       "  } else {";
       "    b->gnext = __lang_blk_tl; if (__lang_blk_tl) __lang_blk_tl->gprev = b; __lang_blk_tl = b;";
       "    __lang_blk_tl_gen++;";
+      "    if (__lang_scan_note_block) __lang_scan_note_block(b, 1);";
       "  }";
       "}";
       "static void __lang_blk_unlink(__lang_region_block* b) {";
@@ -11731,7 +11733,7 @@ let region_runtime_helpers () =
       "  if (b->gprev) b->gprev->gnext = b->gnext; else *head = b->gnext;";
       "  if (b->gnext) b->gnext->gprev = b->gprev;";
       "  if (b->dflt) { __lang_blk_dl_gen++; pthread_mutex_unlock(&__lang_blk_dl_lock); }";
-      "  else __lang_blk_tl_gen++;";
+      "  else { __lang_blk_tl_gen++; if (__lang_scan_note_block) __lang_scan_note_block(b, 0); }";
       "}";
       (* v0.1.686: on macOS a block of 16 KB or more is mapped, and unmapped
          when freed. Blocks there came from malloc, which (macOS 26, by
@@ -11918,12 +11920,12 @@ let region_runtime_helpers () =
       "    (__lang_region_block*) __lang_blk_raw_alloc(sizeof(__lang_region_block) + cap);";
       "  if (!b) return 0;";
       "  __lang_block_note(b, cap);";
-      "  __lang_blk_link(r, b);";
       "  b->ep = __lang_region_epoch;";
       (* v0.1.299: the pad field (there for 16-alignment) carries the block's
          capacity, so map_bytes / vec_bytes can sum a container's private
          arena without any hot-path counter. *)
       "  b->pad = cap;";
+      "  __lang_blk_link(r, b);";
       "  b->prev = r->blocks;";
       "  r->blocks = b;";
       "  r->base = (char*)(b + 1);";
@@ -12141,9 +12143,9 @@ let region_runtime_helpers () =
       "        (__lang_region_block*) __lang_blk_raw_alloc(sizeof(__lang_region_block) + aligned);";
       "      if (!big) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "      __lang_block_note(big, aligned);";
-      "      __lang_blk_link(r, big);";
       "      big->ep = __lang_region_epoch;";
       "      big->pad = aligned;";
+      "      __lang_blk_link(r, big);";
       "      big->prev = r->blocks->prev;";
       "      r->blocks->prev = big;";
       "      void* bp = (void*)(big + 1);";
@@ -12233,8 +12235,8 @@ let region_runtime_helpers () =
       "          (__lang_region_block*) __lang_blk_raw_realloc(blk, sizeof(__lang_region_block) + blk->pad, sizeof(__lang_region_block) + new_al);";
       "        if (!nb) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "        __lang_block_note(nb, new_al);";
-      "        __lang_blk_link(r, nb);";
       "        nb->pad = new_al;";
+      "        __lang_blk_link(r, nb);";
       "        pred->prev = nb;";
       "        r->alloc_total += new_al - old_al; __lang_dsite_charge(r0, new_al - old_al);";
       "        if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
@@ -14319,15 +14321,65 @@ let coro_runtime ~(stack_bytes : int) =
       "    __lang_scan_queue(st, a, e, h2);";
       "  }";
       "}";
-      "/* the live blocks, sorted: rebuilt only when a list has changed since */";
+      "/* Keep the sorted live-block snapshot current for short bursts of local";
+      "   mutations. A bounded log avoids rebuilding/sorting the whole heap for each";
+      "   captured frame. Overflow and shared-list changes retain the full rebuild. */";
       "static _Thread_local __lang_span* __lang_scan_sp = NULL;";
       "static _Thread_local size_t __lang_scan_nsp = 0, __lang_scan_capsp = 0;";
       "static _Thread_local unsigned long __lang_scan_tlgen = 0, __lang_scan_dlgen = 0;";
+      "#define __LANG_SCAN_CHANGE_CAP 64";
+      "typedef struct { __lang_span span; int add; } __lang_scan_change;";
+      "static _Thread_local __lang_scan_change __lang_scan_changes[__LANG_SCAN_CHANGE_CAP];";
+      "static _Thread_local size_t __lang_scan_nchanges = 0;";
+      "static _Thread_local int __lang_scan_overflow = 0;";
+      "static void __lang_scan_record_block(__lang_region_block* b, int add) {";
+      "  if (__lang_scan_overflow) return;";
+      "  if (__lang_scan_nchanges == __LANG_SCAN_CHANGE_CAP) { __lang_scan_overflow = 1; return; }";
+      "  __lang_scan_change* change = &__lang_scan_changes[__lang_scan_nchanges++];";
+      "  change->span = (__lang_span){ (uintptr_t)(b + 1), (uintptr_t)(b + 1) + b->pad, b };";
+      "  change->add = add;";
+      "}";
+      "static int __lang_scan_apply_changes(void) {";
+      "  size_t limit = SIZE_MAX / sizeof(__lang_span);";
+      "  if (__lang_scan_nsp > limit || __lang_scan_nchanges > limit - __lang_scan_nsp) __lang_fail_impl(\"out of memory\");";
+      "  size_t need = __lang_scan_nsp + __lang_scan_nchanges;";
+      "  if (need > __lang_scan_capsp) {";
+      "    size_t nc = __lang_scan_capsp ? __lang_scan_capsp : 256;";
+      "    while (nc < need) { if (nc > limit / 2) { nc = need; break; } nc *= 2; }";
+      "    __lang_span* q = (__lang_span*)realloc(__lang_scan_sp, nc * sizeof(__lang_span));";
+      "    if (!q) __lang_fail_impl(\"out of memory\");";
+      "    __lang_scan_sp = q; __lang_scan_capsp = nc;";
+      "  }";
+      "  for (size_t i = 0; i < __lang_scan_nchanges; i++) {";
+      "    __lang_scan_change* change = &__lang_scan_changes[i];";
+      "    size_t lo = 0, hi = __lang_scan_nsp;";
+      "    while (lo < hi) { size_t mid = lo + (hi - lo) / 2; if (__lang_scan_sp[mid].lo < change->span.lo) lo = mid + 1; else hi = mid; }";
+      "    if (change->add) {";
+      "      if (lo < __lang_scan_nsp && __lang_scan_sp[lo].lo == change->span.lo) return 0;";
+      "      memmove(__lang_scan_sp + lo + 1, __lang_scan_sp + lo, (__lang_scan_nsp - lo) * sizeof(__lang_span));";
+      "      __lang_scan_sp[lo] = change->span;";
+      "      __lang_scan_nsp++;";
+      "    } else {";
+      "      if (lo == __lang_scan_nsp || __lang_scan_sp[lo].lo != change->span.lo || __lang_scan_sp[lo].hi != change->span.hi) return 0;";
+      "      memmove(__lang_scan_sp + lo, __lang_scan_sp + lo + 1, (__lang_scan_nsp - lo - 1) * sizeof(__lang_span));";
+      "      __lang_scan_nsp--;";
+      "    }";
+      "  }";
+      "  return 1;";
+      "}";
       "static void __lang_scan_spans(void) {";
       "  pthread_mutex_lock(&__lang_blk_dl_lock);";
-      "  if (__lang_scan_sp && __lang_scan_tlgen == __lang_blk_tl_gen && __lang_scan_dlgen == __lang_blk_dl_gen) {";
-      "    pthread_mutex_unlock(&__lang_blk_dl_lock);";
-      "    return;";
+      "  if (__lang_scan_sp && __lang_scan_dlgen == __lang_blk_dl_gen) {";
+      "    if (__lang_scan_tlgen == __lang_blk_tl_gen) { pthread_mutex_unlock(&__lang_blk_dl_lock); return; }";
+      "    if (!__lang_scan_overflow && __lang_scan_tlgen + __lang_scan_nchanges == __lang_blk_tl_gen) {";
+      "      pthread_mutex_unlock(&__lang_blk_dl_lock);";
+      "      if (__lang_scan_apply_changes()) {";
+      "        __lang_scan_tlgen = __lang_blk_tl_gen;";
+      "        __lang_scan_nchanges = 0;";
+      "        return;";
+      "      }";
+      "      pthread_mutex_lock(&__lang_blk_dl_lock);";
+      "    }";
       "  }";
       "  __lang_scan_nsp = 0;";
       "  for (int pass = 0; pass < 2; pass++)";
@@ -14338,14 +14390,13 @@ let coro_runtime ~(stack_bytes : int) =
       "        if (!q) { pthread_mutex_unlock(&__lang_blk_dl_lock); __lang_fail_impl(\"out of memory\"); }";
       "        __lang_scan_sp = q; __lang_scan_capsp = nc;";
       "      }";
-      "      __lang_scan_sp[__lang_scan_nsp].b = b;";
-      "      __lang_scan_sp[__lang_scan_nsp].lo = (uintptr_t)(b + 1);";
-      "      __lang_scan_sp[__lang_scan_nsp].hi = (uintptr_t)(b + 1) + b->pad;";
-      "      __lang_scan_nsp++;";
+      "      __lang_scan_sp[__lang_scan_nsp++] = (__lang_span){ (uintptr_t)(b + 1), (uintptr_t)(b + 1) + b->pad, b };";
       "    }";
       "  __lang_scan_tlgen = __lang_blk_tl_gen; __lang_scan_dlgen = __lang_blk_dl_gen;";
       "  pthread_mutex_unlock(&__lang_blk_dl_lock);";
       "  if (__lang_scan_nsp > 1) qsort(__lang_scan_sp, __lang_scan_nsp, sizeof(__lang_span), __lang_span_cmp);";
+      "  __lang_scan_nchanges = 0; __lang_scan_overflow = 0;";
+      "  __lang_scan_note_block = __lang_scan_record_block;";
       "}";
       (* v0.1.589: the words a SUSPENDED coroutine's stack reaches, for the pin
          (see __lang_pin_gather): the walk coro_scan_ints makes, asking for no

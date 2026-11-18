@@ -1664,6 +1664,10 @@ jobs:
       # and from the emitted IR. --poison runs the fixtures and refusals first.
       # v0.1.623: here, after the clones, so that RISC-V's column (both widths,
       # on memu, with poisons over the prelude) runs too.
+      - name: Check incremental coroutine scan index and failure witnesses
+        if: ${{ !cancelled() && matrix.group == 'coroutines' }}
+        run: opam exec -- python3 scripts/coro_scan_index_check.py
+
       - name: coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)
         if: ${{ !cancelled() && matrix.group == 'coroutines' }}
         run: |

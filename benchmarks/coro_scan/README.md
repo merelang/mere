@@ -86,3 +86,53 @@ timeouts, compilation failures and sanitizer failures are not accepted.
 The existing required coroutine gate runs these checks alongside the repeated
 scan memory bounds and full coroutine poison sweep. Wall-clock values and
 RSS do not have pass/fail thresholds in this benchmark.
+
+## Live-allocation snapshot updates
+
+Pin and root scans also consult a sorted snapshot of the live region blocks.
+After the first scan, the generated C runtime records up to 64 thread-local
+block additions/removals. A scan with an unchanged shared-list generation
+applies that short log by binary insertion/removal instead of walking and
+sorting every live block again. A full log, a shared-list change, or an
+inconsistent delta falls back to the complete locked registry walk and sort.
+
+The log captures block bounds before the block can be freed or reallocated;
+replaying an add/remove pair does not dereference its old header. New block
+capacity is initialized before registry publication. The bounded log is TLS
+storage, and recording starts only after a first scan. Programs without the
+coroutine scanner keep the hook unset. Reachability depth, pin decisions,
+region retirement and scan callbacks retain their existing semantics.
+
+```sh
+python3 scripts/coro_scan_index_check.py
+python3 scripts/coro_scan_stability_check.py
+sh scripts/coro_check.sh --poison
+```
+
+The index contract compares each snapshot with an independently walked live
+registry, including local additions/removals, batches of freed/reused blocks,
+dedicated-block growth, log overflow, another thread's shared allocations and
+TLS isolation. It requires short local updates to avoid full sorting. Both
+executable and library runtime modes run at O2 and under ASan/UBSan. Removing
+add/remove recording, accepting a stale shared list, accepting a truncated
+log, or publishing a resized block before its capacity is ready must produce
+the specific count/bounds/performance assertion witness; a crash or
+timeout alone is not accepted. CI runs this as its own coroutine gate.
+
+The downstream `mere-ruby` Enumerator workload at source `12ca1df2` was built
+at O2 with the parent compiler `b1a49f33` and with this index change. Three
+fresh processes per size and compiler, alternating control/candidate, on local
+arm64 macOS 26.7.1 with Apple Clang:
+
+| Generators | Control median [range] seconds | Candidate median [range] seconds | Median peak RSS control / candidate MiB |
+|---:|---:|---:|---:|
+| 1,000 | 1.189 [1.035, 1.244] | 0.535 [0.480, 0.776] | 281.31 / 280.16 |
+| 2,000 | 4.750 [4.486, 4.915] | 2.440 [2.438, 2.526] | 340.50 / 340.19 |
+| 4,000 | 19.731 [16.707, 21.653] | 9.839 [8.591, 10.519] | 410.61 / 411.09 |
+
+The workload repeatedly steps and drops generators while retaining another
+generator across the loop; every result must match Ruby 4.0.9. Times include
+startup and still grow faster than linearly: the change reduces snapshot work,
+not all coroutine pin/reachability costs. These are local measurements, not an
+end-to-end CI speedup. The reproducible workload is
+[`bench/enumerator_steps.rb`](https://github.com/284km/mere-ruby/blob/244ca028/bench/enumerator_steps.rb).
