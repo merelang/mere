@@ -31,8 +31,8 @@ def main():
                                  'if (__lang_scan_sp)'),
                 'truncated-log': ('if (!__lang_scan_overflow && __lang_scan_tlgen + __lang_scan_nchanges == __lang_blk_tl_gen)',
                                   'if (1)'),
-                'unpublished-capacity': ('  nb->pad = new_al;\n  __lang_blk_link(r, nb);',
-                                         '  __lang_blk_link(r, nb);\n  nb->pad = new_al;'),
+                'unpublished-capacity': ('        nb->pad = new_al;\n        __lang_blk_link(r, nb);',
+                                         '        __lang_blk_link(r, nb);\n        nb->pad = new_al;'),
             }
             for label, mutation in mutations.items():
                 text = runtime
