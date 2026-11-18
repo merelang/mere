@@ -10,7 +10,7 @@ module CIGates
 
   # Update deliberately when adding or removing checks. A deleted step must
   # not silently reduce the coverage while every remaining group is green.
-  EXPECTED_CHECKS = 199
+  EXPECTED_CHECKS = 200
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   WASM_EXTERN_GATE = "wasm_stub (which builtins answer without reaching the host)"
   WASM_EXTERN_COMMAND = "sh scripts/wasm_stub_check.sh\npython3 scripts/wasm_extern_check.py\n"
@@ -21,6 +21,8 @@ module CIGates
   FIRST_RUN = "first_run_check (the README, executed)"
   PARITY = "parity (interp / C / LLVM / wasm agree)"
   COROUTINES = "coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)"
+  COROUTINE_INDEX = "Check incremental coroutine scan index and failure witnesses"
+  COROUTINE_INDEX_COMMAND = "opam exec -- python3 scripts/coro_scan_index_check.py"
   DOWNSTREAM_EXEC = "downstream_exec (C and LLVM programs link and run)"
   DOWNSTREAM_EXEC_COMMAND = 'MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" python3 scripts/downstream_exec_check.py --poison'
   DOWNSTREAM_COMPILE = {
@@ -180,6 +182,7 @@ module CIGates
              "all three RISC-V execution partitions must run once")
     require!(checks.count { |s| s["name"] == FIRST_RUN } == 1, "the README execution gate must run once")
     require!(checks.count { |s| s["name"] == COROUTINES } == 1, "the coroutine gate must run once")
+    require!(checks.count { |s| s["name"] == COROUTINE_INDEX } == 1, "the coroutine index gate must run once")
     require!(checks.count { |s| s["name"] == DOWNSTREAM_EXEC } == 1, "downstream execution must run once")
     require!(DOWNSTREAM_COMPILE.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "downstream object compilation and its controls must both run once")
@@ -217,6 +220,10 @@ module CIGates
         require!(selected == ["coroutines"], "the coroutine gate belongs to coroutines")
         require!(step["run"] == COROUTINE_COMMAND && !step["continue-on-error"],
                  "coroutines must retain runner controls, both widths, poison probes and timings")
+        assigned.fetch("coroutines") << name
+      when COROUTINE_INDEX
+        require!(selected == ["coroutines"] && step["run"] == COROUTINE_INDEX_COMMAND &&
+                 !step["continue-on-error"], "coroutine index contracts must remain required in coroutines")
         assigned.fetch("coroutines") << name
       when DOWNSTREAM_EXEC
         require!(selected == ["downstream"] && step["run"] == DOWNSTREAM_EXEC_COMMAND,
@@ -398,6 +405,11 @@ module CIGates
       mutations["duplicated #{name}"] = ->(c) { c[:steps].find { |s| s["name"] == name }["if"] = "${{ !cancelled() && (matrix.group == 'downstream' || matrix.group == '#{original}') }}" }
     end
     mutations["missing coroutine gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == COROUTINES } }
+    mutations["missing coroutine index gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == COROUTINE_INDEX } }
+    mutations["renamed coroutine index gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_INDEX }["name"] = "index renamed" }
+    mutations["coroutine index in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_INDEX }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" }
+    mutations["optional coroutine index gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_INDEX }["continue-on-error"] = true }
+    mutations["bypassed coroutine index gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_INDEX }["run"] = "true" }
     mutations["missing downstream execution"] = ->(c) { c[:steps].reject! { |s| s["name"] == DOWNSTREAM_EXEC } }
     DOWNSTREAM_COMPILE.each_key do |name|
       mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }
