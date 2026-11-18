@@ -1672,6 +1672,10 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'coroutines' }}
         run: opam exec -- python3 scripts/coro_pin_sort_check.py
 
+      - name: Check coroutine span cache and failure witnesses
+        if: ${{ !cancelled() && matrix.group == 'coroutines' }}
+        run: opam exec -- python3 scripts/coro_span_cache_check.py
+
       - name: coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)
         if: ${{ !cancelled() && matrix.group == 'coroutines' }}
         run: |
