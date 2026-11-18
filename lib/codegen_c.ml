@@ -14091,6 +14091,31 @@ let coro_runtime ~(stack_bytes : int) =
       "  uintptr_t x = *(const uintptr_t*)a, y = *(const uintptr_t*)b;";
       "  return x < y ? -1 : x > y ? 1 : 0;";
       "}";
+      "/* Large pin lists contain unsigned addresses, often sharing their high";
+      "   bytes. Stable byte passes avoid comparison-sort callbacks; constant";
+      "   bytes need no pass. Keep qsort for small lists or scratch failure.";
+      "   Scratch lives only for this call, never in a coroutine or region. */";
+      "static void __lang_pin_sort(uintptr_t* words, size_t n) {";
+      "  if (n < 256) { if (n > 1) qsort(words, n, sizeof(uintptr_t), __lang_uptr_cmp); return; }";
+      "  uintptr_t varying = 0;";
+      "  for (size_t i = 1; i < n; i++) varying |= words[i] ^ words[0];";
+      "  if (!varying) return;";
+      "  uintptr_t* scratch = (uintptr_t*)malloc(n * sizeof(uintptr_t));";
+      "  if (!scratch) { qsort(words, n, sizeof(uintptr_t), __lang_uptr_cmp); return; }";
+      "  uintptr_t* from = words; uintptr_t* to = scratch;";
+      "  for (unsigned byte = 0; byte < sizeof(uintptr_t); byte++) {";
+      "    unsigned shift = byte * 8;";
+      "    if (!((varying >> shift) & 255)) continue;";
+      "    size_t counts[256] = {0};";
+      "    for (size_t i = 0; i < n; i++) counts[(from[i] >> shift) & 255]++;";
+      "    size_t at = 0;";
+      "    for (size_t bucket = 0; bucket < 256; bucket++) { size_t count = counts[bucket]; counts[bucket] = at; at += count; }";
+      "    for (size_t i = 0; i < n; i++) { uintptr_t word = from[i]; to[counts[(word >> shift) & 255]++] = word; }";
+      "    uintptr_t* swap = from; from = to; to = swap;";
+      "  }";
+      "  if (from != words) memcpy(words, from, n * sizeof(uintptr_t));";
+      "  free(scratch);";
+      "}";
       "static void __lang_pin_add(__lang_coro_x* x, uintptr_t w) {";
       "  if (x->pn == x->pcap) {";
       "    size_t nc = x->pcap ? x->pcap * 2 : 256;";
@@ -14129,7 +14154,7 @@ let coro_runtime ~(stack_bytes : int) =
          reach coro_scan_ints uses: as far as the pointers go inside the
          coroutine's own regions, three hops into anyone else's. *)
       "  __lang_pin_reach(c);";
-      "  if (x->pn > 1) qsort(x->pw, x->pn, sizeof(uintptr_t), __lang_uptr_cmp);";
+      "  __lang_pin_sort(x->pw, x->pn);";
       "  x->pgot = 1;";
       "}";
       "/* keep_oldest: a recycle keeps the region's first block and frees only";
@@ -14514,7 +14539,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  for (size_t done = 0; done < st.nwork; done++)";
       "    __lang_scan_words(&st, (uintptr_t*)st.work[3 * done], (uintptr_t*)st.work[3 * done + 1], (int)st.work[3 * done + 2]);";
       "  free(st.work); free(st.seen); free(st.seen_d); free(st.ownb);";
-      "  if (!running) { if (c->x->pn > 1) qsort(c->x->pw, c->x->pn, sizeof(uintptr_t), __lang_uptr_cmp); c->x->pgot = 1; }";
+      "  if (!running) { __lang_pin_sort(c->x->pw, c->x->pn); c->x->pgot = 1; }";
       "  if (keep) {";
       "    /* kept for the next ask (the bound is the caller's and grows): the";
       "       numbers themselves, not the stack's words */";
