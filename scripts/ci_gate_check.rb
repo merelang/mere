@@ -10,7 +10,7 @@ module CIGates
 
   # Update deliberately when adding or removing checks. A deleted step must
   # not silently reduce the coverage while every remaining group is green.
-  EXPECTED_CHECKS = 201
+  EXPECTED_CHECKS = 202
   PREFLIGHT = "tool_preflight (a gate that did not run is not a gate that passed)"
   WASM_EXTERN_GATE = "wasm_stub (which builtins answer without reaching the host)"
   WASM_EXTERN_COMMAND = "sh scripts/wasm_stub_check.sh\npython3 scripts/wasm_extern_check.py\n"
@@ -25,6 +25,8 @@ module CIGates
   COROUTINE_INDEX_COMMAND = "opam exec -- python3 scripts/coro_scan_index_check.py"
   COROUTINE_PIN_SORT = "Check coroutine pin sorting and failure witnesses"
   COROUTINE_PIN_SORT_COMMAND = "opam exec -- python3 scripts/coro_pin_sort_check.py"
+  COROUTINE_SPAN_CACHE = "Check coroutine span cache and failure witnesses"
+  COROUTINE_SPAN_CACHE_COMMAND = "opam exec -- python3 scripts/coro_span_cache_check.py"
   DOWNSTREAM_EXEC = "downstream_exec (C and LLVM programs link and run)"
   DOWNSTREAM_EXEC_COMMAND = 'MERE_DOWNSTREAM="$RUNNER_TEMP/downstream" python3 scripts/downstream_exec_check.py --poison'
   DOWNSTREAM_COMPILE = {
@@ -186,6 +188,7 @@ module CIGates
     require!(checks.count { |s| s["name"] == COROUTINES } == 1, "the coroutine gate must run once")
     require!(checks.count { |s| s["name"] == COROUTINE_INDEX } == 1, "the coroutine index gate must run once")
     require!(checks.count { |s| s["name"] == COROUTINE_PIN_SORT } == 1, "the coroutine pin sort gate must run once")
+    require!(checks.count { |s| s["name"] == COROUTINE_SPAN_CACHE } == 1, "the coroutine span cache gate must run once")
     require!(checks.count { |s| s["name"] == DOWNSTREAM_EXEC } == 1, "downstream execution must run once")
     require!(DOWNSTREAM_COMPILE.keys.all? { |name| checks.count { |s| s["name"] == name } == 1 },
              "downstream object compilation and its controls must both run once")
@@ -231,6 +234,10 @@ module CIGates
       when COROUTINE_PIN_SORT
         require!(selected == ["coroutines"] && step["run"] == COROUTINE_PIN_SORT_COMMAND &&
                  !step["continue-on-error"], "coroutine pin sort contracts must remain required in coroutines")
+        assigned.fetch("coroutines") << name
+      when COROUTINE_SPAN_CACHE
+        require!(selected == ["coroutines"] && step["run"] == COROUTINE_SPAN_CACHE_COMMAND &&
+                 !step["continue-on-error"], "coroutine span cache contracts must remain required in coroutines")
         assigned.fetch("coroutines") << name
       when DOWNSTREAM_EXEC
         require!(selected == ["downstream"] && step["run"] == DOWNSTREAM_EXEC_COMMAND,
@@ -422,6 +429,11 @@ module CIGates
     mutations["coroutine pin sort in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_PIN_SORT }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" }
     mutations["optional coroutine pin sort gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_PIN_SORT }["continue-on-error"] = true }
     mutations["bypassed coroutine pin sort gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_PIN_SORT }["run"] = "true" }
+    mutations["missing coroutine span cache gate"] = ->(c) { c[:steps].reject! { |s| s["name"] == COROUTINE_SPAN_CACHE } }
+    mutations["renamed coroutine span cache gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_SPAN_CACHE }["name"] = "span cache renamed" }
+    mutations["coroutine span cache in wrong group"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_SPAN_CACHE }["if"] = "${{ !cancelled() && matrix.group == 'runtime' }}" }
+    mutations["optional coroutine span cache gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_SPAN_CACHE }["continue-on-error"] = true }
+    mutations["bypassed coroutine span cache gate"] = ->(c) { c[:steps].find { |s| s["name"] == COROUTINE_SPAN_CACHE }["run"] = "true" }
     mutations["missing downstream execution"] = ->(c) { c[:steps].reject! { |s| s["name"] == DOWNSTREAM_EXEC } }
     DOWNSTREAM_COMPILE.each_key do |name|
       mutations["missing #{name}"] = ->(c) { c[:steps].reject! { |s| s["name"] == name } }

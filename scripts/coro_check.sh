@@ -394,9 +394,9 @@ if [ "$MODE" = "--poison" ]; then
   # v0.1.651 the pin's test opens a block, and the poison skips the block)
   poison c "C 9 (an arena a suspended stack points into is freed)" 's/^  if (m->owns_region \&\& __lang_region_pinned \&\& __lang_region_pinned(m->region, 0)) {$/  if (0) {/; s/^  if (__lang_region_pinners) {$/  if (0) {/' compact
   poison c "C 7 (no hand-over check)" 's/^  if (!next || next == self || next->state == 3)$/  if (!next)/' self_handoff
-  poison c "C 10 (a pointer into a live block is not followed)" 's/^    if (st->nsp == 0 || a < st->sp\[0\]\.lo || a >= st->sp\[st->nsp - 1\]\.hi) continue;$/    continue;/' scan
+  poison c "C 10 (a pointer into a live block is not followed)" 's/^    if (lo == SIZE_MAX) continue;$/    continue;/' scan
   poison c "C 11 (suspended stacks are not read)" 's/^    __lang_scan_words(&st, (uintptr_t\*)c->x->sp, (uintptr_t\*)c->x->s_hi, 0);$/    ;/' scan scan_high
-  poison c "C 13 (the coroutine's own regions are not followed to the end)" 's/^    int own = (a0 < st->nown \&\& st->ownb\[a0\] == hdr);$/    int own = 0;/' scan
+  poison c "C 13 (the coroutine's own regions are not followed to the end)" 's/^    int own = st->last_own;$/    int own = 0;/' scan
   # (No poison for the three-hop depth: a stack keeps stale slots that still
   # point at the inner nodes, so "one hop is not enough" cannot be made to
   # hold -- measured green at 1. C 10 is what shows the following matters.)

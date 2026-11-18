@@ -186,3 +186,80 @@ snapshot runtime, with comparable peak RSS. These fresh paired measurements
 isolate the sorting change; the earlier snapshot table is a separate run.
 Times include startup and still grow faster than linearly. No end-to-end CI
 speedup or linear scaling is claimed.
+
+## Per-scan allocation-range hints
+
+The word walker retains its previous last-span fast path and adds eight
+direct-mapped range hints. Each entry records an exact half-open allocation
+or gap interval, plus a span index and ownership classification for allocations.
+The previous last-span path also reuses its ownership classification. Both
+the span snapshot and the sorted own-block set are fixed for this walk.
+Cache hits validate both ends of the interval; page/bucket collisions fall
+back to binary search.
+The hints belong to the zero-initialized scan state, whose live-block snapshot
+is fixed for that walk. Nothing persists across walks, and no extra heap
+allocation is introduced. The used bump limit is still read after lookup;
+unused capacity, tag masking, ownership and foreign-hop rules retain their
+existing checks.
+
+```sh
+python3 scripts/coro_span_cache_check.py
+```
+
+An independent linear membership oracle covers empty and singleton snapshots,
+exact boundaries, gaps, interleaved spans, intentional cache collisions, random
+addresses and values near `UINTPTR_MAX`. Repeated noncolliding allocation and
+gap traces must stop invoking binary search after warmup. An actual region's
+bump top is changed after warming lookup, and the walker must still reject its
+unused capacity. Executable/library modes run at O2 and under ASan/UBSan.
+Nine mutations require specific witnesses: bypassed range validation, an
+inclusive cached end, treating a gap as a hit, an incorrect cached index,
+incorrect reused/initial ownership, skipped used-limit checks, disabled
+caching and disabled gap caching. The existing coroutine poisons for following
+live pointers and a coroutine's own regions now target the refactored walker.
+
+For a diagnostic census of the single-evaluator Enumerator workload, use
+`lookup_probe.py INPUT.c OUTPUT.c` to instrument each compiler's emitted C,
+then build that C with the same downstream glue/flags and run
+`bench/enumerator_steps.rb 4000`. The driver checks every insertion marker
+and preserves arbitrary bytes in emitted C. It is limited to this workload's
+single evaluator; its counters are not synchronized for other workloads.
+Use separate, uninstrumented interpreters for timing.
+
+On the same `12ca1df2` downstream source, the previous radix-sorting runtime
+(`4720aa93`) and this range-hint runtime produce these per-process counts:
+
+| Diagnostic | Previous runtime | Range hints |
+|---|---:|---:|
+| Words visited | 330,561,669 | 331,912,246 |
+| Addresses within the broad allocation bounds | 110,155,682 | 110,704,609 |
+| Binary searches | 28,551,057 | 14,369,964 |
+| Binary searches ending in a gap | 17,628,740 | 7,282,594 |
+| Additional eight-entry cache hits | — | 14,322,986 |
+| Of those, gap hits | — | 10,452,652 |
+| Ownership lookups | 92,228,524 | 7,087,370 |
+
+The new cache answers 49.9% of lookups not resolved by the existing last-span
+check. Binary-search counts are 49.7% lower and ownership lookups 92.3% lower
+in this comparison. Conservative scanning and address layout can slightly
+change the total words visited;
+these are diagnostic counts, not timing or memory measurements.
+
+For an uninstrumented timing comparison, the same downstream runtime source
+(`12ca1df2`) was built at O2 with the parent compiler (`4720aa93`) and this
+change. On arm64 macOS 26.7.1 with Apple Clang, three fresh processes per size
+and compiler alternated control/candidate, reversing order in the middle
+repetition. All regression workloads finished before timing began. Every
+sample matched Ruby 4.0.9 and retained the other generator across the loop.
+
+| Generators | Parent median [range] seconds | Range/ownership cache median [range] seconds | Median peak RSS parent / cache MiB |
+|---:|---:|---:|---:|
+| 1,000 | 0.438 [0.428, 0.457] | 0.410 [0.388, 0.424] | 281.48 / 281.14 |
+| 2,000 | 1.891 [1.802, 2.050] | 1.732 [1.660, 1.913] | 340.84 / 340.70 |
+| 4,000 | 6.612 [6.400, 6.696] | 6.042 [5.967, 6.613] | 412.05 / 409.77 |
+
+The 4,000-generator median is 8.6% shorter, with overlapping ranges and
+comparable peak RSS. The earlier tables are separate measurements; these
+fresh pairs isolate the range/ownership cache against its parent. Timings
+include startup, scaling still grows faster than linearly, and these local
+measurements do not establish an end-to-end CI speedup.
