@@ -28,7 +28,8 @@ def main():
             "unbounded-grown": ("#define __LANG_REGION_KEEP_MAX (16 * 1024 * 1024)",
                                 "#define __LANG_REGION_KEEP_MAX (64 * 1024 * 1024)"),
             "worker-leak": ("while (__lang_region_cache_n > 0)", "while (0 && __lang_region_cache_n > 0)"),
-            "dirty-reuse": ("if (zlen) memset(zat, 0, zlen);", "if (0) memset(zat, 0, zlen);"),
+            "dirty-reuse": ("if (zlen) __lang_region_clear_cached(zat, zlen);",
+                            "if (0) __lang_region_clear_cached(zat, zlen);"),
         }
         for label, mutation in mutations.items():
             text = runtime
@@ -87,6 +88,13 @@ def main():
                 raise RuntimeError(name + ": " + run.stdout + run.stderr)
 
         contract("cache_zero_contract.c", runtime)
+        contract("cache_clear_contract.c", runtime)
+        if sys.platform.startswith("linux"):
+            old = "&& madvise((void*)lo, (size_t)(hi - lo), MADV_DONTNEED) == 0"
+            if runtime.count(old) != 1:
+                raise RuntimeError("cached page discard mutation must match exactly once")
+            contract("cache_clear_contract.c", runtime.replace(old,
+                     "&& (memset((void*)lo, 0, (size_t)(hi - lo)), 1)"), rejected=True)
         if sys.platform == "darwin":
             contract("mapped_pool_zero_contract.c", runtime)
             contract("mapped_pool_zero_contract.c", runtime, sanitize=True)
@@ -104,6 +112,8 @@ def main():
         contract("trim_contract.c", runtime.replace(old, "while (0 && __lang_region_cache_n > __LANG_REGION_CACHE_GROWN)"),
                  rejected=True)
         suffix = "; Darwin mapped-pool zeroing and ASan/UBSan pass; missing scrub mutation caught" if sys.platform == "darwin" else ""
+        if sys.platform.startswith("linux"):
+            suffix += "; cached pages discarded, partial boundaries and errno preserved, failed discard falls back; resident-page mutation caught"
         print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup, zeroed reuse; 6 mutations caught; configured caps 1/4/8/64 pass, invalid caps rejected; zeroing paths and active/concurrent trim contracts pass; trim mutation caught" + suffix)
 
 
