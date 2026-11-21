@@ -13107,6 +13107,13 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          the survivors, clear, re-set. *)
       Printf.sprintf "static int %s_clear(%s* m) {" struct_name struct_name;
       "  __LANG_OWNED(m, \"Map\", \"map_clear\");";
+      (* A suspended stack may still reach the backing arrays. Removed slots
+         must not keep their old references in the conservative pin graph.
+         Copies already borrowed by a caller remain untouched. *)
+      "  if (m->len > 0) {";
+      "    memset(m->keys, 0, (size_t)m->len * sizeof(*m->keys));";
+      "    memset(m->values, 0, (size_t)m->len * sizeof(*m->values));";
+      "  }";
       "  m->len = 0;";
       "  m->live = 0;";
       "  for (int i = 0; i < m->idx_cap; i++) m->idx[i] = -1;";
@@ -13455,6 +13462,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "    int i = m->idx[s];";
       Printf.sprintf "    if (i >= 0 && %s) {" (key_eq_expr "m->keys[i]" "__mk");
       "      m->dead[i] = 1;";
+      "      memset(&m->keys[i], 0, sizeof(m->keys[i]));";
+      "      memset(&m->values[i], 0, sizeof(m->values[i]));";
       "      m->live--;";
       (* -2 and not -1: a key inserted after this one may sit further along this
          probe chain, and -1 would end the probe before reaching it. *)
