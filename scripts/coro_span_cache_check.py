@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check cached span lookup against linear membership and failure witnesses."""
+"""Check span lookup and removed Map references in the coroutine pin walk."""
 import os
 from pathlib import Path
 import resource
@@ -16,12 +16,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix='mere-span-cache-') as directory:
         temp = Path(directory)
         source = temp / 'probe.mere'
-        source.write_text('let root = coro_root ();\n'
+        source.write_text('let values = vec_new (); let _ = vec_push values 1;\n'
+                          'let entries = map_new (); let _ = map_set entries "key" values;\n'
+                          'let root = coro_root ();\n'
                           'let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit root ());\n'
                           'let _ = coro_switch c; ()\n')
         for library in (False, True):
             command = [MERE] + (['--lib-instance'] if library else []) + ['-c', str(source)]
             runtime = subprocess.check_output(command, text=True, timeout=60)
+            pristine_runtime = runtime
             marker = '    size_t l2 = 0, h2 = st->nsp;'
             assert runtime.count(marker) == 1
             runtime = runtime.replace(marker, '    lookup_searches++;\n' + marker)
@@ -72,6 +75,42 @@ def main():
                                               result.returncode, result.stdout, result.stderr))
             print(('library' if library else 'executable') +
                   ': O2 and ASan/UBSan span cache contracts passed; nine mutations caught', flush=True)
+            slot_mutations = {
+                'healthy': None,
+                'delete-key': ('memset(&m->keys[i], 0, sizeof(m->keys[i]));',
+                               'deleted key remains reachable'),
+                'delete-value': ('memset(&m->values[i], 0, sizeof(m->values[i]));',
+                                 'deleted value remains reachable'),
+                'clear-key': ('memset(m->keys, 0, (size_t)m->len * sizeof(*m->keys));',
+                              'cleared key remains reachable'),
+                'clear-value': ('memset(m->values, 0, (size_t)m->len * sizeof(*m->values));',
+                                'cleared value remains reachable'),
+            }
+            for label, mutation in slot_mutations.items():
+                text = pristine_runtime
+                if mutation:
+                    old, witness = mutation
+                    assert text.count(old) == 1, ('slot mutation must match once', library, label)
+                    text = text.replace(old, '(void)0;')
+                (temp / 'runtime.c').write_text(text)
+                modes = ('O2', 'sanitized') if label == 'healthy' else ('O2',)
+                for mode in modes:
+                    flags = ['-O2'] if mode == 'O2' else ['-O1', '-g', '-fsanitize=address,undefined',
+                                                        '-fno-sanitize-recover=all']
+                    subprocess.run([CC, *flags, '-w', '-pthread', '-I', str(temp),
+                                    str(ROOT / 'test/coro/map_slots_contract.c'), '-lm', '-o', str(binary)],
+                                   check=True, timeout=90)
+                    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60,
+                                            env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0',
+                                                     UBSAN_OPTIONS='halt_on_error=1'))
+                    if label == 'healthy':
+                        if result.returncode or 'live and borrowed values survive' not in result.stdout:
+                            raise AssertionError((library, mode, result.returncode, result.stdout, result.stderr))
+                    elif result.returncode == 0 or witness not in result.stderr:
+                        raise AssertionError(('missing slot witness', library, label,
+                                              result.returncode, result.stdout, result.stderr))
+            print(('library' if library else 'executable') +
+                  ': O2 and ASan/UBSan removed Map slot contracts passed; four mutations caught', flush=True)
 
 
 if __name__ == '__main__':
