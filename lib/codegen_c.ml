@@ -12805,9 +12805,10 @@ let region_runtime_helpers () =
          took. 4,096 acquisitions is far below what a program does between
          a leak test's two measurements (about a million there) and far
          above a loop of collections. *)
+      "#define __LANG_MEM_TRIM_WORK 4096";
       "static _Thread_local unsigned long __lang_mem_trim_seq = 0;";
       "__attribute__((unused)) static int __lang_mem_trim(void) {";
-      "  int __all = __lang_region_seq_ctr - __lang_mem_trim_seq >= 4096;";
+      "  int __all = __lang_region_seq_ctr - __lang_mem_trim_seq >= __LANG_MEM_TRIM_WORK;";
       "  __lang_mem_trim_seq = __lang_region_seq_ctr;";
       "  while (__lang_region_cache_n > (__all ? 0 : __LANG_REGION_CACHE_GROWN)) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
