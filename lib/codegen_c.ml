@@ -12934,6 +12934,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
   let c_k = c_type_of k_ty in
   let c_v = c_type_of v_ty in
   let struct_name = Printf.sprintf "mere_map_%s_%s" k_tag v_tag in
+  let is_str_key = (match k_ty with Ast.TyStr -> true | _ -> false) in
   let rec key_eq_for k a b =
     match Ast.walk k with
     | Ast.TyInt | Ast.TyBool -> Printf.sprintf "(%s) == (%s)" a b
@@ -13046,6 +13047,16 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  int owns_region;  /* 1 after the first compact: region is private and freeable */";
       "  __lang_region* home;  /* v0.1.567: where this struct itself lives -- `region` moves */";
       "  int owner;  /* v0.1.575: the thread that made it, the only one that may write it */";
+      (* The last entry found by a String key: the key pointer it was asked
+         with and its dense index. A lookup with the same key pointer reads
+         that slot first, and uses it only if the slot is in range, live and
+         holds an equal key -- keys are unique among live entries, so that is
+         the entry wherever the map has been since. `if map_has m k then
+         map_get m k else d` hashed k twice. Kept in the map, not in a
+         thread-local: on macOS each read of one is a call. Only before a
+         second thread starts: a container other threads read is shared and
+         read-only (__LANG_READ), and a read must not write it then. *)
+      (if is_str_key then "  const char* last_k;\n  int last_i;" else "");
       Printf.sprintf "} %s;" struct_name;
       "";
       (* new *)
@@ -13067,6 +13078,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  m->idx_cap = 0;";
       "  m->idx = 0;";
       "  m->idx_used = 0;";
+      (if is_str_key then "  m->last_k = 0;\n  m->last_i = 0;" else "");
       "  return m;";
       "}";
       "";
@@ -13428,12 +13440,20 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
         c_v struct_name struct_name c_k;
       "  __LANG_READ(m);";
       "  if (m->live == 0) __lang_fail_impl(\"map_get: key not found in Map (use map_has to check first)\");";
+      (if is_str_key then
+         Printf.sprintf "  if (!__lang_threads_started && m->last_k == __mk) { int i = m->last_i; if (i < m->len && !m->dead[i] && %s) return m->values[i]; }"
+           (key_eq_expr "m->keys[i]" "__mk")
+       else "");
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (i >= 0 && %s) return m->values[i];"
-        (key_eq_expr "m->keys[i]" "__mk");
+      (if is_str_key then
+         Printf.sprintf "    if (i >= 0 && %s) { if (!__lang_threads_started) { m->last_k = __mk; m->last_i = i; } return m->values[i]; }"
+           (key_eq_expr "m->keys[i]" "__mk")
+       else
+         Printf.sprintf "    if (i >= 0 && %s) return m->values[i];"
+           (key_eq_expr "m->keys[i]" "__mk"));
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       (* v0.1.268: through the same failure path every other `fail` uses, so a
@@ -13449,12 +13469,20 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
         struct_name struct_name c_k;
       "  __LANG_READ(m);";
       "  if (m->live == 0) return 0;";
+      (if is_str_key then
+         Printf.sprintf "  if (!__lang_threads_started && m->last_k == __mk) { int i = m->last_i; if (i < m->len && !m->dead[i] && %s) return 1; }"
+           (key_eq_expr "m->keys[i]" "__mk")
+       else "");
       Printf.sprintf "  unsigned long long h = %s;" (key_hash_expr "__mk");
       "  int s = (int)(h & (unsigned long long)(m->idx_cap - 1));";
       "  while (m->idx[s] != -1) {";
       "    int i = m->idx[s];";
-      Printf.sprintf "    if (i >= 0 && %s) return 1;"
-        (key_eq_expr "m->keys[i]" "__mk");
+      (if is_str_key then
+         Printf.sprintf "    if (i >= 0 && %s) { if (!__lang_threads_started) { m->last_k = __mk; m->last_i = i; } return 1; }"
+           (key_eq_expr "m->keys[i]" "__mk")
+       else
+         Printf.sprintf "    if (i >= 0 && %s) return 1;"
+           (key_eq_expr "m->keys[i]" "__mk"));
       "    s = (s + 1) & (m->idx_cap - 1);";
       "  }";
       "  return 0;";

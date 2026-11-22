@@ -1,0 +1,55 @@
+// A String-keyed map remembers the entry its last lookup found, by the key's
+// pointer and the entry's dense index, and reads that slot first the next
+// time the same pointer is asked. Whatever happened to the map in between --
+// a delete, a re-insert, a squeeze, a growth, a compact, a clear, a recycle,
+// the same text under another pointer -- the answer is the map's own.
+let m = map_new ();
+let k = "alpha" ++ "";
+let _ = map_set m k 1;
+let _ = map_set m "beta" 2;
+let show_has = fn (b: bool) -> if b then "y" else "n";
+// the pair the cache is for
+let a1 = if map_has m k then map_get m k else 0 - 1;
+// deleted: the remembered slot is dead now
+let _ = map_delete m k;
+let a2 = show_has (map_has m k);
+// re-inserted: a new slot with a new value
+let _ = map_set m k 3;
+let a3 = map_get m k;
+// many deletes and inserts: the dense arrays are squeezed and the index grown
+let rec churn = fn (i: int) ->
+  if i >= 200 then ()
+  else (let n = "k" ++ str_of_int i in
+        let _ = map_set m n i in
+        let _ = (if i % 3 == 0 then map_delete m n else ()) in
+        churn (i + 1));
+let _ = churn 0;
+let a4 = map_get m k;
+let a5 = map_get m "k10";
+let _ = map_delete m k;
+let _ = churn 0;
+let a6 = show_has (map_has m k);
+let _ = map_set m k 4;
+// compacted: the arrays move to a new arena
+let _ = map_compact m;
+let a7 = map_get m k;
+// the same text, another pointer
+let k2 = "al" ++ "pha";
+let a8 = map_get m k2;
+// cleared, then recycled
+let _ = map_clear m;
+let a9 = show_has (map_has m k);
+let _ = map_set m "zeta" 9;
+let _ = map_set m k 5;
+let b1 = map_get m k;
+let _ = map_recycle m;
+let b2 = show_has (map_has m k);
+let _ = map_set m k 6;
+let b3 = map_get m k;
+// two maps asked with the same pointer in turn
+let n = map_new ();
+let _ = map_set n k 7;
+let b4 = map_get m k + map_get n k * 10 + map_get m k * 100;
+print (str_of_int a1 ++ " " ++ a2 ++ " " ++ str_of_int a3 ++ " " ++ str_of_int a4 ++ " " ++ str_of_int a5
+       ++ " " ++ a6 ++ " " ++ str_of_int a7 ++ " " ++ str_of_int a8 ++ " " ++ a9 ++ " " ++ str_of_int b1
+       ++ " " ++ b2 ++ " " ++ str_of_int b3 ++ " " ++ str_of_int b4)
