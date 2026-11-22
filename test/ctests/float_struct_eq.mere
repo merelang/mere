@@ -1,0 +1,15 @@
+// Structural equality of compound values that hold a float: a tuple, a
+// record and a variant payload compare their floats by value (IEEE), as the
+// interpreter does -- the native eq_ for a float element answered 0, so such
+// a value never equalled even itself.
+type P = { x: float, n: int };
+type 'a opt = None | Some of 'a;
+let b = fn (v: bool) -> if v then "t" else "f";
+let nan = 0.0 / 0.0;
+let p = P { x = 1.5, n = 2 };
+let q = P { x = 1.5, n = 2 };
+let r = P { x = 2.5, n = 2 };
+print (b ((1.5, 2) == (1.5, 2)) ++ b ((1.5, 2) == (2.5, 2)) ++ b ((1.5, 2) != (1.5, 2))
+       ++ b (p == q) ++ b (p == r)
+       ++ b (Some 1.5 == Some 1.5) ++ b (Some 1.5 == Some 2.5) ++ b ((None: float opt) == None)
+       ++ b ((nan, 1) == (nan, 1)) ++ b (((0.0, 1), 2) == ((-0.0, 1), 2)))

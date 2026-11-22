@@ -6661,6 +6661,12 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
     Printf.sprintf
       "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n\
       \    (i64.extend_i32_u (i64.eq (local.get $a) (local.get $b))))" tag
+  (* A float is a boxed f64 here (as in cmp_ below): its value is compared,
+     IEEE, not the box. *)
+  | Ast.TyFloat ->
+    Printf.sprintf
+      "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n\
+      \    (i64.extend_i32_u (f64.eq (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $a))) (f64.load offset=0 align=8 (i32.wrap_i64 (local.get $b))))))" tag
   | Ast.TyStr ->
     Printf.sprintf
       "  (func $eq_%s (param $a i64) (param $b i64) (result i64)\n\

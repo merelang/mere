@@ -6841,6 +6841,11 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
   let header = Printf.sprintf "static int eq_%s(%s a, %s b)" tag cty cty in
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool -> header ^ " { return a == b; }"
+  (* A float inside a compound value compares as a float (IEEE: a NaN equals
+     nothing), as the interpreter's value_eq and the LLVM backend's fcmp oeq
+     do. It fell to the catch-all below and answered 0, so a tuple, record or
+     variant holding a float never equalled even itself. *)
+  | Ast.TyFloat -> header ^ " { return a == b; }"
   (* v0.1.620: by length, as `==` compares (strcmp stopped at a NUL) *)
   | Ast.TyStr -> header ^ " { return __lang_str_eq(a, b); }"
   | Ast.TyUnit -> header ^ " { (void)a; (void)b; return 1; }"
@@ -12788,8 +12793,13 @@ let region_runtime_helpers () =
       (* Release inactive cached regions first: their freed blocks may enter
          Darwin's shared kept pool. Drain that pool under its existing lock.
          Active data is unaffected; other threads may refill the shared pool. *)
+      (* Every cached region is released, the eight that may hold a grown
+         block included: an explicit trim is asked for after a collection,
+         when those blocks are the collector's own scratch (megabytes each)
+         and the next request can map a fresh seed. Keeping them held a
+         program's RSS a quarter above what it had live. *)
       "__attribute__((unused)) static int __lang_mem_trim(void) {";
-      "  while (__lang_region_cache_n > __LANG_REGION_CACHE_GROWN) {";
+      "  while (__lang_region_cache_n > 0) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
       "    __lang_region_free(r); free(r);";
       "  }";
