@@ -119,10 +119,16 @@ def main():
             raise RuntimeError("trim-after-work mutation must match exactly once")
         contract("trim_contract.c", runtime.replace(old, "(0 ? 0 : __LANG_REGION_CACHE_GROWN)"), rejected=True)
         contract("trim_contract.c", runtime.replace(old, "(1 ? 0 : __LANG_REGION_CACHE_GROWN)"), rejected=True)
+        # (...and the counting: a reuse from the cache that no longer counts
+        #  as an acquisition never reaches the release after real work)
+        old = "r->seq = ++__lang_region_seq_ctr; r->keep = NULL;"
+        if runtime.count(old) != 1:
+            raise RuntimeError("reuse-count mutation must match exactly once")
+        contract("trim_contract.c", runtime.replace(old, "r->seq = __lang_region_seq_ctr; r->keep = NULL;"), rejected=True)
         suffix = "; Darwin mapped-pool zeroing and ASan/UBSan pass; missing scrub mutation caught" if sys.platform == "darwin" else ""
         if sys.platform.startswith("linux"):
             suffix += "; cached pages discarded, partial boundaries and errno preserved, failed discard falls back; resident-page mutation caught"
-        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup, zeroed reuse; 6 mutations caught; configured caps 1/4/8/64 pass, invalid caps rejected; zeroing paths and active/concurrent trim contracts pass; release after work empties the cache and spares active data and other threads; trim and never/always-release mutations caught" + suffix)
+        print("region_cache: depth 8/9/40/63/64/65/80/128, mixed/grown bounds, TLS isolation and normal/failed worker cleanup, zeroed reuse; 6 mutations caught; configured caps 1/4/8/64 pass, invalid caps rejected; zeroing paths and active/concurrent trim contracts pass; release after work empties the cache and spares active data and other threads; real acquisitions reach it; trim, never/always-release and uncounted-reuse mutations caught" + suffix)
 
 
 if __name__ == "__main__":

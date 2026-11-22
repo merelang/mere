@@ -80,6 +80,21 @@ static void cycle_after_work(int grown) {
   assert(__lang_region_active_n == 0);
   drain();
 }
+/* ...and the work done for real: __LANG_MEM_TRIM_WORK acquisitions, nearly
+   all of them from the cache, move the counter far enough that the next trim
+   releases the cache -- so the counting is tested, not only the release. */
+static void cycle_real_work(void) {
+  assert(__lang_region_cache_n == 0);
+  __lang_mem_trim();
+  for (int i = 0; i < __LANG_MEM_TRIM_WORK; i++)
+    __lang_region_block_release(__lang_region_block_acquire("real work"));
+  __lang_region *regions[10];
+  for (int i = 0; i < 10; i++) regions[i] = __lang_region_block_acquire("fill after work");
+  for (int i = 9; i >= 0; i--) __lang_region_block_release(regions[i]);
+  assert(__lang_region_cache_n == (__LANG_REGION_CACHE_CAP < 10 ? __LANG_REGION_CACHE_CAP : 10));
+  __lang_mem_trim();
+  assert(__lang_region_cache_n == 0 && __lang_region_active_n == 0);
+}
 /* Another thread's trim after work leaves this thread's cache as it was. */
 static _Atomic int side_filled, side_trimmed;
 static void *side(void *unused) {
@@ -99,6 +114,7 @@ static void *worker(void *unused) {
   (void)unused;
   for (int i = 0; i < 4; i++) cycle(i % 2, 0);
   cycle_after_work(1);
+  cycle_real_work();
   return NULL;
 }
 int main(void) {
@@ -108,6 +124,7 @@ int main(void) {
   cycle(1, 1);
   cycle_after_work(0);
   cycle_after_work(1);
+  cycle_real_work();
   pthread_t threads[2];
   for (int i = 0; i < 2; i++) assert(!pthread_create(&threads[i], NULL, worker, NULL));
   for (int i = 0; i < 2; i++) cycle(i % 2, 0);
