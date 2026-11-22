@@ -13060,8 +13060,11 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          conservative walks of a suspended stack (coro_scan_ints, the pins)
          follow any word that points into a live block -- a lookup key is
          often a temporary in a per-call region, which a plain pointer here
-         would keep, the retention #86 took out of cleared slots. ~k lies
-         above every user-space address and is never 0. *)
+         would keep, the retention #86 took out of cleared slots. On a 64-bit
+         host ~k lies above every user-space address; on a 32-bit one it is
+         only unlikely to fall in a live block, and if it did the cost would
+         be one block kept, never a wrong answer. It is never 0 (k is never
+         UINTPTR_MAX), so 0 still means nothing remembered. *)
       (if is_str_key then "  uintptr_t last_kx;\n  int last_i;" else "");
       Printf.sprintf "} %s;" struct_name;
       "";
