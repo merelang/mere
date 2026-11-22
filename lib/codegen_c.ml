@@ -6841,6 +6841,11 @@ let emit_eq_fn (tag : string) (t : Ast.ty) : string =
   let header = Printf.sprintf "static int eq_%s(%s a, %s b)" tag cty cty in
   match Ast.walk t with
   | Ast.TyInt | Ast.TyBool -> header ^ " { return a == b; }"
+  (* A float inside a compound value compares as a float (IEEE: a NaN equals
+     nothing), as the interpreter's value_eq and the LLVM backend's fcmp oeq
+     do. It fell to the catch-all below and answered 0, so a tuple, record or
+     variant holding a float never equalled even itself. *)
+  | Ast.TyFloat -> header ^ " { return a == b; }"
   (* v0.1.620: by length, as `==` compares (strcmp stopped at a NUL) *)
   | Ast.TyStr -> header ^ " { return __lang_str_eq(a, b); }"
   | Ast.TyUnit -> header ^ " { (void)a; (void)b; return 1; }"
@@ -12788,8 +12793,24 @@ let region_runtime_helpers () =
       (* Release inactive cached regions first: their freed blocks may enter
          Darwin's shared kept pool. Drain that pool under its existing lock.
          Active data is unaffected; other threads may refill the shared pool. *)
+      (* A trim after real work releases every cached region, the eight
+         that may hold a grown block included: those blocks are then the
+         collector's own scratch (megabytes each), and keeping them held a
+         downstream leak test's RSS a quarter above what it had live. A
+         trim right after another -- a GC.start loop, 75 region
+         acquisitions apart in that program -- keeps them, as before, so
+         the next collection does not map and fault its scratch again:
+         releasing them on every call made 2,000 GC.starts 21% slower
+         (4.5 s -> 5.45 s); with the threshold they take the time they
+         took. 4,096 acquisitions is far below what a program does between
+         a leak test's two measurements (about a million there) and far
+         above a loop of collections. *)
+      "#define __LANG_MEM_TRIM_WORK 4096";
+      "static _Thread_local unsigned long __lang_mem_trim_seq = 0;";
       "__attribute__((unused)) static int __lang_mem_trim(void) {";
-      "  while (__lang_region_cache_n > __LANG_REGION_CACHE_GROWN) {";
+      "  int __all = __lang_region_seq_ctr - __lang_mem_trim_seq >= __LANG_MEM_TRIM_WORK;";
+      "  __lang_mem_trim_seq = __lang_region_seq_ctr;";
+      "  while (__lang_region_cache_n > (__all ? 0 : __LANG_REGION_CACHE_GROWN)) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
       "    __lang_region_free(r); free(r);";
       "  }";
