@@ -12793,13 +12793,23 @@ let region_runtime_helpers () =
       (* Release inactive cached regions first: their freed blocks may enter
          Darwin's shared kept pool. Drain that pool under its existing lock.
          Active data is unaffected; other threads may refill the shared pool. *)
-      (* Every cached region is released, the eight that may hold a grown
-         block included: an explicit trim is asked for after a collection,
-         when those blocks are the collector's own scratch (megabytes each)
-         and the next request can map a fresh seed. Keeping them held a
-         program's RSS a quarter above what it had live. *)
+      (* A trim after real work releases every cached region, the eight
+         that may hold a grown block included: those blocks are then the
+         collector's own scratch (megabytes each), and keeping them held a
+         downstream leak test's RSS a quarter above what it had live. A
+         trim right after another -- a GC.start loop, 75 region
+         acquisitions apart in that program -- keeps them, as before, so
+         the next collection does not map and fault its scratch again:
+         releasing them on every call made 2,000 GC.starts 21% slower
+         (4.5 s -> 5.45 s); with the threshold they take the time they
+         took. 4,096 acquisitions is far below what a program does between
+         a leak test's two measurements (about a million there) and far
+         above a loop of collections. *)
+      "static _Thread_local unsigned long __lang_mem_trim_seq = 0;";
       "__attribute__((unused)) static int __lang_mem_trim(void) {";
-      "  while (__lang_region_cache_n > 0) {";
+      "  int __all = __lang_region_seq_ctr - __lang_mem_trim_seq >= 4096;";
+      "  __lang_mem_trim_seq = __lang_region_seq_ctr;";
+      "  while (__lang_region_cache_n > (__all ? 0 : __LANG_REGION_CACHE_GROWN)) {";
       "    __lang_region* r = __lang_region_cache[--__lang_region_cache_n];";
       "    __lang_region_free(r); free(r);";
       "  }";
