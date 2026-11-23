@@ -663,6 +663,113 @@ let rv_thread_fns =
     ("channel_recv", ("rvch_recv", 1)); ("channel_recv_opt", ("rvch_recv_opt", 1));
     ("channel_recv_timeout", ("rvch_recv_timeout", 2)); ("channel_close", ("rvch_close", 1));
     ("channel_sender", ("rvch_sender", 2)) ]
+
+(* the tops map: top-level function name -> (params, body) *)
+let tops : (string, string list * Ast.expr) Hashtbl.t = Hashtbl.create 64
+
+(* constructor name -> tag (index within its type, declaration order), read
+   by Constr (writes the tag) and Match (compares against it). Distinct only
+   within a type, which is all Match needs. Populated from Top_type decls. *)
+let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 32
+(* variant type name -> are ALL its constructors nullary? (an "enum"). Such
+   values are 1-word [tag] blocks, so structural `==` is just a tag compare. *)
+let type_all_nullary : (string, bool) Hashtbl.t = Hashtbl.create 16
+let tag_of loc name =
+  match Hashtbl.find_opt variant_tags (Ast.canonical_ctor name) with
+  | Some t -> t
+  | None -> err loc (Printf.sprintf "RV32I: unknown constructor `%s`" name)
+
+(* record type name -> field names in declaration order. A record value is a
+   heap block laid out in that order; a field's offset is its index. *)
+let record_fields : (string, string list) Hashtbl.t = Hashtbl.create 16
+(* richer type info for structural equality: type params + constructor payload
+   types / record field types, from Top_type / Top_record decls *)
+let type_variants : (string, string list * (string * Ast.ty option) list) Hashtbl.t = Hashtbl.create 16
+let type_records : (string, string list * (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 16
+
+
+
+let record_order loc name =
+  match Hashtbl.find_opt record_fields name with
+  | Some fs -> fs
+  | None -> err loc (Printf.sprintf "RV32I: unknown record type `%s`" name)
+let field_index loc recname field =
+  let rec go i = function
+    | [] -> err loc (Printf.sprintf "RV32I: record `%s` has no field `%s`" recname field)
+    | f :: _ when f = field -> i
+    | _ :: rest -> go (i + 1) rest
+  in
+  go 0 (record_order loc recname)
+
+(* --- structural equality (==/!=) on compound types ----------------------
+   Generate a per-type `__eq_<tag>(a,b) -> 0/1` helper (deduped by ty_tag,
+   emitted on a worklist so recursive types terminate), mirroring codegen_c's
+   eq_<tag>. Type params are substituted with the concrete args at the use
+   site, so `list int` and `list str` get distinct, monomorphic helpers. *)
+let rec ty_tag (t : Ast.ty) : string =
+  match resolve_ty t with
+  | Ast.TyInt -> "int" | Ast.TyBool -> "bool" | Ast.TyStr -> "str"
+  | Ast.TyUnit -> "unit" | Ast.TyFloat -> "float" | Ast.TyBytes -> "bytes"
+  | Ast.TySimd Ast.U8x16 -> "u8x16"   (* Q-110: a pointer to a 16-byte box; the lanes live in RVV registers only inside an operation *)
+  (* v0.1.656: no float unit here, so no vector one: f64x2 and f32x4 are the
+     prelude's boxes of lanes (rvf2 / rvf4), made and used by its functions *)
+  | Ast.TySimd Ast.F32x4 -> "f32x4"
+  | Ast.TySimd Ast.F64x2 -> "f64x2"
+  | Ast.TyTuple ts -> "t" ^ String.concat "_" (List.map ty_tag ts) ^ "_"
+  | Ast.TyCon (n, []) -> n
+  | Ast.TyCon (n, args) -> n ^ "_" ^ String.concat "_" (List.map ty_tag args) ^ "_"
+  | Ast.TyParam p -> "p" ^ p
+  | Ast.TyVar _ -> "var"
+  | Ast.TyArrow _ -> "fn"
+  | Ast.TyRef (_, _, t) -> "r" ^ ty_tag t
+
+let rec zip_tyenv ps args =
+  match ps, args with p :: ps', a :: args' -> (p, a) :: zip_tyenv ps' args' | _ -> []
+let rec subst_ty (env : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
+  match resolve_ty t with
+  | Ast.TyParam p -> (match List.assoc_opt p env with Some t' -> t' | None -> Ast.TyParam p)
+  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_ty env) args)
+  | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_ty env) ts)
+  | Ast.TyArrow (a, b) -> Ast.TyArrow (subst_ty env a, subst_ty env b)
+  | Ast.TyRef (m, r, t) -> Ast.TyRef (m, r, subst_ty env t)
+  | other -> other
+
+(* Does a structural comparison at this type reach a float? `__eq_<tag>` and
+   `__cmp_<tag>` compare a float element by calling the prelude's __feq / __flt,
+   and the helpers are emitted after the reachable functions are chosen -- so
+   the comparison that will need them has to mark them here. Without it a
+   tuple, record or variant of floats compared by `==` alone fell back to
+   comparing the boxes' addresses, and one compared by `<` alone did not
+   assemble (`undefined label u___flt`). Conservative: a type argument that
+   holds a float counts even where the helper would not descend into it. *)
+let cmp_reaches_float (t : Ast.ty option) =
+  let seen = Hashtbl.create 8 in
+  let rec go t =
+    match resolve_ty t with
+    | Ast.TyFloat -> true
+    | Ast.TyTuple ts -> List.exists go ts
+    | Ast.TyCon (n, args) as t ->
+      let key = ty_tag t in
+      if Hashtbl.mem seen key then false
+      else begin
+        Hashtbl.replace seen key ();
+        List.exists go args
+        || (match Hashtbl.find_opt type_records n with
+            | Some (params, fields) ->
+              let senv = zip_tyenv params args in
+              List.exists (fun (_, fty) -> go (subst_ty senv fty)) fields
+            | None -> false)
+        || (match Hashtbl.find_opt type_variants n with
+            | Some (params, variants) ->
+              let senv = zip_tyenv params args in
+              List.exists (fun (_, p) -> match p with
+                | Some pty -> go (subst_ty senv pty) | None -> false) variants
+            | None -> false)
+      end
+    | _ -> false
+  in
+  match t with Some t -> go t | None -> false
+
 let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   match e.node with
   | Ast.Var v ->
@@ -737,6 +844,8 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
   | Ast.Cmp (op, a, b) when is_float_ty a.Ast.ty || is_float_ty b.Ast.ty ->
     vars_in a (vars_in b (float_cmp_fn op :: acc))
   | Ast.Neg a when is_float_ty a.Ast.ty -> vars_in a ("__fneg" :: acc)
+  | Ast.Cmp (op, a, b) when cmp_reaches_float a.Ast.ty ->
+    vars_in a (vars_in b ((match op with Ast.Eq | Ast.Ne -> "__feq" | _ -> "__flt") :: acc))
   | Ast.Bin (_, a, b) | Ast.Cmp (_, a, b) | Ast.Logic (_, a, b) ->
     vars_in a (vars_in b acc)
   | Ast.Neg a | Ast.Annot (a, _) -> vars_in a acc
@@ -766,76 +875,6 @@ let rec vars_in (e : Ast.expr) (acc : string list) : string list =
       let ac = vars_in b ac in
       match g with Some gg -> vars_in gg ac | None -> ac) (vars_in scrut acc) arms
   | _ -> acc
-
-(* the tops map: top-level function name -> (params, body) *)
-let tops : (string, string list * Ast.expr) Hashtbl.t = Hashtbl.create 64
-
-(* constructor name -> tag (index within its type, declaration order), read
-   by Constr (writes the tag) and Match (compares against it). Distinct only
-   within a type, which is all Match needs. Populated from Top_type decls. *)
-let variant_tags : (string, int) Hashtbl.t = Hashtbl.create 32
-(* variant type name -> are ALL its constructors nullary? (an "enum"). Such
-   values are 1-word [tag] blocks, so structural `==` is just a tag compare. *)
-let type_all_nullary : (string, bool) Hashtbl.t = Hashtbl.create 16
-let tag_of loc name =
-  match Hashtbl.find_opt variant_tags (Ast.canonical_ctor name) with
-  | Some t -> t
-  | None -> err loc (Printf.sprintf "RV32I: unknown constructor `%s`" name)
-
-(* record type name -> field names in declaration order. A record value is a
-   heap block laid out in that order; a field's offset is its index. *)
-let record_fields : (string, string list) Hashtbl.t = Hashtbl.create 16
-(* richer type info for structural equality: type params + constructor payload
-   types / record field types, from Top_type / Top_record decls *)
-let type_variants : (string, string list * (string * Ast.ty option) list) Hashtbl.t = Hashtbl.create 16
-let type_records : (string, string list * (string * Ast.ty) list) Hashtbl.t = Hashtbl.create 16
-
-
-
-let record_order loc name =
-  match Hashtbl.find_opt record_fields name with
-  | Some fs -> fs
-  | None -> err loc (Printf.sprintf "RV32I: unknown record type `%s`" name)
-let field_index loc recname field =
-  let rec go i = function
-    | [] -> err loc (Printf.sprintf "RV32I: record `%s` has no field `%s`" recname field)
-    | f :: _ when f = field -> i
-    | _ :: rest -> go (i + 1) rest
-  in
-  go 0 (record_order loc recname)
-
-(* --- structural equality (==/!=) on compound types ----------------------
-   Generate a per-type `__eq_<tag>(a,b) -> 0/1` helper (deduped by ty_tag,
-   emitted on a worklist so recursive types terminate), mirroring codegen_c's
-   eq_<tag>. Type params are substituted with the concrete args at the use
-   site, so `list int` and `list str` get distinct, monomorphic helpers. *)
-let rec ty_tag (t : Ast.ty) : string =
-  match resolve_ty t with
-  | Ast.TyInt -> "int" | Ast.TyBool -> "bool" | Ast.TyStr -> "str"
-  | Ast.TyUnit -> "unit" | Ast.TyFloat -> "float" | Ast.TyBytes -> "bytes"
-  | Ast.TySimd Ast.U8x16 -> "u8x16"   (* Q-110: a pointer to a 16-byte box; the lanes live in RVV registers only inside an operation *)
-  (* v0.1.656: no float unit here, so no vector one: f64x2 and f32x4 are the
-     prelude's boxes of lanes (rvf2 / rvf4), made and used by its functions *)
-  | Ast.TySimd Ast.F32x4 -> "f32x4"
-  | Ast.TySimd Ast.F64x2 -> "f64x2"
-  | Ast.TyTuple ts -> "t" ^ String.concat "_" (List.map ty_tag ts) ^ "_"
-  | Ast.TyCon (n, []) -> n
-  | Ast.TyCon (n, args) -> n ^ "_" ^ String.concat "_" (List.map ty_tag args) ^ "_"
-  | Ast.TyParam p -> "p" ^ p
-  | Ast.TyVar _ -> "var"
-  | Ast.TyArrow _ -> "fn"
-  | Ast.TyRef (_, _, t) -> "r" ^ ty_tag t
-
-let rec zip_tyenv ps args =
-  match ps, args with p :: ps', a :: args' -> (p, a) :: zip_tyenv ps' args' | _ -> []
-let rec subst_ty (env : (string * Ast.ty) list) (t : Ast.ty) : Ast.ty =
-  match resolve_ty t with
-  | Ast.TyParam p -> (match List.assoc_opt p env with Some t' -> t' | None -> Ast.TyParam p)
-  | Ast.TyCon (n, args) -> Ast.TyCon (n, List.map (subst_ty env) args)
-  | Ast.TyTuple ts -> Ast.TyTuple (List.map (subst_ty env) ts)
-  | Ast.TyArrow (a, b) -> Ast.TyArrow (subst_ty env a, subst_ty env b)
-  | Ast.TyRef (m, r, t) -> Ast.TyRef (m, r, subst_ty env t)
-  | other -> other
 
 (* pending structural-eq helpers: (tag, concrete ty). `request_eq` returns the
    helper's label, queuing it once. *)
@@ -7081,6 +7120,12 @@ let emit_eq_helper (tag, ty) =
     emit_word (enc_i 1 t0 3 a0 0x13);                   (* sltiu a0, t0, 1 *)
     emit_word (enc_i 0 ra 0 zero 0x67)
   | Ast.TyStr | Ast.TyBytes -> emit (Jal (zero, "__str_eq"))   (* tail call *)
+  (* A float compares by value, as the interpreter and the other backends do
+     (IEEE: -0.0 equals 0.0, a NaN equals nothing). A float is a pointer to its
+     bits here, so the word compare below compared the boxes: two equal floats
+     were unequal and a NaN equalled itself. vars_in keeps __feq reachable
+     (cmp_reaches_float). *)
+  | Ast.TyFloat -> emit (Jal (zero, "u___feq"))                (* tail call *)
   | Ast.TyTuple ts -> emit_agg_eq (List.mapi (fun i t -> (i, t)) ts)
   | Ast.TyCon (n, args) when Hashtbl.mem type_records n ->
     let (params, fields) = Hashtbl.find type_records n in

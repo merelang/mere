@@ -654,7 +654,7 @@ echo "rv_exec: $wfpass passed, $wffail failed for write_file/read_stdin (both wi
 
 # These fixtures must execute, even when a corpus sweep could count a compile
 # refusal. The oracles are hand-written rather than derived from another backend.
-for name in factory_inference with_scope or_pattern; do
+for name in factory_inference with_scope or_pattern float_compound_eq_order; do
   for width in 32 64; do
     if [ "$width" = 32 ]; then runner="$RVRUN"; flag=-rv
     else runner="$RVRUN64"; flag=-rv64; fi
@@ -669,6 +669,10 @@ for name in factory_inference with_scope or_pattern; do
     if [ "$status" -eq 0 ] && cmp -s "$ROOT/test/parity/$name.expected" "$TMP/r.out"; then
       if [ "$name" = or_pattern ]; then
         printf '  ok    %s:%s (bindings and stack restoration match the explicit oracle)\n' "$name" "$width"
+      elif [ "$name" = float_compound_eq_order ]; then
+        # (a compound float's == and order: __eq_ calls __feq, and both stay
+        #  reachable with no bare float comparison in the program)
+        printf '  ok    %s:%s (floats inside compound values compare by value)\n' "$name" "$width"
       else
         printf '  ok    %s:%s (scope cleanup and body result match the explicit oracle)\n' "$name" "$width"
       fi
