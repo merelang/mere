@@ -18,6 +18,7 @@
 type P = { x: float, n: int };
 type 'a mb = Nought | Just of 'a;
 type Shape = Circle of float | Rect of (float * float);
+type 'a tree = Leaf | Node of ('a tree * 'a * 'a tree);
 let b = fn (v: bool) -> if v then "t" else "f";
 let nan = 0.0 / 0.0;
 let p = P { x = 1.5, n = 2 };
@@ -33,6 +34,14 @@ let _ = print (b ((1.5, 2) == (1.5, 2)) ++ b ((1.5, 2) == (2.5, 2)) ++ b ((1.5, 
 // NaN and the two zeros
 let _ = print (b ((nan, 1) == (nan, 1)) ++ b ((nan, 1) != (nan, 1)) ++ b (Just nan == Just nan)
        ++ b (((0.0, 1), 2) == ((-0.0, 1), 2)) ++ b (Circle 0.0 == Circle (-0.0)));
+// a float as the type argument of a recursive generic type, and lists of
+// float tuples: the walk that keeps __feq / __flt reachable goes through the
+// type argument and a recursive type's own fields
+let t1 = Node (Leaf, 1.5, Node (Leaf, 2.5, Leaf));
+let t2 = Node (Leaf, 1.5, Node (Leaf, 2.5, Leaf));
+let t3 = Node (Leaf, 1.5, Node (Leaf, 3.5, Leaf));
+let _ = print (b (t1 == t2) ++ b (t1 == t3) ++ b (t1 != t3) ++ b (Node (Leaf, nan, Leaf) == Node (Leaf, nan, Leaf))
+       ++ b ([(1.5, 2)] < [(2.5, 1)]) ++ b ([(1.5, 2), (0.5, 1)] < [(1.5, 2)]) ++ b ([(-0.0, 1)] <= [(0.0, 1)]));
 // order
 print (b ((1.5, 2) < (2.5, 1)) ++ b ((2.5, 1) < (1.5, 2)) ++ b ((1.5, 2) <= (1.5, 2))
        ++ b ((1.5, 3) > (1.5, 2)) ++ b ((-0.0, 1) < (0.0, 2)) ++ b ((-0.0, 2) > (0.0, 1))
