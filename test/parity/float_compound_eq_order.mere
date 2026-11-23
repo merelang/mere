@@ -1,0 +1,40 @@
+// Floats inside compound values, compared by `==`, `!=` and by order: a tuple,
+// a record and a variant payload compare their floats by value, as the
+// interpreter does (IEEE: -0.0 equals 0.0, a NaN equals nothing, itself
+// included).
+//
+// RV32I and RV64I failed both halves. Their `__eq_<tag>` had no float case,
+// so it compared the boxes' addresses: two equal floats were unequal, and a
+// NaN equalled itself. Their `__cmp_<tag>` called the prelude's __flt, but
+// nothing marked __flt reachable, so a program that ordered compound floats
+// and never compared two bare floats did not assemble.
+//
+// No float is compared bare in this file, so nothing else keeps __feq or
+// __flt alive. The constructors are not None / Some because the RV prelude
+// has its own option type.
+//
+// Execution mode: 4 backends (interp + C + LLVM + Wasm), diff = 0
+
+type P = { x: float, n: int };
+type 'a mb = Nought | Just of 'a;
+type Shape = Circle of float | Rect of (float * float);
+let b = fn (v: bool) -> if v then "t" else "f";
+let nan = 0.0 / 0.0;
+let p = P { x = 1.5, n = 2 };
+let q = P { x = 1.5, n = 2 };
+let r = P { x = 2.5, n = 2 };
+
+// equality
+let _ = print (b ((1.5, 2) == (1.5, 2)) ++ b ((1.5, 2) == (2.5, 2)) ++ b ((1.5, 2) != (1.5, 2))
+       ++ b (p == q) ++ b (p == r) ++ b (p != r)
+       ++ b (Just 1.5 == Just 1.5) ++ b (Just 1.5 == Just 2.5) ++ b ((Nought: float mb) == Nought)
+       ++ b (Circle 1.0 == Circle 1.0) ++ b (Rect (1.0, 2.0) == Rect (1.0, 2.0))
+       ++ b (Rect (1.0, 2.0) == Rect (1.0, 3.0)) ++ b (Circle 1.0 == Rect (1.0, 1.0)));
+// NaN and the two zeros
+let _ = print (b ((nan, 1) == (nan, 1)) ++ b ((nan, 1) != (nan, 1)) ++ b (Just nan == Just nan)
+       ++ b (((0.0, 1), 2) == ((-0.0, 1), 2)) ++ b (Circle 0.0 == Circle (-0.0)));
+// order
+print (b ((1.5, 2) < (2.5, 1)) ++ b ((2.5, 1) < (1.5, 2)) ++ b ((1.5, 2) <= (1.5, 2))
+       ++ b ((1.5, 3) > (1.5, 2)) ++ b ((-0.0, 1) < (0.0, 2)) ++ b ((-0.0, 2) > (0.0, 1))
+       ++ b (p < r) ++ b (r >= p) ++ b (Just 1.5 < Just 2.5) ++ b (Nought < Just 0.5)
+       ++ b (Circle 3.0 < Rect (0.0, 0.0)) ++ b (Rect (1.0, 2.0) < Rect (1.0, 1.5)))
