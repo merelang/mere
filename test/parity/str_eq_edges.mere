@@ -1,0 +1,19 @@
+// str_eq at its edges: the empty string against itself and against one
+// byte, two strings of one length that differ in the first byte, in the
+// last, and nowhere; a string against itself; one built at run time
+// against a literal; a NUL inside; a prefix. The C runtime asks the
+// lengths, then the first byte, then memcmp -- and an empty string has no
+// first byte to read.
+let b = fn (x: bool) -> if x then "1" else "0";
+let e = "";
+let built = "ab" ++ "c";
+let nul = "a" ++ chr 0 ++ "b";
+let rec chain = fn (n: str) ->
+  if str_eq n "==" then 1 else if str_eq n "<<" then 2 else if str_eq n ">=" then 3
+  else if str_eq n "at" then 4 else if str_eq n "ab" then 5 else 0;
+print (b (str_eq e "") ++ b (str_eq e e) ++ b (str_eq "" "a") ++ b (str_eq "a" "")
+       ++ b (str_eq "abc" "xbc") ++ b (str_eq "abc" "abx") ++ b (str_eq "abc" "abc")
+       ++ b (str_eq built built) ++ b (str_eq built "abc") ++ b (str_eq built "abd")
+       ++ b (str_eq nul ("a" ++ chr 0 ++ "b")) ++ b (str_eq nul ("a" ++ chr 0 ++ "c")) ++ b (str_eq nul "a")
+       ++ b (str_eq "ab" "abc") ++ b (str_eq "abc" "ab") ++ b ("abc" == built) ++ b ("" == e)
+       ++ " " ++ str_of_int (chain "at") ++ str_of_int (chain "ab") ++ str_of_int (chain ">=") ++ str_of_int (chain "zz") ++ str_of_int (chain ""))

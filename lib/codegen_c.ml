@@ -10727,10 +10727,18 @@ let str_concat_helper =
          every `==` ran memcmp over the shorter string whatever the lengths
          were, and a dispatcher that tests a name against a chain of
          literals -- mere-ruby's, 2,800 of them -- paid it for each. *)
-      "static inline int __lang_str_eq(const char* a, const char* b) {";
+      (* ...and the first byte before memcmp, in the caller's own code. The
+         compiler left the function out of line in a large program, so each
+         test of a name against a literal was a call, and a second call --
+         memcmp, through the linker's stub -- whenever the lengths agreed:
+         "at" against "==", "<<", ">=". A sample of mere-ruby calling a
+         builtin method had 44% of its time in the two. Most names of one
+         length differ in their first byte. Inlined, a test that fails on
+         the length is two loads and a compare. *)
+      "static inline __attribute__((always_inline)) int __lang_str_eq(const char* a, const char* b) {";
       "  if (a == b) return 1;";
       "  size_t la = __lang_str_size(a);";
-      "  return la == __lang_str_size(b) && (la == 0 || memcmp(a, b, la) == 0);";
+      "  return la == __lang_str_size(b) && (la == 0 || (a[0] == b[0] && memcmp(a, b, la) == 0));";
       "}";
       (* Copy a plain NUL-terminated C string into a header-carrying Mere str.
          Used at boundaries where a headerless C string enters Mere: asprintf
@@ -19147,7 +19155,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       "static char* __lang_str_alloc(__lang_region* r, size_t len);";
       "static size_t __lang_str_size(const char* s);";
       "static int __lang_str_cmp(const char* a, const char* b);";
-      "static inline int __lang_str_eq(const char* a, const char* b);";
+      "static inline __attribute__((always_inline)) int __lang_str_eq(const char* a, const char* b);";
       "static const char* __lang_str_of_cstr(const char* s);";
       "static const char* __lang_str_dup_n(const char* s, size_t n);";
       "";
