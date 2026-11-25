@@ -16112,7 +16112,13 @@ let lift_inner_fns
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->
       walker host_param host_locals s;
-      List.iter (fun (_, g, b) ->
+      (* An arm's binders are locals of the frame, as a `let`'s are (the `Let` case of
+         `walk_in_fn`). They were not added here, so a binder named like a prelude fn
+         (`| VObj id -> ... fn n -> use id ...`) stayed in `known`: the lifted closure
+         did not capture it and the emitted C referred to the global `mu_id_as_value`
+         instead. A fn parameter of the same name was fine; only arm binders were lost. *)
+      List.iter (fun (pat, g, b) ->
+        let host_locals = pattern_vars pat @ host_locals in
         (match g with Some ge -> walker host_param host_locals ge | None -> ());
         walker host_param host_locals b) arms
     | Ast.Tuple es -> List.iter (walker host_param host_locals) es

@@ -1,0 +1,49 @@
+// A match-arm binder named like a prelude fn, captured by a closure.
+//
+// The C backend lifts an inner fn out of its host and captures the host's
+// locals it reads. Names that are globals (top-level fns, builtins, externs)
+// are not captured -- they are referenced directly -- unless a local of the
+// host shadows them. `let` binders and fn parameters were counted as such
+// locals; match-arm binders were not. So `| VObj id -> ... fn n -> use id ...`
+// left `id` uncaptured, and the emitted C read the prelude's `id` closure
+// (`mu_id_as_value`) where the int was meant: it did not compile. The
+// interpreter and the typer were right all along.
+type V = VObj of int | VNone;
+let use = fn (k: int) -> fn (s: str) -> k + str_len s;
+
+// The shape it was found in: an inner `let`-bound fn.
+let by_id = fn (v: V) ->
+  match v with
+  | VObj id -> (let g = fn (n: int) -> use id "x" + n in g 1)
+  | VNone -> 0;
+let by_incr = fn (v: V) ->
+  match v with
+  | VObj incr -> (let g = fn (n: int) -> use incr "xy" + n in g 1)
+  | VNone -> 0;
+
+// Bound inside a tuple pattern, and read by the arm's guard too.
+let in_tuple = fn (p: (int * V)) ->
+  match p with
+  | (id, VObj incr) when id > incr -> (let g = fn (n: int) -> id - incr + n in g 100)
+  | (id, _) -> (let g = fn (n: int) -> id * n in g 2);
+
+// An inner `let rec` reading the binder.
+let rec_reads = fn (v: V) ->
+  match v with
+  | VObj id ->
+    (let rec down = fn (n: int) -> if n < 1 then id else down (n - 1) in down 3)
+  | VNone -> 0;
+
+// An anonymous closure handed on as a value.
+let as_value = fn (v: V) ->
+  match v with
+  | VObj id -> list_fold (Cons (1, Cons (2, Nil))) 0 (fn (acc: int) -> fn (x: int) -> acc + x * id)
+  | VNone -> 0;
+
+let _ = print_int (by_id (VObj 41));
+let _ = print_int (by_id VNone);
+let _ = print_int (by_incr (VObj 40));
+let _ = print_int (in_tuple (9, VObj 4));
+let _ = print_int (in_tuple (3, VObj 4));
+let _ = print_int (rec_reads (VObj 7));
+print_int (as_value (VObj 5))

@@ -2533,7 +2533,12 @@ let lift_inner_fns_llvm (toplevel_names : string list) (fns : fn_decl list)
     | Ast.Constr (_, None) -> ()
     | Ast.Match (s, arms) ->
       walk host_param host_locals s;
-      List.iter (fun (_, g, b) ->
+      (* An arm's binders are frame locals, as a `let`'s are: without them here a
+         binder named like a prelude fn (`| VObj incr -> ... fn n -> use incr ...`)
+         was taken for that fn and not captured ("fn-as-value on non-arrow type").
+         The C backend had the same hole. *)
+      List.iter (fun (pat, g, b) ->
+        let host_locals = pattern_vars pat @ host_locals in
         (match g with Some ge -> walk host_param host_locals ge | None -> ());
         walk host_param host_locals b) arms
     | Ast.Tuple es -> List.iter (walk host_param host_locals) es
