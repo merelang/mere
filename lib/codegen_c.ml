@@ -11669,11 +11669,11 @@ let region_runtime_helpers () =
          handed out again. A conservative scan reads from a pointer only up to
          the next allocation's start (__lang_scan_words): what lies past it is
          another allocation's, and a dead one's old words kept whatever they
-         named alive. NULL in a program that never scans a stack
-         (uses_coro_scan), for a block that holds one allocation (a dedicated
-         block), or where the map could not be had -- read as before. The
+         named alive. In a program that scans a stack (uses_coro_scan) every
+         block has one, so the allocator marks without asking; in any other
+         program none does, and a block without one is read as before. The
          header was 56 bytes padded to 64, so this costs it nothing. *)
-      "  unsigned char* starts;";
+      "  uint64_t* starts;";
       "} __attribute__((aligned(16))) __lang_region_block;";
       "/* bumped by every coroutine switch (see __lang_region_pinned): a block";
       "   allocated after a coroutine last stopped cannot be pointed into by it */";
@@ -11870,10 +11870,21 @@ let region_runtime_helpers () =
       "__attribute__((unused)) static void __lang_malloc_tune(void) {}";
       "#endif";
       "#endif";
+      (* a block's whole allocation: the header, the payload, and -- in a
+         program that scans stacks -- its start map after the payload, one
+         64-bit word per 512 bytes. In the block's own allocation rather than
+         a malloc of its own: mere-ruby makes a private arena for every Map
+         and Vec, and a malloc and a free per block were more than the marks *)
+      (if !uses_coro_scan then "#define __LANG_MAP_BYTES(cap) ((((cap) + 511) / 512) * sizeof(uint64_t))"
+       else "#define __LANG_MAP_BYTES(cap) ((size_t)0)");
+      "static inline size_t __lang_blk_total(size_t cap) { return sizeof(__lang_region_block) + cap + __LANG_MAP_BYTES(cap); }";
+      "static inline void __lang_blk_map(__lang_region_block* b, size_t cap) {";
+      (if !uses_coro_scan then "  b->starts = (uint64_t*)((char*)(b + 1) + cap);\n  memset(b->starts, 0, __LANG_MAP_BYTES(cap));"
+       else "  (void)cap; b->starts = NULL;");
+      "}";
       "static void __lang_blk_free(__lang_region_block* b) {";
       "  __lang_blk_unlink(b);";
-      "  free(b->starts);";
-      "  __lang_blk_raw_free(b, sizeof(__lang_region_block) + b->pad);";
+      "  __lang_blk_raw_free(b, __lang_blk_total(b->pad));";
       "}";
       (* the allocation-start map (see the block header): bit i is the 8 bytes
          at payload offset 8*i. Set for each allocation the bump pointer hands
@@ -11882,13 +11893,18 @@ let region_runtime_helpers () =
          again (a region rewound or recycled), so a bit never marks the middle
          of a live allocation -- a stale one would end a scan's read early, the
          one way this map could lose a root. *)
+      (* Every caller clears up to where the block was used, and no start lies
+         above that (the invariant this keeps), so the last word is cleared
+         whole; the first keeps the bits below `from`. A region is handed
+         back to the cache hundreds of thousands of times in a run (454,813
+         in a 75,000-call mere-ruby program), so this is words, not bits. *)
       "static void __lang_starts_clear(__lang_region_block* b, size_t from, size_t to) {";
       "  if (!b || !b->starts) return;";
       "  if (to > b->pad) to = b->pad;";
-      "  size_t i = from >> 3, j = (to + 7) >> 3;   /* the 8-byte units from..to */";
-      "  while (i < j && (i & 7)) { b->starts[i >> 3] &= (unsigned char)~(1u << (i & 7)); i++; }";
-      "  if (i < (j & ~(size_t)7)) { memset(b->starts + (i >> 3), 0, ((j & ~(size_t)7) - i) >> 3); i = j & ~(size_t)7; }";
-      "  while (i < j) { b->starts[i >> 3] &= (unsigned char)~(1u << (i & 7)); i++; }";
+      "  if (from >= to) return;";
+      "  size_t i = from >> 3, w = i >> 6, wj = (((to + 7) >> 3) + 63) >> 6;   /* 8-byte units; 64 to a word */";
+      "  if (i & 63) { b->starts[w] &= ((uint64_t)1 << (i & 63)) - 1; w++; }";
+      "  if (w < wj) memset(b->starts + w, 0, (wj - w) * sizeof(uint64_t));";
       "}";
       "";
       (* Q-106 (v0.1.416): the in-order list builder. `head`/`tail` are cons
@@ -11965,7 +11981,7 @@ let region_runtime_helpers () =
       "}";
       "static int __lang_region_add_block_try(__lang_region* r, size_t cap) {";
       "  __lang_region_block* b =";
-      "    (__lang_region_block*) __lang_blk_raw_alloc(sizeof(__lang_region_block) + cap);";
+      "    (__lang_region_block*) __lang_blk_raw_alloc(__lang_blk_total(cap));";
       "  if (!b) return 0;";
       "  __lang_block_note(b, cap);";
       "  b->ep = __lang_region_epoch;";
@@ -11973,9 +11989,10 @@ let region_runtime_helpers () =
          capacity, so map_bytes / vec_bytes can sum a container's private
          arena without any hot-path counter. *)
       "  b->pad = cap;";
-      (* (no map, no harm: the scan reads such a block as it always did) *)
-      (if !uses_coro_scan then "  b->starts = (unsigned char*)calloc((cap + 63) / 64, 1);"
-       else "  b->starts = NULL;");
+      (* (a program that scans gives every bump block a map, so the allocator
+         marks without asking; no map, no harm elsewhere: the scan reads such a
+         block as it always did) *)
+      "  __lang_blk_map(b, cap);";
       "  __lang_blk_link(r, b);";
       "  b->prev = r->blocks;";
       "  r->blocks = b;";
@@ -12191,12 +12208,16 @@ let region_runtime_helpers () =
          stays proportional to small traffic. *)
       "    if (aligned > r->cap / 4) {";
       "      __lang_region_block* big =";
-      "        (__lang_region_block*) __lang_blk_raw_alloc(sizeof(__lang_region_block) + aligned);";
+      "        (__lang_region_block*) __lang_blk_raw_alloc(__lang_blk_total(aligned));";
       "      if (!big) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "      __lang_block_note(big, aligned);";
       "      big->ep = __lang_region_epoch;";
       "      big->pad = aligned;";
-      "      big->starts = NULL;   /* one allocation: the block is its bound */";
+      (* (one allocation: the block is its bound. A program that scans gives
+         it a map all the same -- every block it has carries one, so the
+         allocator never asks, whichever block becomes the bump block later) *)
+      "      __lang_blk_map(big, aligned);";
+      "      if (big->starts) big->starts[0] = 1;";
       "      __lang_blk_link(r, big);";
       "      big->prev = r->blocks->prev;";
       "      r->blocks->prev = big;";
@@ -12221,7 +12242,9 @@ let region_runtime_helpers () =
       "    padding = 0;  /* every block's payload begins on a 16-byte boundary */";
       "  }";
       "  void* p = r->top + padding;";
-      (if !uses_coro_scan then "  { unsigned char* __s = r->blocks->starts; if (__s) { size_t __i = (size_t)((char*)p - r->base) >> 3; __s[__i >> 3] |= (unsigned char)(1u << (__i & 7)); } }"
+      (* (64-bit words, not bytes: a char store may alias the region's own
+         fields, and the compiler then reloads them after it) *)
+      (if !uses_coro_scan then "  { size_t __i = (size_t)((char*)p - r->base) >> 3; r->blocks->starts[__i >> 6] |= (uint64_t)1 << (__i & 63); }"
        else "");
       "  r->top += padding + aligned;";
       "  r->alloc_total += padding + aligned; __lang_dsite_charge(r0, padding + aligned);";
@@ -12286,12 +12309,13 @@ let region_runtime_helpers () =
       "      if ((char*)(blk + 1) == (char*)old && blk->pad == old_al) {";
       "        __lang_blk_unlink(blk);";
       "        __lang_region_block* nb =";
-      "          (__lang_region_block*) __lang_blk_raw_realloc(blk, sizeof(__lang_region_block) + blk->pad, sizeof(__lang_region_block) + new_al);";
+      "          (__lang_region_block*) __lang_blk_raw_realloc(blk, __lang_blk_total(blk->pad), __lang_blk_total(new_al));";
       "        if (!nb) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "        __lang_block_note(nb, new_al);";
-      (* (it holds this buffer alone: no map, and the old one was sized for
-         the old capacity) *)
-      "        free(nb->starts); nb->starts = NULL;";
+      (* (it holds this buffer alone: its map, after the new payload, has the
+         one start, the first word) *)
+      "        __lang_blk_map(nb, new_al);";
+      "        if (nb->starts) nb->starts[0] = 1;";
       "        nb->pad = new_al;";
       "        __lang_blk_link(r, nb);";
       "        pred->prev = nb;";
@@ -14536,7 +14560,7 @@ let coro_runtime ~(stack_bytes : int) =
       "    if (blk->starts) {";
       "      uintptr_t base = (uintptr_t)(blk + 1);";
       "      size_t j = ((a - base) >> 3) + 1, n = (e - base + 7) >> 3;";
-      "      for (; j < n; j++) if (blk->starts[j >> 3] & (1u << (j & 7))) { e = base + (j << 3); break; }";
+      "      for (; j < n; j++) if (blk->starts[j >> 6] & ((uint64_t)1 << (j & 63))) { e = base + (j << 3); break; }";
       "    }";
       "    __lang_scan_queue(st, a, e, h2);";
       "  }";

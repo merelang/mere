@@ -27,11 +27,17 @@ MUTATIONS = {
                   '    if (0) {\n      uintptr_t base = (uintptr_t)(blk + 1);',
                   'read past the allocation into a dead neighbour'),
     # the allocator marks no starts
-    'unmarked': ('if (__s) { size_t __i = (size_t)((char*)p - r->base) >> 3;', 'if (0) { size_t __i = (size_t)((char*)p - r->base) >> 3;',
+    'unmarked': (' r->blocks->starts[__i >> 6] |= (uint64_t)1 << (__i & 63); }', ' (void)__i; }',
                  'read past the allocation into a dead neighbour'),
     # a released region keeps its starts for the next use
     'stale-after-release': ('    if (zlen) __lang_starts_clear(r->blocks,', '    if (0) __lang_starts_clear(r->blocks,',
                             'start at or above the bump pointer'),
+    # a dedicated block is made with no map (and later kept and bumped into)
+    'kept-unmapped': ('      if (big->starts) big->starts[0] = 1;', '      big->starts = NULL;',
+                      "a dedicated block's map has its one start"),
+    # a clear from the middle of a word clears the whole word
+    'clear-whole-word': ('  if (i & 63) { b->starts[w] &= ((uint64_t)1 << (i & 63)) - 1; w++; }', '',
+                         'a clear from the middle of a word'),
     # the scan stops at the allocation's own start (off by one)
     'stops-at-own-start': ('      size_t j = ((a - base) >> 3) + 1,', '      size_t j = ((a - base) >> 3),',
                            'held node'),
@@ -83,9 +89,9 @@ def main():
                              'let _ = coro_switch c; ()\n')
             text = subprocess.check_output([MERE] + (['--lib-instance'] if library else []) + ['-c', str(plain)],
                                            text=True, timeout=60)
-            if 'calloc((cap + 63) / 64, 1)' in text or 'unsigned char* __s = r->blocks->starts' in text:
+            if '#define __LANG_MAP_BYTES(cap) ((((cap) + 511) / 512) * sizeof(uint64_t))' in text or 'r->blocks->starts[__i >> 6]' in text:
                 raise AssertionError(('a program that does not scan builds the start map', library))
-            if 'calloc((cap + 63) / 64, 1)' not in runtime or 'unsigned char* __s = r->blocks->starts' not in runtime:
+            if '#define __LANG_MAP_BYTES(cap) ((((cap) + 511) / 512) * sizeof(uint64_t))' not in runtime or 'r->blocks->starts[__i >> 6]' not in runtime:
                 raise AssertionError(('a program that scans builds no start map', library))
             print(('library' if library else 'executable') +
                   f': O2 and ASan/UBSan scan bounds contracts passed; {len(MUTATIONS) - 1} mutations caught',

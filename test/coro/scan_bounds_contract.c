@@ -7,12 +7,15 @@
      - interior:  a pointer into the middle of an allocation reads the rest of
                   it, and not the allocation after it
      - last:      the block's last allocation is read up to the bump pointer
-     - big:       an allocation in a block of its own (no map) is read 16
+     - big:       an allocation in a block of its own (one start) is read 16
                   words, as before
      - reused:    a region's bytes handed out again (released to the cache and
                   acquired) hold a big node where small ones began: the big
                   node's last word is still reported -- a start left behind
                   would end the read inside it
+     - kept:      a block that held one allocation, kept by a released region
+                  and bumped into when it is acquired again, has a map
+     - clear:     a clear from the middle of a word keeps the starts below it
      - invariant: after each step, no block has a start at or above its bump
                   pointer
    The scan is the runtime's own (__lang_scan_words over the given words, then
@@ -57,7 +60,7 @@ static void no_start_at_or_above_top(void) {
       if (!b->starts || !b->owner || b->owner->blocks != b || !b->owner->top) continue;
       size_t from = (size_t)(b->owner->top - (char*)(b + 1)) >> 3, units = b->pad >> 3;
       for (size_t i = from; i < units; i++)
-        assert(!(b->starts[i >> 3] & (1u << (i & 7))) && "start at or above the bump pointer");
+        assert(!(b->starts[i >> 6] & ((uint64_t)1 << (i & 63))) && "start at or above the bump pointer");
     }
 }
 
@@ -99,7 +102,7 @@ int main(void) {
   /* big: a block of its own has no map and is read 16 words */
   long long* g = node(&r, (1 << 16) / 8, 6); g[10] = 5031;
   __lang_region_block* gb = (__lang_region_block*)g - 1;
-  assert(gb->starts == NULL && "a dedicated block has no map");
+  assert(gb->starts && gb->starts[0] == 1 && "a dedicated block's map has its one start");
   uintptr_t big[] = { (uintptr_t)g };
   assert(FOUND(big, 5031) && "a dedicated block");
 
@@ -115,6 +118,37 @@ int main(void) {
   assert(FOUND(reused, 5041) && "a start left behind ended the read inside a live node");
   no_start_at_or_above_top();
   __lang_region_block_release(q2);
+
+  /* kept: a region whose largest block held one allocation of its own keeps
+     that block when released, and bumps into it when acquired again: it has
+     a map, and its allocations are marked and bounded */
+  __lang_region* k = __lang_region_block_acquire("scan_bounds");
+  (void)node(k, (2 << 20) / 8, 9);   /* past the first block (1 MiB), under the keep cap */
+  __lang_region_block_release(k);
+  __lang_region* k2 = __lang_region_block_acquire("scan_bounds");
+  assert(k2 == k && k2->blocks->starts && "the kept block has a map");
+  long long* kx = node(k2, 2, 10); kx[1] = 5051;
+  long long* ky = node(k2, 2, 11); ky[1] = 5052;
+  uintptr_t kept[] = { (uintptr_t)kx };
+  assert(FOUND(kept, 5051) && !FOUND(kept, 5052) && "a kept block's allocations are bounded");
+  (void)ky;
+  no_start_at_or_above_top();
+  __lang_region_block_release(k2);
+
+  /* clear: from the middle of a word, the bits below `from` stay and every
+     bit from it on goes (the HTTP arena's rewind clears from its mark) */
+  {
+    __lang_region_block* cb = r.blocks;
+    uint64_t saved[8];
+    memcpy(saved, cb->starts, sizeof saved);
+    memset(cb->starts, 0xff, 4 * sizeof(uint64_t));   /* units 0..255 */
+    __lang_starts_clear(cb, 8 * 70, 8 * 256);
+    for (size_t i = 0; i < 256; i++) {
+      int set = !!(cb->starts[i >> 6] & ((uint64_t)1 << (i & 63)));
+      assert(set == (i < 70) && "a clear from the middle of a word");
+    }
+    memcpy(cb->starts, saved, sizeof saved);
+  }
 
   __lang_region_free(&r);
   printf("coroutine scan bounds contracts passed\n");
