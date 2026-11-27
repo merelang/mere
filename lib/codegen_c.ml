@@ -312,6 +312,12 @@ let source_name_of (iname : string) : string =
    constant carrying the length header this backend's strings expect. Reset per
    compilation unit by [generate]. *)
 let uses_coro_strings = ref false
+(* coro_scan_ints / coro_scan_strings: the program asks what a stopped stack
+   reaches, so each bump block keeps the map of where its allocations begin
+   (__lang_region_block's starts) and the allocator marks every one. A program
+   that never asks pays nothing for it: no map, and a scan of a block without
+   one reads as it always did. *)
+let uses_coro_scan = ref false
 let str_literals : (string, int) Hashtbl.t = Hashtbl.create 512
 
 let str_literal_id (s : string) : int =
@@ -3324,6 +3330,7 @@ let rec emit_expr (e : Ast.expr) : string =
        when not (user_shadows "coro_scan_strings") ->
        uses_coro := true;
        uses_coro_strings := true;
+       uses_coro_scan := true;
        "({ __lang_coro_h __cs = " ^ emit_expr c_e ^ "; list_str __xs = " ^ emit_expr names ^ "; \
            __auto_type __cl = " ^ emit_expr arg ^ "; size_t __n = 0; \
            for (list_str __p = __xs; list_str__tag(__p) == 1; __p = list_str__node(__p)->payload.Cons.f1) __n++; \
@@ -3336,6 +3343,7 @@ let rec emit_expr (e : Ast.expr) : string =
      | Ast.App ({ node = Ast.App ({ node = Ast.App ({ node = Ast.Var "coro_scan_ints"; _ }, c_e); _ }, l_e); _ }, h_e)
        when not (user_shadows "coro_scan_ints") ->
        uses_coro := true;
+       uses_coro_scan := true;
        "({ __lang_coro_h __sc = " ^ emit_expr c_e ^ "; long long __sl = " ^ emit_expr l_e ^ "; \
            long long __sh = " ^ emit_expr h_e ^ "; __auto_type __cl = " ^ emit_expr arg ^ "; \
            __lang_coro_scan_ints(__sc, __sl, __sh, (void*)__cl.env, (void*)__cl.fn); 0; })"
@@ -7751,6 +7759,7 @@ let native_http_runtime ~tls =
       "  __lang_default_region.blocks = __http_mark_blocks;";
       "  __lang_default_region.base = __http_mark_base;";
       "  __lang_default_region.top = __http_mark_top;";
+      "  if (__http_mark_blocks) __lang_starts_clear(__http_mark_blocks, (size_t)(__http_mark_top - __http_mark_base), __http_mark_blocks->pad);";
       "  __lang_default_region.cap = __http_mark_cap;";
       "  __http_marked = 0;";
       "}";
@@ -11655,6 +11664,16 @@ let region_runtime_helpers () =
       "  struct __lang_region_s* owner;   /* whose chain it is on: its bump block ends at owner->top */";
       "  struct __lang_region_block* gprev;";
       "  struct __lang_region_block* gnext;";
+      (* where each allocation in a bump block begins: one bit per 8 bytes of
+         payload, set by the allocator and cleared when the block's bytes are
+         handed out again. A conservative scan reads from a pointer only up to
+         the next allocation's start (__lang_scan_words): what lies past it is
+         another allocation's, and a dead one's old words kept whatever they
+         named alive. NULL in a program that never scans a stack
+         (uses_coro_scan), for a block that holds one allocation (a dedicated
+         block), or where the map could not be had -- read as before. The
+         header was 56 bytes padded to 64, so this costs it nothing. *)
+      "  unsigned char* starts;";
       "} __attribute__((aligned(16))) __lang_region_block;";
       "/* bumped by every coroutine switch (see __lang_region_pinned): a block";
       "   allocated after a coroutine last stopped cannot be pointed into by it */";
@@ -11853,7 +11872,23 @@ let region_runtime_helpers () =
       "#endif";
       "static void __lang_blk_free(__lang_region_block* b) {";
       "  __lang_blk_unlink(b);";
+      "  free(b->starts);";
       "  __lang_blk_raw_free(b, sizeof(__lang_region_block) + b->pad);";
+      "}";
+      (* the allocation-start map (see the block header): bit i is the 8 bytes
+         at payload offset 8*i. Set for each allocation the bump pointer hands
+         out (__lang_region_alloc_aligned, in a program that scans stacks);
+         cleared, from an offset on, wherever a block's bytes are handed out
+         again (a region rewound or recycled), so a bit never marks the middle
+         of a live allocation -- a stale one would end a scan's read early, the
+         one way this map could lose a root. *)
+      "static void __lang_starts_clear(__lang_region_block* b, size_t from, size_t to) {";
+      "  if (!b || !b->starts) return;";
+      "  if (to > b->pad) to = b->pad;";
+      "  size_t i = from >> 3, j = (to + 7) >> 3;   /* the 8-byte units from..to */";
+      "  while (i < j && (i & 7)) { b->starts[i >> 3] &= (unsigned char)~(1u << (i & 7)); i++; }";
+      "  if (i < (j & ~(size_t)7)) { memset(b->starts + (i >> 3), 0, ((j & ~(size_t)7) - i) >> 3); i = j & ~(size_t)7; }";
+      "  while (i < j) { b->starts[i >> 3] &= (unsigned char)~(1u << (i & 7)); i++; }";
       "}";
       "";
       (* Q-106 (v0.1.416): the in-order list builder. `head`/`tail` are cons
@@ -11938,6 +11973,9 @@ let region_runtime_helpers () =
          capacity, so map_bytes / vec_bytes can sum a container's private
          arena without any hot-path counter. *)
       "  b->pad = cap;";
+      (* (no map, no harm: the scan reads such a block as it always did) *)
+      (if !uses_coro_scan then "  b->starts = (unsigned char*)calloc((cap + 63) / 64, 1);"
+       else "  b->starts = NULL;");
       "  __lang_blk_link(r, b);";
       "  b->prev = r->blocks;";
       "  r->blocks = b;";
@@ -12158,6 +12196,7 @@ let region_runtime_helpers () =
       "      __lang_block_note(big, aligned);";
       "      big->ep = __lang_region_epoch;";
       "      big->pad = aligned;";
+      "      big->starts = NULL;   /* one allocation: the block is its bound */";
       "      __lang_blk_link(r, big);";
       "      big->prev = r->blocks->prev;";
       "      r->blocks->prev = big;";
@@ -12182,6 +12221,8 @@ let region_runtime_helpers () =
       "    padding = 0;  /* every block's payload begins on a 16-byte boundary */";
       "  }";
       "  void* p = r->top + padding;";
+      (if !uses_coro_scan then "  { unsigned char* __s = r->blocks->starts; if (__s) { size_t __i = (size_t)((char*)p - r->base) >> 3; __s[__i >> 3] |= (unsigned char)(1u << (__i & 7)); } }"
+       else "");
       "  r->top += padding + aligned;";
       "  r->alloc_total += padding + aligned; __lang_dsite_charge(r0, padding + aligned);";
       "  if (shared) pthread_mutex_unlock(&__lang_default_region_lock);";
@@ -12248,6 +12289,9 @@ let region_runtime_helpers () =
       "          (__lang_region_block*) __lang_blk_raw_realloc(blk, sizeof(__lang_region_block) + blk->pad, sizeof(__lang_region_block) + new_al);";
       "        if (!nb) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "        __lang_block_note(nb, new_al);";
+      (* (it holds this buffer alone: no map, and the old one was sized for
+         the old capacity) *)
+      "        free(nb->starts); nb->starts = NULL;";
       "        nb->pad = new_al;";
       "        __lang_blk_link(r, nb);";
       "        pred->prev = nb;";
@@ -12795,6 +12839,9 @@ let region_runtime_helpers () =
       "  if (__lang_region_cache_n < __LANG_REGION_CACHE_CAP";
       "      && (__lang_region_cache_n < __LANG_REGION_CACHE_GROWN || r->cap <= (1 << 20))) {";
       "    if (zlen) __lang_region_clear_cached(zat, zlen);";
+      (* ...and the allocation starts in those bytes: they are handed out
+         again from the bottom (zat is in r->blocks, the block kept) *)
+      "    if (zlen) __lang_starts_clear(r->blocks, (size_t)(zat - (char*)(r->blocks + 1)), (size_t)(zat - (char*)(r->blocks + 1)) + zlen);";
       "    __lang_region_cache[__lang_region_cache_n++] = r;";
       "  } else { __lang_region_free(r); free(r); }";
       "}";
@@ -13217,6 +13264,7 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
       "  while (b != seed) { __lang_region_block* prev = b->prev; __lang_blk_free(b); b = prev; }";
       "  old->blocks = seed;";
       "  old->base = (char*)(seed + 1);";
+      "  __lang_starts_clear(seed, 0, seed->pad);   /* handed out again from the bottom */";
       "  old->top = old->base;";
       "  old->cap = seed->pad;";
       Printf.sprintf "  m->keys = (%s*)__lang_region_alloc_array(m->region, %s, 4);" c_k c_k;
@@ -14477,6 +14525,19 @@ let coro_runtime ~(stack_bytes : int) =
       "    if (h2 > __LANG_SCAN_FOREIGN_HOPS) { if (st->pinx) __lang_pin_add(st->pinx, a); continue; }";
       "    uintptr_t e = a + 16 * sizeof(uintptr_t);";
       "    if (e > used) e = used;";
+      (* ...and no further than the allocation a points into: the next start
+         after a is another allocation's first word. Its words were read here
+         as if they were this one's, and when that allocation was dead -- an
+         argument list of a call that had returned, an env's neighbour in the
+         default region -- the handles it named stayed alive for as long as
+         this one did (mere-ruby: sqlite3's released aggregators and
+         comparators, counted by its own tests). An allocation that is alive
+         is reached through a pointer to it, read the same way. *)
+      "    if (blk->starts) {";
+      "      uintptr_t base = (uintptr_t)(blk + 1);";
+      "      size_t j = ((a - base) >> 3) + 1, n = (e - base + 7) >> 3;";
+      "      for (; j < n; j++) if (blk->starts[j >> 3] & (1u << (j & 7))) { e = base + (j << 3); break; }";
+      "    }";
       "    __lang_scan_queue(st, a, e, h2);";
       "  }";
       "}";
@@ -15756,6 +15817,7 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       "  while (b != seed) { __lang_region_block* prev = b->prev; __lang_blk_free(b); b = prev; }";
       "  old->blocks = seed;";
       "  old->base = (char*)(seed + 1);";
+      "  __lang_starts_clear(seed, 0, seed->pad);   /* handed out again from the bottom */";
       "  old->top = old->base;";
       "  old->cap = seed->pad;";
       Printf.sprintf "  v->data = (%s*)__lang_region_alloc_array(v->region, %s, 4);" c_elem c_elem;
@@ -17517,6 +17579,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
   env_var_used := false;
   uses_coro := false;
   uses_coro_strings := false;
+  uses_coro_scan := false;
   (let f = native_ffi_flags (Hashtbl.mem extern_fn_decls) in
    uses_tls := f.ff_tls; uses_midi := f.ff_midi; uses_window := f.ff_window;
    uses_audio := f.ff_audio; uses_filestat := f.ff_filestat; uses_fdio := f.ff_fdio;

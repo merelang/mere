@@ -1676,6 +1676,10 @@ jobs:
         if: ${{ !cancelled() && matrix.group == 'coroutines' }}
         run: opam exec -- python3 scripts/coro_span_cache_check.py
 
+      - name: Check that a coroutine scan reads no further than an allocation
+        if: ${{ !cancelled() && matrix.group == 'coroutines' }}
+        run: opam exec -- python3 scripts/coro_scan_bounds_check.py
+
       - name: coro_check (same-thread coroutines, interpreter, C, LLVM and RISC-V)
         if: ${{ !cancelled() && matrix.group == 'coroutines' }}
         run: |
