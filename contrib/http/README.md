@@ -1,20 +1,61 @@
-# contrib/http — minimal HTTP server bindings for Node-hosted Mere
+# contrib/http — HTTP server bindings, middleware, and servers
 
-One `extern fn` + Node host glue that lets a Mere program compiled to
-Wasm accept HTTP requests and return responses. Sibling of
-`contrib/dom` for the server side.
+A handful of `extern fn`s that let a Mere program accept HTTP requests
+and return responses, plus the middleware and helpers built on them.
+Sibling of `contrib/dom` for the server side.
 
-This is the "Stage A" backend demo — proof that Mere code can drive
-real network traffic today, running under `node` via a small glue
-module. A future stage will add a lower-level socket API (`tcp_listen`
-/ `tcp_accept` / …) once a C runtime path is in place.
+It started as the "Stage A" backend demo — a Mere program compiled to
+Wasm, running under `node` via a small glue module. The same externs
+are now also implemented natively by the C backend (`mere -c`), so the
+same handler builds into a standalone binary. On top of the C
+backend's socket builtins (`tcp_listen` / `tcp_accept` / …),
+`serve_mt.mere` and `serve_rd.mere` are concurrent servers written in
+Mere itself.
 
 ## Files
 
 | file | content | lines |
 |---|---|---|
-| `http.mere` | one `extern fn http_serve` declaration | ~25 |
-| `http.glue.js` | CommonJS module exporting `makeHttpGlue()` | ~100 |
+| `http.mere` | the core externs: `http_serve`, `http_current_body`, `http_set_status`, `http_set_content_type`, `http_set_header`, `http_get_header` | ~75 |
+| `http.glue.js` | CommonJS module exporting `makeHttpGlue()` — the Node host side | ~340 |
+
+Everything else is optional and imported on its own. Unless noted, a
+file is pure Mere or uses only externs both hosts implement.
+
+| file | exports | lines |
+|---|---|---|
+| `router.mere` | `route` / `route_pattern` (`:capture`) / `route_prefix` → `router routes not_found`; `req_path`, `parse_int_or_zero` | ~200 |
+| `query.mere` | `split_url`, `parse_query`, `query_get`, `encode_query`, `url_decode` / `url_encode` | ~150 |
+| `json_body.mere` | flat-JSON-object body parsing: `parse_json_body`, `json_get`, `body_field` | ~160 |
+| `multipart.mere` | `multipart/form-data`: `boundary_from_content_type`, `parse_multipart` | ~150 |
+| `cookie.mere` | `cookie_get`, `session_id` | ~40 |
+| `escape.mere` | `json_escape`, `jstr`, `html_escape`, `xml_escape`, `cdata_escape` | ~75 |
+| `session.mere` | in-memory cookie sessions: `session_new_store`, `session_current`, `session_login`, `session_logout`, `session_require` | ~110 |
+| `csrf.mere` | synchronizer-token CSRF: `csrf_new_store`, `csrf_token_for`, `csrf_validate`, `csrf_hidden_input` | ~95 |
+| `csrf_field.mere` | `csrf_hidden_field` — the same hidden input as a `contrib/html/build.mere` node, so the token is escaped by `render` | ~15 |
+| `basic_auth.mere` | RFC 7617 Basic Auth: `with_basic_auth`, `with_basic_auth_pred` | ~85 |
+| `cors.mere` | `with_cors` (preflight short-circuit) | ~55 |
+| `security.mere` | `with_security_headers`, `with_hsts` | ~55 |
+| `cache.mere` | `cache_immutable` / `cache_private` / `cache_no_store`, `etag`, `if_none_match` | ~70 |
+| `ratelimit.mere` | fixed-window limiter: `rate_new`, `rate_over_limit`, `rate_bump`, `rate_reset` | ~85 |
+| `access_log.mere` | `with_access_log` — one JSON line per request | ~80 |
+| `metrics.mere` | Prometheus text format: `metric_declare_counter` / `_gauge`, `metric_inc` / `metric_add` / `metric_set`, `metrics_render`, `metrics_handler`, `with_metrics` | ~175 |
+| `rescue.mere` | `with_rescue` / `with_rescue_ctx` — a failing handler becomes a 500 instead of ending the process | ~55 |
+| `arena.mere` | `with_arena` — release a request's allocations when the response is sent | ~35 |
+| `mount.mere` | `type mount` (`MExact` / `MPattern`, each with an `acl`), `entries` (→ `router`), `manifest` — one list for routes and their authorization, so the two cannot drift | ~60 |
+| `static.mere` | `serve_static_fallback prefix root handler`, `mime_of` | ~110 |
+| `client.mere` | outbound HTTP: `http_get`, `http_post_json`, `http_fetch_h`, `http_get_bearer` (Node host, via `curl`) | ~85 |
+| `stream.mere` | `http_stream_start` / `http_stream_write` — streamed response body (Node host) | ~25 |
+| `sse.mere` | `sse_broadcast`, `sse_bridge_from_redis` — server-sent events through the Node glue | ~50 |
+| `sse_native.mere` | `sse_start` / `sse_subscribe` / `sse_publish` — server-sent events with no JS host (C backend, with `serve_mt`) | ~195 |
+| `websocket.mere` | `ws_broadcast`, `ws_client_count` — a WebSocket hub terminated by the Node glue | ~45 |
+| `tls.mere` | `http_serve_tls port cert key handler` — HTTPS. Separate so that only programs importing it link OpenSSL | ~35 |
+| `serve_mt.mere` | `http_serve_mt port workers handler`, `http_serve_mt_ctx` (per-worker state) — a worker pool written in Mere (C backend) | ~320 |
+| `serve_mt_tls.mere` | `http_serve_mt_ctx_tls` — the worker pool terminating TLS | ~30 |
+| `serve_rd.mere` | `http_serve_rd port workers handler`, `http_serve_rd_ctx` — a readiness loop for the I/O and workers for the handlers, with keep-alive (C backend) | ~450 |
+
+Each file's header comment says what it is for, how it is used, and
+what it does not do.
 
 ## API
 
@@ -25,6 +66,7 @@ module. A future stage will add a lower-level socket API (`tcp_listen`
 | `http_set_status` | `int -> unit` | override the response status for the current request (default `200`) |
 | `http_set_content_type` | `str -> unit` | override the `Content-Type` for the current request (default `text/plain; charset=utf-8`) |
 | `http_set_header` | `str -> str -> unit` | add or overwrite an arbitrary response header (`Access-Control-Allow-Origin`, `Cache-Control`, `Set-Cookie`, …) |
+| `http_get_header` | `str -> str` | read a request header by name (case-insensitive); `""` if absent |
 
 The handler closure receives the request line as `"<METHOD> <URL>"`
 (e.g. `"GET /hello"`). Its return value becomes the response body.
@@ -51,25 +93,32 @@ let handle = fn req -> "Hello: " ++ req in
 http_serve 8080 handle
 ```
 
-### Build
+### Build and run on Node (Wasm)
 
 ```sh
-dune exec ./bin/mere.exe -- -w -o echo.wat examples/http_echo_server.mere
+dune exec ./bin/mere.exe -- -w examples/http_echo_server.mere > echo.wat
 wat2wasm echo.wat -o echo.wasm
-```
-
-### Run
-
-```sh
 node scripts/run_http_server.js echo.wasm
 # In another terminal:
 curl http://localhost:8080/hello
-# → Hello: GET /hello
+# → Hello from Mere! You asked: GET /hello
 ```
 
 `scripts/run_http_server.js` is the reference host — it merges the
 `http` glue with the standard Wasm env imports (`puts`, math libc
 stubs, etc.) and calls `instance.exports.main()`.
+
+### Build and run natively (C)
+
+```sh
+dune exec ./bin/mere.exe -- -c server.mere > server.c
+clang -o server server.c
+./server
+```
+
+The C backend implements the `http.mere` externs itself (a
+single-threaded accept loop). For concurrency use `serve_mt.mere` or
+`serve_rd.mere`; `scripts/http_concurrency_check.sh` measures it.
 
 ## How it works
 
@@ -87,19 +136,21 @@ stubs, etc.) and calls `instance.exports.main()`.
   entirely within one JS turn — Node's event loop is what keeps the
   process alive between requests.
 
+The section above describes the Node host. Natively, `http_serve` is
+a C accept loop in the emitted runtime, and the request/response
+metadata is per-request state in the same way.
+
 ## MVP limitations
 
-- **Node-only host**. The glue uses Node's `http` module; a browser
-  fetch-based variant would need a different transport.
-- **Streaming responses and binary payloads are unsupported**. The
-  handler returns one UTF-8 string that becomes the whole response
-  body. Chunked / SSE / websocket upgrade would need a different API
-  shape (probably a Mere-side `strbuf`-like "response writer" that the
-  glue drains asynchronously).
-- **No custom request-header access**. Method + URL + body cross the
-  boundary today. Custom headers and structured query parsing all
-  happen host-side (or not at all).
-- **Single handler per process**. Registering multiple servers on
+- **Two hosts, not three**. Node (Wasm) and the C backend implement
+  the externs; there is no browser fetch-based variant.
+- **The plain handler returns one string**. That string becomes the
+  whole response body. Streaming is available per host rather than
+  through the handler's return value: `stream.mere`, `sse.mere` and
+  `websocket.mere` on Node; `sse_native.mere` natively.
+- **Request headers are read one at a time** with `http_get_header`;
+  query strings are parsed Mere-side with `query.mere`.
+- **Single handler per process** (Node host). Registering multiple servers on
   different ports works, but they all share the scratch buffer.
 - **Request body pointer is ephemeral**. `http_current_body ()`
   returns a pointer into a per-request scratch that gets overwritten
@@ -120,5 +171,6 @@ stubs, etc.) and calls `instance.exports.main()`.
 
 Stage 2 contrib (incubation), sibling of `contrib/dom`. Graduation
 target is `mere-http` (separate repo) once the package manager lands.
-The forthcoming lower-level `contrib/net` (raw sockets over a C
-runtime) will slot in below this one when that path is available.
+The lower-level socket layer it once waited for exists as compiler
+builtins (`tcp_listen` / `tcp_accept` / `tcp_read` / `tcp_write`,
+`io_poll_*`), and `serve_mt.mere` / `serve_rd.mere` are built on it.

@@ -5,7 +5,7 @@ Two modules, and the choice between them is the whole point.
 | file | for | API |
 |---|---|---|
 | `cell.mere` | a slot nothing is derived from | `cell_new` / `cell_get` / `cell_set` |
-| `store.mere` | state the screen is a function of | `store_new` / `store_get` / `store_watch` / `store_unwatch` / `store_set` / `store_update` |
+| `store.mere` | state the screen is a function of | `store_new` / `store_get` / `store_watch` / `store_unwatch` / `store_set` / `store_update`, plus `store_watcher_count` for diagnostics |
 
 ## Where this came from
 
@@ -82,6 +82,10 @@ A view that is torn down leaves its watchers behind otherwise. They keep
 running on every write, painting into nodes no longer in the document, and
 the cost grows with how much the user has navigated — nine of those eleven
 were painting nothing anybody could see.
+
+`store_watcher_count` reports how many watchers a store currently holds. It
+is not part of the working API; it is how a page that builds and discards
+views can be asked whether it is accumulating them.
 
 **Nothing makes a caller give the token back.** `store_unwatch` is an
 ordinary call that can simply not be made. Mere's one mechanism for

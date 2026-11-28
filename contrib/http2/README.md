@@ -10,7 +10,7 @@ packet dumper.
 
 | file | exports | lines |
 |---|---|---|
-| `server.mere` | `type grpc_reply` (`RpcOk` / `RpcStream` / `RpcErr`); `module H2Server { serve, serve_n, serve_pool, serve_conn, respond, status codes, pct_encode }` — an h2c connection | ~650 |
+| `server.mere` | `type grpc_reply` (`RpcOk` / `RpcStream` / `RpcErr`), `type h2conn`; `module H2Server { serve, serve_n, serve_pool, serve_conn, unary, respond, apply_settings / apply_window_update, status codes, pct_encode }` — an h2c connection | ~650 |
 | `hpack.mere` | `type hstate`; `module Hpack { new_state; decode; encode; decode_int / encode_int; huff_decode; insert / resize; lookup }` | ~250 |
 | `hpack_table.mere` | `module HpackTable { … }` — **generated** by `scripts/gen_hpack_tables.sh` | ~160 |
 | `frame.mere` | `module H2 { preface; frame types; flags; put_u8/16be/24be/32be; get_u8/16be/24be/32be; put_header / put_frame / frame_bytes; read_frame; has_flag; settings_payload / read_settings; u32_payload / window_increment / error_code; goaway_payload; grpc_message / read_grpc_message }` | ~250 |
@@ -170,15 +170,18 @@ path, not a check**, and is labelled as such so nobody has to re-derive that.
 
 ## The server
 
-`server.mere` turns the layers above into a connection. A handler is `str -> bytes -> grpc_reply` — a path and a request message, giving
-either a response message or a status — and everything about HTTP/2 stays on the
-other side of it.
+`server.mere` turns the layers above into a connection. A handler is
+`str -> bytes list -> grpc_reply` — a path and the request's messages, giving
+either response messages or a status — and everything about HTTP/2 stays on the
+other side of it. `H2Server.unary` adapts a one-in-one-out `str -> bytes -> grpc_reply`
+handler to that shape (see [Flow control, and streaming](#flow-control-and-streaming)).
 
 ```mere
 import "contrib/http2/server.mere";
-H2Server.serve 50051 (fn (path: str, req: bytes) ->
+let handler = fn (path: str, req: bytes) ->
   if str_eq path "/svc/Method" then RpcOk (reply_for req)
-  else RpcErr (H2Server.unimplemented, "no such method: " ++ path))
+  else RpcErr (H2Server.unimplemented, "no such method: " ++ path);
+H2Server.serve 50051 (H2Server.unary handler)
 ```
 
 **A failure is a status in the trailers, not an HTTP status.** The request succeeded
@@ -207,15 +210,18 @@ here knows what ALPN is.
 
 ### What the server does not do, and how each one is checked
 
-- **One connection at a time.** `mhttpd` already showed how to spawn a handler per
-  connection with a buffer pool; doing it here too would mix two problems in one
-  first version.
-- **No flow control.** WINDOW_UPDATE frames are read and ignored and none are sent.
-  Safe only because the responses are small.
+The first version had four limits. Three have since been lifted by the sections
+below; one stands.
+
+- **One connection at a time** — still true of `serve` and `serve_n`;
+  `serve_pool` hands connections to a fixed set of workers (see
+  [A worker pool](#a-worker-pool)).
+- **No flow control** — lifted: both directions of the window are honoured (see
+  [Flow control, and streaming](#flow-control-and-streaming)).
 - **One stream's state at a time.** Sequential streams on one connection work and
-  are checked; interleaved ones would be mis-served.
-- **No streaming.** A handler answers once, so server-streaming and
-  client-streaming methods are not expressible in its signature.
+  are checked; interleaved ones would be mis-served. This one stands.
+- **No streaming** — lifted: a handler takes a `bytes list` and may answer with
+  `RpcStream`; only *interleaved* bidirectional streaming is out.
 
 The DOCUMENTED-GAP that used to sit here — "no RPC status for an unknown method" —
 is gone, and closing it worked the way it was meant to: the assertion of the gap's
