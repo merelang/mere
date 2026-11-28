@@ -8,9 +8,10 @@ absent, and the bytes may be malformed.
 
 | file | exports | lines |
 |---|---|---|
-| `decode.mere` | `module Encoding { label_of, normalize_label, decode_utf8, decode_windows_1252, decode, decode_labelled, replacement }` | ~220 |
-| `jis.mere` | `module Jis { decode_shift_jis, decode_euc_jp }` | ~170 |
-| `jis_index.mere` | `module JisIndex { code_point_208, code_point_212 }` — **generated** | ~50 + two 35KB literals |
+| `decode.mere` | `module Encoding { label_of, normalize_label, decode_utf8, decode_windows_1252, decode, decode_labelled, replacement }` | 199 |
+| `jis.mere` | `module Jis { decode_shift_jis, decode_euc_jp }` | 150 |
+| `jis_index.mere` | `module JisIndex { code_point_208, code_point_212 }` — **generated** | 51, two of them 35KB literals |
+| `labels.mere` | `module Labels { find }` — every label the Standard defines (228, naming 40 encodings), what `label_of` looks up — **generated** | 34, one of them an 8KB literal |
 
 ## Usage
 
@@ -21,8 +22,8 @@ Encoding.decode_labelled "Shift_JIS" bytes   // label, bytes, done
 Encoding.decode_utf8 bytes                   // when you know
 
 match Encoding.label_of " UTF-8 " with
-| Some name -> Encoding.decode name bytes    // None if not implemented yet
-| None -> ()                                 // nobody recognises that label
+| Some name -> Encoding.decode name bytes    // None if not implemented here
+| None -> None                               // nobody recognises that label
 ```
 
 **Decoding never fails.** Every malformed sequence becomes U+FFFD, so
@@ -30,7 +31,10 @@ match Encoding.label_of " UTF-8 " with
 is recognising a label. `decode` returns `?str` for a *different* reason — the
 label named a real encoding this directory has not implemented yet — so a caller
 can tell "unknown encoding" from "known but unsupported" and say so rather than
-guess.
+guess. `label_of` knows every label the Standard defines (`label_of "iso-8859-2"`
+is `Some "iso-8859-2"`), while `decode` implements four: `utf-8`,
+`windows-1252`, `shift_jis` and `euc-jp`. `decode_labelled` falls back to UTF-8
+both when the label is unrecognised and when its encoding has no decoder here.
 
 ## The two counter-intuitive facts
 
@@ -95,25 +99,27 @@ not, and the reason is in **Why these two are not checked against node the way
 the rest is** below — it is not a weakening of the gate but a different, still
 exact, assertion.
 
-**Labels are checked, not derived**, and the harness prints that gap as a SKIP
-rather than implying it is covered: it confirms every label we claim maps where
-we say it does, and it cannot discover a label we forgot to list.
+**Labels are generated, and a sample is checked.** `labels.mere` is written by
+`sh scripts/gen_encoding_labels.sh` (a maintenance command that needs network)
+from the Standard's own `encodings.json`, so the table is not a hand-kept list.
+The harness confirms a fixed set of labels map where we say they do (and that
+non-labels do not resolve), against node and against `label_of`; it still prints
+a SKIP for the one thing a sample cannot do — discover a label missing from the
+table.
 
 `test/parity/encoding_decode.mere` additionally holds all four backends to the
 same output.
 
 ## Byte 0x00, and the LLVM backend
 
-A decoded 0x00 is U+0000, and on the LLVM backend a `str` is `strlen`-based, so
-`str_of_codepoint 0` yields the **empty** string. The character does not truncate
-the text — it **vanishes**, and every offset after it shifts by one. Measured on
-this code: `41 00 42` decodes to length 3 on interp, C and Wasm, and to length 2
-on LLVM.
+A decoded 0x00 is U+0000. When this library was written the LLVM backend's `str`
+was `strlen`-based, so `str_of_codepoint 0` yielded the **empty** string and the
+character vanished: `41 00 42` decoded to length 3 on interp, C and Wasm, and to
+length 2 on LLVM. Since v0.1.264 the LLVM `str` carries its length like the
+other three, and `41 00 42` decodes to length 3 on all four backends.
 
-Silent loss is worse than truncation for anything that then indexes the result,
-so until a byte-safe `str` lands on that backend, treat this as safe for
-0x01..0xFF only. The four-backend parity test deliberately omits 0x00 with the
-reason written at the top, rather than asserting the bug.
+The four-backend parity test still omits 0x00, with the old reason written at
+the top of the file.
 
 ## Shift_JIS and EUC-JP, and where the tables come from
 
@@ -171,10 +177,11 @@ permissive direction.
 - **`meta charset` sniffing.** It belongs with the HTML tokenizer rather than
   here: the algorithm is a scan for tags, and doing it twice in two places is how
   the two disagree.
-- ISO-2022-JP, the UTF-16 variants, GBK, Big5, `x-user-defined`, and the
-  `replacement` encoding. None of their labels are in the table yet either, so
-  they come back as unrecognised rather than as known-but-unsupported — `decode`
-  returning `?str` is for the state in between, when a label is added ahead of
-  its decoder.
+- Decoders for the other 36 encodings the label table names: ISO-2022-JP, the
+  UTF-16 variants, GBK, GB18030, Big5, EUC-KR, the other single-byte legacy
+  encodings (`iso-8859-*`, `windows-125x`, `koi8-*`, `macintosh`, ...),
+  `x-user-defined`, and the `replacement` encoding. Their labels
+  are recognised, so `label_of` answers and `decode` returns None — the
+  known-but-unsupported state `?str` exists for.
 - Encoding *out*. Nothing here needs it yet — a request is bytes and a page is
   bytes, and both arrive already encoded.

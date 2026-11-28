@@ -242,8 +242,9 @@ worth saying out loud, because everywhere else the resolvers are the data.
 
 ### Where arguments started mattering
 
-This executor ignores field arguments, like graphql-js's default resolver. Two
-places here cannot:
+With the data as the resolver, a field's arguments have nothing to reach — the same
+as graphql-js's default resolver (a `GFn` field, below, is the exception that came
+later). Two places here could not ignore them even before that:
 
 - **`__type(name:)`** — without its argument it is not a field, it is a different
   question.
@@ -449,8 +450,9 @@ nothing says so.**
 `examples/graphql_server.mere` is a GraphQL endpoint over HTTP/1.1, compiled with the
 C backend and driven by `curl` in `scripts/graphql_server_parity.sh`.
 
-**HTTP/1.1 on raw sockets rather than `contrib/http`**, which is Node-hosted — one
-extern plus glue JS, needing a Wasm build and `node`. This runs natively, the same way
+**HTTP/1.1 on raw sockets rather than `contrib/http`**, which was Node-hosted when
+this was written — one extern plus glue JS, needing a Wasm build and `node`. (It has
+since gained a native C path; see its README.) This runs natively, the same way
 `examples/grpc_hello.mere` does, and for the same reason: a server you can hand
 somebody as a binary. The HTTP handling lives in the example rather than in `contrib/`
 until a second program needs it; a real HTTP/1.1 module owes a gate of its own for
@@ -521,10 +523,12 @@ resolve it from, and nobody had looked.
 
 ## Not here yet
 
-- **11 validation rules**, each named on the harness's gap list and each exercised by
-  its corpus: `VariablesInAllowedPosition`, `OverlappingFieldsCanBeMerged`,
-  `PossibleFragmentSpreads`, `UniqueInputFieldNames`, `SingleFieldSubscriptions` and
-  the rest.
+- **11 validation rules.** Five are named on the harness's gap list and each is
+  exercised by its corpus: `VariablesInAllowedPosition`, `OverlappingFieldsCanBeMerged`,
+  `PossibleFragmentSpreads`, `UniqueInputFieldNames`, `SingleFieldSubscriptions`. The
+  other six — `KnownOperationTypes`, `MaxIntrospectionDepth` and the four
+  `@defer` / `@stream` rules — never fire on the corpus, so the harness has nothing to
+  compare for them.
 - **`Did you mean ...` suggestions**, which need graphql-js's own ranking.
 - **Source positions**, so no rule reports a location — the parser does not carry
   them, the same gap the executor has for `locations`.

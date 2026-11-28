@@ -16,8 +16,13 @@ let input =
 let doc = Toml.parse_toml input in
 match Toml.get doc "server.host" with
 | Toml.TStr s -> print s
-| _ -> ();
+| _ -> ()
 ```
+
+`toml.mere` still carries its self-test at the bottom of the file, outside
+`module Toml`, so a program that imports it also prints the self-test
+report (`=== Toml === ... === Toml self-test done ===`) before its own
+output.
 
 ## API
 

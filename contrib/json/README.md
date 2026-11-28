@@ -8,8 +8,10 @@ matching with zero external dependencies.
 
 | file | export | lines |
 |---|---|---|
-| `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JFloat \| JStr \| JArr \| JObj; parse_json: str -> json; as_float: json -> float }` | ~220 |
-| `writer.mere` | `type json` (top-level) + `module JsonWriter { to_json_str, to_pretty_str }` | ~135 |
+| `json.mere` | `module Json { type json = JNull \| JBool \| JNum \| JFloat \| JStr \| JArr \| JObj; parse_json: str -> json; to_json_str: json -> str; to_pretty_str: json -> str; escape_str: str -> str; as_float: json -> float }` | ~320 |
+
+The parser and the writer live in the same module and share one `Json.json`
+type, so a parsed value can be written back out directly.
 
 ## Usage (before pkg manager lands)
 
@@ -22,30 +24,31 @@ match v with
 | Json.JArr xs -> ...
 | Json.JNull -> ...
 | _ -> ...
+
+// Write it back: compact or pretty-printed
+Json.to_json_str v      // "[1,2,3]"
+Json.to_pretty_str v
 ```
 
 Or **copy-paste** into a project:
 
 ```sh
 cp contrib/json/json.mere    my_project/
-cp contrib/json/writer.mere  my_project/
 ```
 
-The self-test block at the end of each file (`run_case` demo, `let doc = …`,
-etc.) may be removed in real use.
-
-`writer.mere` was wrapped in `module JsonWriter { ... }` in Phase 43. However,
-`type json` is kept **outside the module** (it can't coexist with the parser's
-`module Json { type json = ... }` inside a single file, but each file works
-independently). To round-trip parser + writer in one program, the user must
-avoid `type json` collision (using either parser or writer only is the expected
-mode for now).
+`json.mere` is module-only: it has no self-test block, so importing it prints
+nothing. The writer used to be a separate `writer.mere` with its own top-level
+`type json`, which made parse-then-write impossible in one program; it has
+been merged into `module Json`.
 
 ## Coverage
 
 - atoms: `null` / `true` / `false` / number / string
 - composite: array / object
 - escape: `\"` `\\` `\n` `\t` `\r` `\/` decoded via `str_unescape`
+- writer: `to_json_str` (compact) / `to_pretty_str` (two-space indented
+  objects); `escape_str` escapes `"` and `\` only (a newline or other control
+  character in a `JStr` is written raw, which is not valid JSON)
 - **Unsupported**: unicode `\uXXXX`
 
 ### Two number constructors, on purpose
@@ -66,10 +69,10 @@ Three reasons, and the third is the one that decided it:
 `Json.as_float` widens either, for readers that do not care.
 
 **Adding `JFloat` made every existing `match` over `json` non-exhaustive**, and
-the three in this tree were updated with it. Be aware that only the interpreter
-prints that warning — `mere -c`, `-ll` and `-t` are silent — so a `match` in
-your own code that this constructor broke will compile and then fail at
-runtime, and a wildcard arm returning a default will answer wrongly instead.
+the three in this tree were updated with it. A non-exhaustive `match` is now a
+compile error on every backend, so a `match` in your own code that lacks a
+`JFloat` arm is refused rather than failing at runtime — but a wildcard arm
+returning a default still compiles, and will answer wrongly for a `JFloat`.
 
 ### Deviations from strict JSON
 
@@ -84,14 +87,15 @@ runtime, and a wildcard arm returning a default will answer wrongly instead.
 ## Known gotchas
 
 - **String literal containing `{`**: Phase 36 string interpolation treats `"{"`
-  as an interpolation start, so escape it with `"\{"` (the json.mere /
-  writer.mere demos already apply this workaround)
-- **The name `case` collides with a C reserved word** in C codegen
-  (libc/C keyword) — this lib renames its own test helper to `run_case`. See
-  [docs/reserved-names.md](../../docs/reserved-names.md) for the full reserved-name list.
+  as an interpolation start, so escape it with `"\{"` (the writer in json.mere
+  already applies this workaround)
+- **C reserved words**: top-level `let` names are prefixed by every backend,
+  so a helper called `case` is fine; only a `type` named after a C keyword or
+  libc name collides. See [docs/reserved-names.md](../../docs/reserved-names.md)
+  for the full list.
 
 ## Position
 
 Stage 2 contrib (incubation). See lifecycle in [contrib/README.md](../README.md).
 After public release + pkg manager lands, graduation target is the separate
-repo `mere-json` (internal design notes §3.1).
+repo `mere-json`.

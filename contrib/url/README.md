@@ -7,10 +7,10 @@ resolution against a base, and serialisation back out.
 
 | file | exports | lines |
 |---|---|---|
-| `percent.mere` | `module Percent { c0_control, fragment, query, special_query, path, userinfo, component, encode, decode, decode_strict }` | ~140 |
-| `path.mere` | `module Path { split_fragment, split_query, is_single_dot, is_double_dot, normalize, opaque, encode_query, encode_fragment }` | ~110 |
-| `ipv6.mere` | `module Ipv6 { parse, serialize, canonical, longest_zero_run, group_value, dotted_quad }` | ~200 |
-| `host.mere` | `type url_parts`, `module Url { parse, resolve, href, origin, has_opaque_path, is_special, default_port, clean, scheme_len, parse_host, parse_port, try_ipv4, ends_in_number, last_index_of }` | ~500 |
+| `percent.mere` | `module Percent { c0_control, fragment, query, special_query, path, userinfo, component, encode, decode, decode_strict }` | 142 |
+| `path.mere` | `module Path { split_fragment, split_query, is_single_dot, is_double_dot, normalize, opaque, encode_query, encode_fragment }` | 106 |
+| `ipv6.mere` | `module Ipv6 { parse, serialize, canonical, longest_zero_run, group_value, dotted_quad }` | 232 |
+| `host.mere` | `type url_parts`, `module Url { parse, resolve, href, origin, has_opaque_path, is_special, default_port, clean, scheme_len, parse_host, parse_port, try_ipv4, ends_in_number }` | 526 |
 
 ## Usage
 
@@ -33,10 +33,9 @@ Percent.encode Percent.path "a b#c"      // "a%20b%23c"
 Percent.decode "%E3%81%82"               // "あ"
 ```
 
-`parse` returns `?url_parts` rather than failing, because rejecting input is half
-of what a URL parser does — and on the wasm backend `fail` sets a flag and
-returns a sentinel instead of unwinding, so a caller between the failure and its
-`try_or` still runs. A rejection has to be a value.
+`parse` returns `url_parts option` rather than failing, because rejecting input
+is half of what a URL parser does, and a caller should match on a rejection
+rather than catch one. A rejection has to be a value.
 
 Three fields of `url_parts` are booleans — `has_authority`, `has_query`,
 `has_fragment` — because presence and content are separate state and the
@@ -209,10 +208,9 @@ every URL was rejected — with node agreeing with the interpreter the whole tim
   lowercased, but not mapped or normalised, so a non-ASCII host stays as its
   UTF-8 bytes instead of becoming `xn--`.
 - `file:` URLs, which have their own host and drive-letter rules.
-- `decode` into `bytes`. A decoded value is bytes, and a `str` holding a NUL is
-  not representable on the LLVM backend, whose `str` is `strlen`-based — so
-  `Percent.decode "%00"` differs by backend. Callers that can receive `%00`
-  should treat this as ASCII-safe only until that is fixed. The parser above it
+- `decode` into `bytes`. A decoded value is bytes, and `Percent.decode` hands
+  them back as a `str` (`Percent.decode "a%00b"` is three bytes, NUL included,
+  on all four backends) with no claim that they are UTF-8. The parser above it
   never decodes into anything it then measures.
 
 ## Relationship to `contrib/http/query.mere`
