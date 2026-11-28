@@ -1,6 +1,8 @@
-# Packages (v0.1)
+# Packages
 
-Mere's package system is intentionally small. A project is a directory
+Mere's package system is intentionally small. The resolution rules below are
+v0.1; `mere.toml` and `mere install` (v0.2, further down) automate filling
+`.mere_modules/`. A project is a directory
 that contains a `.mere_modules/` subdirectory; every top-level entry in
 that subdir is a "package", every `.mere` file inside a package is a
 "module". Imports of the form `import "<package>/<module>.mere";`
@@ -72,7 +74,9 @@ how the files got there.
 
 ## Precedence
 
-Import resolution tries paths in this order:
+Import resolution tries paths in this order (a project that declares a module
+`path` in `mere.toml` gets one more step in front of these; see
+[In-repo resolution](#in-repo-resolution-via-a-module-path) below):
 
 1. `<current_file_dir>/<path>` — historical behaviour for
    same-directory / relative imports (`import "./util.mere"` still
@@ -185,7 +189,7 @@ same way as main's, and 64 threads under a 512 MB request hold about 2.6 MiB.
 So does every coroutine (`coro_new`, v0.1.543; C and LLVM): its stack is the
 requested size, or 8 MiB without a request, reserved below a guard page.
 
-**The Wasm and RV32IM backends refuse a file that asks.** There the stack is not
+**The Wasm and RISC-V (`-rv` / `-rv64`) backends refuse a file that asks.** There the stack is not
 the program's to size — Node takes `--stack-size` when it runs the module, and a
 bare-metal image gets its stack from the linker script — so asking is an error
 rather than something quietly dropped. A size the compiler cannot read is
@@ -330,12 +334,10 @@ there is a gate runner written in Mere (mgate).
 for v0.3+; the design work is in the project's internal notes.
 
 **No version resolution**. `rev` pins an exact commit. If two packages
-pin different revs of a shared dependency, whichever wins the walk-up
-wins the import. Semver ranges are a v0.3+ concern.
-
-**No version resolution**. If two vendored packages both bundle a
-different version of `mere-http`, whichever wins the walk-up wins the
-import. Sort this out at the deployment layer for now.
+pin different revs of a shared dependency, or two vendored packages both
+bundle a different version of `mere-http`, whichever wins the walk-up wins
+the import. Sort this out at the deployment layer for now; semver ranges
+are a v0.3+ concern.
 
 ## Demo
 

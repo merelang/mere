@@ -123,7 +123,7 @@ Where the types run:
 | C | yes | yes | clang's `vector_size(16)` types; swizzle by `#if` (NEON `vqtbl1q_u8` / SSSE3 `_mm_shuffle_epi8` / scalar) |
 | LLVM IR | yes | yes | `<2 x double>` / `<16 x i8>`; vectors through heap memory carry `align 8` (the allocator's guarantee) |
 | Wasm | yes | yes | `v128`; a value stays unboxed on the stack and in `v128` locals inside an expression, and is boxed into a 16-byte block only when it escapes (a call argument, a record field, a capture) |
-| RISC-V (RV32IM / RV64IM) | refused (`f32x4` too) | yes, RVV 1.0 (`vsetivli`, `vle8`/`vse8`, integer and mask ops, `vrgather`, `vslideup`/`vslidedown`, `vredor`, `vwredsumu`) | an expression tree is evaluated in `v1`..`v7` and boxed once at its root; a let-bound value used only as an operand lives in `v8`..`v15` when no call can run before its last use |
+| RISC-V (RV32IM / RV64IM) | yes since v0.1.656, in software: the prelude's boxes of lanes (`rvf2` / `rvf4`), because the target has no floating-point unit | yes, RVV 1.0 (`vsetivli`, `vle8`/`vse8`, integer and mask ops, `vrgather`, `vslideup`/`vslidedown`, `vredor`, `vwredsumu`) | an expression tree is evaluated in `v1`..`v7` and boxed once at its root; a let-bound value used only as an operand lives in `v8`..`v15` when no call can run before its last use |
 
 The cost to know about is the box. On Wasm and RISC-V a SIMD value that
 crosses a call or a data structure is a heap allocation, and neither backend
@@ -259,7 +259,9 @@ was to refuse `fma` on Wasm, and a program that then wrote `a * b + c` for
 that one backend would get a different answer there, which is the thing the
 pragma exists to prevent. `scripts/fma_check.sh` holds all four backends to
 the C library's `fma(3)` bit for bit, including ties decided by one sticky
-bit. The RISC-V backends refuse `fma` by name.
+bit. On RISC-V, which has no floating-point unit, `fma` is the prelude's
+(v0.1.656), computed in doubles with the product kept exact as a head and a
+tail; `fma_check.sh` runs that leg on RV64 when `MEMU` names a memu checkout.
 
 ## See also
 

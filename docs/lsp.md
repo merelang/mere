@@ -5,12 +5,13 @@ mere lsp
 ```
 
 Speaks LSP over stdin and stdout. What it does today is **diagnostics** — every
-syntax error in the buffer, republished on each keystroke, and the first type
-error once the file parses — **hover**, which reports the type inference gave
+syntax error in the buffer, republished on each keystroke, and the type errors
+once the file parses (see "What it does not answer yet" for the ones that still
+stop a declaration) — **hover**, which reports the type inference gave
 whatever is under the cursor, **go to definition**, **completion**, an
 **outline**, **formatting**, **semantic highlighting**, **find references**,
-**rename**, **code actions**, **document highlight**, **go to type definition**
-and **signature help**.
+**rename**, **code actions**, **document highlight**, **go to type definition**,
+**signature help** and **folding**.
 
 It is the same check the compiler runs — `Pipeline.check`, which the CLI also
 goes through. A language server that agrees with the compiler on good days
@@ -34,8 +35,12 @@ a call that is still unfinished. That is what keeps `add3 (pick Red) ` from
 reporting about `pick`. A call spanning lines gets no help rather than the
 wrong help.
 
-**`foldingRange` is deliberately absent**: the same missing extent means nothing
-knows where a declaration ends.
+**`foldingRange` was absent from v0.1.504** for the same missing extent: nothing
+knew where a declaration ends. Since v0.1.576 the parser records each top-level
+declaration's first and last line (`Parser.decl_spans` — the tokens one call of
+`parse_decls` consumed are exactly one declaration), so a declaration that spans
+lines folds, and so does a run of two or more comment lines
+(`scripts/lsp_folding_check.sh`).
 
 ## Hover
 
@@ -100,14 +105,19 @@ same on stdout, so a client that can start a process can talk to it.
 
 | method | behaviour |
 |---|---|
-| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider`, `definitionProvider`, `completionProvider`, `documentSymbolProvider`, `documentFormattingProvider`, `semanticTokensProvider` |
+| `initialize` | capabilities: full-text sync (`textDocumentSync: 1`), `hoverProvider`, `definitionProvider`, `typeDefinitionProvider`, `completionProvider`, `signatureHelpProvider` (triggered by a space or `(`), `documentSymbolProvider`, `foldingRangeProvider`, `referencesProvider`, `documentHighlightProvider`, `renameProvider` (with `prepareProvider`), `documentFormattingProvider`, `codeActionProvider`, `semanticTokensProvider` |
 | `textDocument/hover` | the inferred type of the narrowest node under the cursor, as `name : type` when it is a name |
 | `textDocument/definition` | where the name under the cursor was bound, when that is somewhere in this file |
+| `textDocument/typeDefinition` | where the type of the node under the cursor was declared (not for prelude types) |
+| `textDocument/signatureHelp` | the type of the call head before the cursor, and which argument the cursor is on |
 | `textDocument/completion` | every name visible at the cursor, innermost first, with its type |
 | `textDocument/documentSymbol` | the file's top-level declarations, for the outline and symbol search |
+| `textDocument/foldingRange` | multi-line top-level declarations and runs of comment lines |
 | `textDocument/formatting` | the whole document, formatted — the same function `mere fmt` runs |
 | `textDocument/semanticTokens/full` | which names are parameters, functions, constructors |
 | `textDocument/references` | every occurrence of the binding under the cursor |
+| `textDocument/documentHighlight` | the same occurrences, drawn in the file |
+| `textDocument/codeAction` | the quickfixes and rewrite under "Code actions" above |
 | `textDocument/rename` / `prepareRename` | the same occurrences, rewritten; refuses what this file does not own |
 | `textDocument/didOpen` / `didChange` / `didSave` | check the buffer, publish diagnostics |
 | `textDocument/didClose` | publish an empty list, clearing the underlines |
@@ -279,6 +289,12 @@ Those numbers are from v0.1.220. Before it they were 524ms, 1834ms, 7741ms and
 5261ms: `generalize` scanned the whole type environment per binding, so checking
 was quadratic in the number of bindings. `scripts/infer_scaling.sh` is the guard
 that keeps it linear.
+
+Since v0.1.576 a burst of keystrokes is not a queue of checks: before a
+`didChange` is handled, the messages that have already arrived are read, and an
+unbroken run of `didChange`s for one document is handled as its last
+(`scripts/lsp_coalesce_check.sh`). A request between two changes is still
+answered against the text it was asked about.
 
 The largest file is still over a second, and the remaining cost is spread evenly
 across parsing, inference and the move checker rather than concentrated in one

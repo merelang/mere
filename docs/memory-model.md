@@ -417,6 +417,17 @@ left, then the resident size read from outside (1 MB, against 841 MB under
 malloc); on Linux a region of 1,000 compacted maps (5 MB, against 405 MB with
 the threshold left dynamic).
 
+**A released region goes to a per-thread cache first (C backend).** Since
+v0.1.727 the cache is 64 deep: past the first eight slots it holds only regions
+whose block is the 1 MiB seed, and at most eight slots may keep a grown block,
+each capped at 16 MiB, so the cached payload is bounded per thread (a bound on
+capacity, not on process RSS). A native build can choose a depth from 1 to 64
+with `-DMERE_REGION_CACHE_CAP=N` (v0.1.729). A cached region's used bytes are
+cleared before reuse (v0.1.729; on Linux, whole dead pages are discarded with
+`MADV_DONTNEED` instead of written). `mem_trim ()` (stdlib reference) is the
+explicit request to give cached memory back after a burst. LLVM has its own
+region implementation and does not share this cache.
+
 **Containers grow in place when they can (v0.1.414).** `vec_push`,
 `strbuf_push` and `bytebuf_push` double their buffer when it fills. In a bump
 arena the old buffer cannot be handed back, so before v0.1.414 a container
