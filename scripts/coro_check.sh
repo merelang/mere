@@ -100,6 +100,7 @@ factory_region|ic|13 13 17 17;2|0
 builtins_as_values|icl|42;7|0
 release_walk|ic|2250|0
 retire_moved|ic|300|0
+shed|i|4188894;values: intact;held: intact|0
 scan_outer|icl|all found;200880;0|0
 scan_strings|icl|string roots passed|0
 scan_strings_sparse|c|sparse string roots passed|0
@@ -189,6 +190,25 @@ else
   elif [ "$r" -lt "$RSS_CAP_C" ]; then printf '  ok    %s\n' "C: 300 arenas retired under a stack that then ran hold $((r / 1048576)) MiB"
   else printf '  FAIL  %s\n' "C: 300 arenas retired under a stack that then ran hold $((r / 1048576)) MiB"; fail=1; fi
 fi
+
+# --- giving back the pages of a pinned arena ---------------------------------
+# shed: a map rewritten forty times while coroutines stop holding values it
+# then drops; each compaction they refuse gives back the pages nothing can
+# read. The same answer with it on, off (MERE_ARENA_SHED=0) and under the
+# check (=protect: a page given back that is read faults), and on, it says
+# it gave something back.
+SHED_WANT='4188894;values: intact;held: intact|0'
+for opt in -O0 -O2; do
+  if ! why=$(build shed "$opt" c); then printf '  FAIL  %s\n' "C $opt shed: $why"; fail=1; continue; fi
+  for mode in 1 0 protect; do
+    got=$(run_bounded env MERE_ARENA_SHED="$mode" "$T/bin")
+    if [ "$got" = "$SHED_WANT" ]; then printf '  ok    %s\n' "C $opt shed (MERE_ARENA_SHED=$mode)"
+    else printf '  FAIL  %s\n' "C $opt shed (MERE_ARENA_SHED=$mode): got [$got] wanted [$SHED_WANT]"; fail=1; fi
+  done
+  gave=$(MERE_ARENA_SHED_LOG=1 "$T/bin" 2>&1 >/dev/null | awk '/^shed:/ { g += $(NF-4) } END { print g + 0 }')
+  if [ "$gave" -gt 0 ]; then printf '  ok    %s\n' "C $opt shed: gave back $((gave / 1024)) MiB"
+  else printf '  FAIL  %s\n' "C $opt shed: gave nothing back"; fail=1; fi
+done
 
 # --- refusals -------------------------------------------------------------
 refuse() {  # $1 = label, $2 = flag ("" = interpreter), $3 = program, $4 = text the refusal must contain
