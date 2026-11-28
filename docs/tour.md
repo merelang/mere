@@ -3,8 +3,8 @@
 A fast, example-driven tour of the language — one scroll through every core
 feature. Each snippet is a complete program (the last expression is the
 program's result / what gets printed). For depth, see the
-[language reference](language-reference.html) and the
-[tutorial](tutorial.html).
+[language reference](language-reference.md) and the
+[tutorial](tutorial.md).
 
 Run any snippet three ways:
 
@@ -96,7 +96,7 @@ interpolates (write a literal brace as `\{`).
 ```mere
 let name = "Mere";
 let n = 42;
-print "hello {name}, n={show n}";            // hello Mere, n=42
+let _ = print "hello {name}, n={show n}";    // hello Mere, n=42
 print (show ("apple" < "banana"))            // true
 ```
 
@@ -110,7 +110,7 @@ serializers.
 type Post = { id: int, title: str, published: bool };
 let a = Post { id = 1, title = "hi", published = true };
 let b = Post { id = 1, title = "hi", published = true };
-print (to_json a);            // {"id":1,"title":"hi","published":true}
+let _ = print (to_json a);    // {"id":1,"title":"hi","published":true}
 print (show (a == b))          // true
 ```
 
@@ -137,10 +137,10 @@ greet (mk_logger "app") "world"    // logs: app [INFO] hi world
 
 ## Where to go next
 
-- [Language reference](language-reference.html) — full syntax and semantics
-- [Tutorial](tutorial.html) — build something step by step
+- [Language reference](language-reference.md) — full syntax and semantics
+- [Tutorial](tutorial.md) — build something step by step
 - Real apps written in Mere: a
-  [REST API](tutorial-rest-api.html), a [Redis client](tutorial-redis-client.html),
-  and a [type inferencer](tutorial-type-inference.html)
-- [Memory model](memory-model.html), [packages](packages.html),
-  [stdlib](stdlib-reference.html)
+  [REST API](tutorial-rest-api.md), a [Redis client](tutorial-redis-client.md),
+  and a [type inferencer](tutorial-type-inference.md)
+- [Memory model](memory-model.md), [packages](packages.md),
+  [stdlib](stdlib-reference.md)

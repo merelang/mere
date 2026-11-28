@@ -83,7 +83,7 @@ Most likely to hit: **`read`** / **`write`** (when writing file-I/O wrappers); *
 
 `strlen` / `strcpy` / `strncpy` / `strcat` / `strncat` / `strcmp` / `strncmp` / `strchr` / `strrchr` / `strstr` / `strdup` / `strerror` / `memcpy` / `memmove` / `memset` / `memcmp` / `memchr` / **`main`**
 
-`main` is especially important — C reserves it as the execution entry point. A Mere top-level expression automatically becomes the `main` function, so a user `let main = ...` is **always a conflict**.
+`main` is especially important for a **type** name — C reserves it as the execution entry point, and a Mere program's top-level expression becomes the C `main` function, so `type main = ...` fails in the C compiler. A `let main = ...` is fine since v0.1.538: like every top-level binding it is emitted under a prefix.
 
 ## 2. Avoidance patterns (3) — for a type name in §1
 

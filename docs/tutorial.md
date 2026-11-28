@@ -5,14 +5,17 @@ For readers with ML-family experience. About a 15-minute read.
 ## 0. Install and run
 
 ```sh
-git clone git@github.com:merelang/mere
+git clone https://github.com/merelang/mere
 cd mere
+opam install . --deps-only
 dune build
 dune exec ./bin/mere.exe -- -e '1 + 2 * 3'   # → 7
 dune exec ./bin/mere.exe -- -r               # REPL
 ```
 
-Below, `mere` is shorthand for `dune exec ./bin/mere.exe --`.
+Below, `mere` is shorthand for `dune exec ./bin/mere.exe --`. A prebuilt
+binary (macOS arm64, Linux x86_64) is also available; the
+[README](../README.md#install) has the one-line installer.
 
 ## 1. Expressions and evaluation
 
@@ -430,9 +433,9 @@ let p = M.mk (3, 4) in p.x + p.y          // 7
 M.unwrap (MySome 35)                       // 35
 ```
 
-Current limits (slice 1):
-- Type / record / constructor names declared inside a module **go into the global registry without M-prefix**, so declaring the same name in different modules causes collisions. M-prefix scoping is in a later slice.
-- `open M;` only opens M's direct bindings (`open M.N;` not yet supported).
+Current limits:
+- Type and record names declared inside a module **go into the global registry without the M-prefix** (`Json.json` in an annotation is the bare `json`), so two modules cannot declare *different* types under one name — that is refused with both declarations named. Constructors are scoped: `A.Red` and `B.Red` can coexist. See the language reference's "Known constraints".
+- `open M;` opens M's bindings; a nested module is opened with `open M.N;`.
 
 **Phase 9.5 made import paths importer-relative**: a relative path like `./foo.mere` is resolved **relative to the file containing the import statement** (not cwd). `Unix.realpath` canonicalizes paths, so different relative forms referring to the same file get cycle-guarded correctly.
 
@@ -682,18 +685,18 @@ Phase 36 added 13 kinds of syntactic sugar, substantially improving ergonomics i
 ### Ranges and collections
 
 ```mere
-0..5                  // [0, 1, 2, 3, 4]
-1..10                 // [1, 2, ..., 9]
+0..5                  // [0, 1, 2, 3, 4, 5] (both ends included)
+1..10                 // [1, 2, ..., 10]
 
 1 :: 2 :: 3 :: []     // cons operator (= Cons (1, Cons (2, ...)))
 
 // list comprehension (multi-generator + filter)
 [x * 2 | x <- 1..5, x % 2 == 0]            // [4, 8]
-[(r, c) | r <- 0..3, c <- 0..3, r != c]    // 9 pairs
+[(r, c) | r <- 0..3, c <- 0..3, r != c]    // 12 pairs
 
 // for / while loops (for side effects)
 for x in 1..5 do print (show x);
-while !done do step ();
+while not (finished ()) do step ();
 ```
 
 ### Operator section / lambda
@@ -870,7 +873,7 @@ How each backend implements it:
 - **LLVM codegen**: `declare <ret> @<name>(<args>)` + LLVM call instruction.
 - **Wasm codegen**: `(import "env" <name> ...)` env host import; `scripts/run_wasm.js` (Node.js host harness) injects the JS implementation.
 
-MVP type scope: combinations (arrow chain) of `int` / `bool` / `str` / `unit`. `float` / `tuple` / `record` / `variant` / callbacks are deferred to later phases.
+The types that can cross depend on the backend. `int` / `bool` / `str` / `unit` work everywhere; on C and LLVM `float`, a monomorphic record and `bytes` cross too, and on C a borrowed Mere closure can be passed as a callback. `mere --ffi-header <file>` prints the C header for the declarations. The language reference's "Known constraints" has the full per-backend rules.
 
 ```mere
 extern fn getppid: unit -> int;
@@ -883,13 +886,14 @@ For details and design decisions see the internal design notes.
 
 ## 13. Native compilation (C / LLVM / Wasm — together with interp, 4-backend feature parity)
 
-Mere programs can be emitted in three codegen backends, and combined with the interpreter, **all 4 backends (interp + C + LLVM + Wasm) work at feature parity**. Phases 24-27 brought 12 examples to PERFECT match; Phase 28 added 4 more; **16 realistic examples (~2500 LoC; toy_sql.mere alone is 1165 LoC) reached diff = 0 across all 4 backends** (2026-06-21 to 22).
+Mere programs can be emitted in three codegen backends, and combined with the interpreter, **all 4 backends (interp + C + LLVM + Wasm) work at feature parity**. Phases 24-27 brought 12 examples to PERFECT match; Phase 28 added 4 more; **16 realistic examples (~2500 LoC; toy_sql.mere alone is 1175 LoC today) reached diff = 0 across all 4 backends** (2026-06-21 to 22).
 
 | Flag | Backend | Output |
 |---|---|---|
 | `-c` / `-ce` | C source | Use `clang` to produce a native binary |
 | `-ll` / `-lle` | LLVM IR | Use `clang` (or `llc` + `clang`) to produce a native binary |
-| `-w` / `-we` | Wasm (WAT) | `wat2wasm` produces `.wasm`; run via `scripts/run_wasm.js` (Node.js) |
+| `-w` / `-we` | Wasm (WAT) | `wat2wasm --enable-tail-call` produces `.wasm`; run via `scripts/run_wasm.js` (Node.js) |
+| `-rv` / `-rve` / `-rv64` | RISC-V machine code (RV32IM / RV64IM) | A flat binary with no assembler or linker; runs on an emulator or QEMU, see [bare-metal.md](bare-metal.md) |
 
 Producing C from a `*.mere` file:
 
@@ -928,7 +932,7 @@ mere -ll examples/factorial.mere | llc - -o fact.s && clang fact.s -o fact
 
 # Wasm (WAT)
 mere -w examples/factorial.mere > fact.wat
-wat2wasm fact.wat -o fact.wasm    # wabt required separately
+wat2wasm --enable-tail-call fact.wat -o fact.wasm    # wabt required separately
 ```
 
 For details see [codegen.md](codegen.md).
@@ -943,8 +947,9 @@ operations use the selected host's facilities. See the
 [host support matrix](host-matrix.md) for individual APIs and host requirements.
 
 Some boundaries remain: `OwnedVec` needs explicit `with` for scope-bound
-cleanup, LLVM does not implement `of_json` decoding, and LLVM refuses a
-function returned from a region block. The [codegen guide](codegen.md) and
+cleanup, and LLVM refuses a function returned from a region block. (LLVM
+decodes `of_json` since v0.1.665, except where the target type is only known
+inside a polymorphic library function.) The [codegen guide](codegen.md) and
 [memory model](memory-model.md) describe these restrictions. Run
 `sh scripts/parity.sh <file> ...` to check a concrete program across the four
 backends; it distinguishes a named refusal from a compilation failure or
