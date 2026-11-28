@@ -1,4 +1,4 @@
-# contrib/parser — Mere self-hosted parser (Phase 50 in progress)
+# contrib/parser — Mere self-hosted lexer + parser
 
 The current self-host parser accepts parenthesized alternatives inside
 constructors, tuples, records, lists and aliases, and `"prefix" <> suffix`
@@ -6,11 +6,15 @@ patterns. A bare `|` still separates match alternatives; nested alternatives
 use parentheses. Prefix literals accept `\0`, and suffixes preserve bytes.
 The stage tables below record the implementation history.
 
-The OCaml `Mere.Lexer` (lib/lexer.ml, 391 lines) and `Mere.Parser`
-(lib/parser.ml, 1935 lines) are the reference implementations; this
-directory holds the in-progress Mere self-host so that
-`contrib/fmt/fmt.mere`'s pretty-printer can be fed real Mere source
-instead of hand-coded AST literals.
+The OCaml `Mere.Lexer` (lib/lexer.ml) and `Mere.Parser` (lib/parser.ml)
+are the reference implementations; this directory holds the Mere
+self-host. It was started so that `contrib/fmt/fmt.mere`'s pretty-printer
+could be fed real Mere source instead of hand-coded AST literals, and is
+now the front end shared by the rest of the self-host pipeline:
+`contrib/fmt`, `contrib/eval`, `contrib/typer`, `contrib/codegen` and
+`contrib/mlint` all import it. Entry points: `tokenize` (lexer),
+`parse_decls`, `parse_str_program : str -> str` (a debug rendering) and
+`parse_program_ast : str -> program` (the AST value).
 
 Together with `contrib/fmt/`, this directory completes the §S1
 self-host plan.
@@ -26,9 +30,9 @@ retains declaration parameters and application grouping.
 
 | file | scope | lines |
 |---|---|---|
-| `lexer.mere` | Tokenizer: source string → `(int, token) list`. Covers literals, ident / keywords, the 12-precedence operator set, and standard punctuation (Stage 50a). | ~336 |
-| `ast.mere` | Shared AST type definitions (`binop` / `cmpop` / `logicop` / `ty` / `pattern` / `expr` / `top_decl` / `program`). Imported by both `parser.mere` and `contrib/fmt/fmt.mere` so the two ends of the self-host pipeline share one definition. Type-only — no functions, no demos. | ~90 |
-| `parser.mere` | Full Mere program parser: tokens → `program = (top_decl list, expr)`. Imports `ast.mere` for the type definitions. | ~1010 |
+| `lexer.mere` | Tokenizer: source string → `(int, token) list`. Covers literals, ident / keywords (every reserved word the OCaml lexer has), the 12-precedence operator set, and standard punctuation (Stage 50a). | ~425 |
+| `ast.mere` | Shared AST type definitions (`binop` / `cmpop` / `logicop` / `ty` / `pattern` / `expr` / `top_decl` / `program`). Imported by both `parser.mere` and `contrib/fmt/fmt.mere` so the two ends of the self-host pipeline share one definition. Types plus a few constructor-name helpers (`constructor_identity` / `constructor_scope_ref` / `constructor_runtime_ref` / `constructor_label`); no demos. | ~160 |
+| `parser.mere` | Full Mere program parser: tokens → `program = (top_decl list, expr)`, including flattening `module` bodies and resolving constructor names. Imports `ast.mere` for the type definitions. | ~2135 |
 | `free_names.mere` | Which names a program uses without binding: `free_names : program -> str list`. An AST query, not evaluation — it exists because a host that runs somebody else's program has to decide whether to run it, and the evaluator only answers when control reaches the call. `extern fn` counts as a request rather than a definition, matching what the evaluator does with it. Consumer: `examples/plugin/runner.mere`, gated by `scripts/plugin_host_check.sh`. | ~170 |
 
 ## Status
@@ -80,12 +84,16 @@ f5  (match guard):   Match(Var(n), [Var(x) when Cmp(>, Var(x), Int(0)) -> Var(x)
 g5  (fn arrow ty):   Fun(f : Arrow(Int, Str), App(Var(f), Int(1)))
 g10 (annot expr):    Annot(Int(42), Int)
 h5  (let rec mutual): Program(TopLetRec([even = Fun(n, If(...)); odd = Fun(n, If(...))]); main = App(Var(even), Int(10)))
-h7  (type payload):   Program(TopType(opt, [Just of Int | Nothing]); main = Constr(Just, Int(42)))
-h13 (full program):   Program(TopType(mylist, [MyNil | MyCons of Tuple[Int, Con(mylist)]]); TopLetRec([sum = Fun(xs : ..., Match(...))]); main = App(Var(sum), ...))
+h7  (type payload):   Program(TopType(opt, [Just of Int | Nothing]); main = Constr(@ctor:opt:Just, Int(42)))
+h13 (full program):   Program(TopType(mylist, [MyNil | MyCons of Tuple[Int, Con(mylist)]]); TopLetRec([sum = Fun(xs : Con(mylist), Match(...))]); main = App(Var(sum), ...))
 ```
 
+A constructor of a user-declared variant is printed with its resolved
+identity (`@ctor:<type>:<name>`), which is what the downstream stages match on.
+
 Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
-`wat2wasm` + `node scripts/run_wasm.js`).
+`wat2wasm` + `node scripts/run_wasm.js`); all four files are in
+`test/contrib_ctests.txt`, which `scripts/contrib_ctest.sh` runs.
 
 ## Lexer scope (Stage 50a)
 
@@ -113,8 +121,8 @@ Both files run identically on interp / C (`-c` + cc) / Wasm (`-w` +
 | `or` | `\|\|` (left-associative) |
 | `expr_top` | `if cond then t else e` / `let [rec] pat = v in body` / `fn x [y …] -> body` / `match e with [\|] pat [when g] -> body [\| …]` — control-flow keywords |
 
-Patterns (slice 50c) accept the same shape as the OCaml side except
-records:
+Patterns (slice 50c) accept the same shape as the OCaml side (records
+arrived in 50i, `[a, b, ...rest]` tails and `"prefix" <> suffix` later):
 
 | Form | Result |
 |---|---|
@@ -123,7 +131,7 @@ records:
 | `42` / `"hi"` / `true` / `()` | `PInt` / `PStr` / `PBool` / `PUnit` |
 | `(p1, p2, …)` | `PTuple` |
 | `[p1, …, pN]` | nested `PConstr ("Cons", Some (PTuple [pi, …]))`, terminated by `PConstr ("Nil", None)` |
-| `Foo` / `Foo (sub)` | `PConstr` (paren-wrapped payload only — atom-style `Some 1` needs the OCaml side's constr-arity table, which the self-host parser doesn't carry, so use `Some (1)`) |
+| `Foo` / `Foo (sub)` / `Foo sub` | `PConstr` (atom-style payloads such as `Some t` have been accepted since 50j) |
 | `p as name` | `PAs (p, name)` |
 | `p1 \| p2 \| p3` (inside match arm only) | left-associative `POr` |
 
@@ -155,46 +163,36 @@ Each decl is `;`-terminated; the disambiguation between top-level
 `let X = e ;` and expression-level `let X = e in body` is by the
 post-binding token — same as OCaml's `lib/parser.ml`.
 
+Productions that were deferred here and have since landed: `'a` type
+variables and parameterised type decls (`type 'a Box`, `type ('a, 'b) Pair`),
+comma-separated annotated params (`fn (x: ty1, y: ty2) -> body`, desugared to
+one tuple parameter), records (declaration, literal, `e.f`, `{ r | f = e }`
+update, pattern), `[a, b, ...rest]` list-pattern tails, `while ... do`, bare
+`{ e1; e2 }` blocks, float literals (without an exponent), `extern fn` /
+`extern type`, and `module M { ... }`
+(flattened to qualified names). `import "..."` is recognised and skipped —
+the caller resolves it.
+
 Productions still deferred:
 
-- `'a` style type variables (`TyVar`) — needs a new `T_tyvar` lex token.
-- `&R T` borrow refs / `Vec[R, T]` bracket forms — capability syntax
-  belongs in a much later phase.
-- `fn (x: ty1, y: ty2) -> body` (comma-separated annotated params in
-  one paren) — users can chain `fn (x: ty1) -> fn (y: ty2) -> body`.
-- Records: `type T = { f: ty, … };` declarations, `Name { f = e, … }`
-  literals, `e.f` field access, `Name { … with f = e }` updates, and
-  `Name { f = pat, … }` patterns — the whole record story rides on one
-  follow-up slice once self-host fmt itself needs them.
-- `[a, b, ...rest]` cons-tail sugar in list patterns — Phase 36 sugar.
-- `type T 'a = ...` parameterised type decls — waits on the tyvar
-  lexer token.
-- `extern fn` / `extern type` / `module M { ... }` / `import` /
-  `open` / `view` / `drop` / `signature` — all out of self-host fmt's
-  scope (the parser deals with the source forms that fmt itself
-  formats).
-- Phase 36 operator family beyond `..` and `\` lambda shorthand
-  (`<\|` / `\|>` / `<<` / `>>` / `@@` / `?` / `?!` / `<-`) — add as
-  dogfood demands.
-
-## What's deferred
-
-- Float literals — `mere fmt` rarely formats float-heavy code; add later
-  if Stage 50e Top-level needs them.
-- Multi-line / raw / interpolated strings — Phase 36 sugar, deferred.
-- Phase 36 operator family beyond `\` and `..`: `<|` / `<<` / `>>` /
-  `@@` / `?` / `?!` / `<-`. Add the ones that show up in real input.
-- `extern` / `module` / `import` / `open` / `region` / `view` / `with`
-  / `drop` / `signature` — out of self-host fmt's scope.
+- `&R T` borrow refs / `Vec[R, T]` bracket forms in type annotations —
+  capability syntax.
+- Phase 36 operator family beyond `..` (`<\|` / `\|>` / `<<` / `>>` / `@@` /
+  `?` / `?!` / `<-`) and the `\` lambda shorthand (lexed, not parsed) —
+  add as dogfood demands.
+- `trait` / `impl` declarations, and `open` / `view` / `drop` / `signature`.
+- Float literals with an exponent (`1.5e3` lexes as `1.5` applied to `e3`).
+- Multi-line / raw strings are not supported, and `{x}` interpolation is
+  kept as literal text.
 - Diagnostic-style errors with code frames — line number + simple
-  message is the MVP.
+  message is the MVP. The AST carries no source positions.
 
 ## Notes on porting from OCaml
 
 A few Mere-side limitations that surfaced during the port:
 
-- **`\r` escape isn't accepted in string literals.** Comparing CR by
-  `ord c == 13` works around it.
+- **`\r` escape wasn't accepted in string literals** at the time (it is
+  now). Comparing CR by `ord c == 13` worked around it.
 - **`substring` takes (start, end) not (start, length).** Spelled out
   in `read_ident_run` / `read_digit_run` comments.
 - **Wasm Phase 6.1 doesn't support inner-lifted captures of

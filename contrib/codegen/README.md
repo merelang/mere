@@ -16,17 +16,16 @@ conditional. Both routes execute 50,000 logical tail calls at the default Node
 stack limit. The required logic oracle also checks skipped division traps and
 the exact order and count of operand side effects.
 
-The OCaml `Mere.Codegen_wasm` (`lib/codegen_wasm.ml`, 5491 lines) is
+The OCaml `Mere.Codegen_wasm` (`lib/codegen_wasm.ml`) is
 the reference implementation; this directory holds the in-progress
 Mere self-host of the same emitter. §S3 closes once 53a–53g land.
-
-> See the design notes for the full plan.
 
 ## Files
 
 | file | scope | lines |
 |---|---|---|
-| `codegen_wasm.mere` | WAT skeleton + int literal (53a) + arith / cmp / logic / neg / EAnnot passthrough (53b) + `let` (PVar / PWild) + `if` + `EVar` local resolve (53c-1) + `EFun` / `EApp` with capture-less closure ABI (53c-2) + free-var capture (53c-3) + `EMatch` / `EConstr` / `ETuple` + destructuring `let` (53d) + top-level decls + `EStr` data segments + `EUnit` (53e) + `let rec` / `TopLetRec` via closure-env backpatching (53e-2) + records (`ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`) + `when`-guards (53h-fix). | ~1450 |
+| `codegen_wasm.mere` | WAT skeleton + int literal (53a) + arith / cmp / logic / neg / EAnnot passthrough (53b) + `let` (PVar / PWild) + `if` + `EVar` local resolve (53c-1) + `EFun` / `EApp` with capture-less closure ABI (53c-2) + free-var capture (53c-3) + `EMatch` / `EConstr` / `ETuple` + destructuring `let` (53d) + top-level decls + `EStr` data segments + `EUnit` (53e) + `let rec` / `TopLetRec` via closure-env backpatching (53e-2) + records (`ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`) + `when`-guards (53h-fix). Low-level entry: `parse_and_emit src` (no type check); running the file prints its inline demos. | 3743 |
+| `compile.mere` | `compile_source_to_wat src` — the checked entry shared by the CLI driver ([examples/selfhost_wasm_cli.mere](../../examples/selfhost_wasm_cli.mere)) and the browser page (`contrib/site/playground/selfhost-compile.mere`). Imports `contrib/typer`, type-checks the source, pulls in only the prelude helpers the program references, and wraps `main` with the auto-print epilogue (a unit `main` prints nothing). | 81 |
 
 ## Status
 
@@ -77,3 +76,7 @@ land as later stages need them.
   precedence, signed comparison, bool-as-i32 logic, negation, and
   type annotation passthrough.
 - `dune runtest` 1622 passing (no regression).
+- Today the end-to-end gate is `scripts/selfhost_check.sh` (needs
+  `wat2wasm` and `node`): it compiles each input with both the OCaml
+  `mere` and the self-hosted compiler, runs both Wasm binaries, and diffs
+  their stdout.

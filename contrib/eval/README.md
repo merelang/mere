@@ -6,7 +6,7 @@ in traversal order, so the last occurrence of a name is visible. `str_len`
 is available to programs inspecting a suffix. The stage tables below record
 the implementation history.
 
-The OCaml `Mere.Eval` (lib/eval.ml, 1986 lines) is the reference
+The OCaml `Mere.Eval` (`lib/eval.ml`) is the reference
 implementation; this directory holds the in-progress Mere self-host so
 that, paired with `contrib/parser/` and `contrib/fmt/`, the full
 pipeline `source → tokenize → parse → eval` can run inside the
@@ -20,7 +20,7 @@ Together with `contrib/parser/` (Phase 50) and `contrib/fmt/`
 
 | file | scope | lines |
 |---|---|---|
-| `eval.mere` | Tree-walking interpreter over `ast.mere`'s `expr`. Stage 51a: literals, variables, binop / cmpop / logicop (with short-circuit), unary negation, `if`, transparent `EAnnot`. | ~210 |
+| `eval.mere` | Tree-walking interpreter over `ast.mere`'s `expr` — every expression form except `EFloat`, every pattern form, `let rec`, records, top-level decls and the builtins `print` / `show` / `str_len` (stages 51a–51f below). Entry points: `parse_and_eval : str -> value` (source string end to end, importing `contrib/parser/parser.mere`), `run_program`, `eval`, `value_to_str`. Running the file prints its inline demos. | 840 |
 
 ## Status
 

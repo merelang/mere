@@ -21,7 +21,7 @@ following a multi-phase plan.
 
 | file | scope | lines |
 |---|---|---|
-| `fmt.mere` | Pretty-printer. Imports [`contrib/parser/ast.mere`](../parser/ast.mere) for AST type definitions so the parser and the formatter share one `expr` / `program` definition. | ~700 |
+| `fmt.mere` | Pretty-printer. Entry points: `format_expr : expr -> str` and `format_program : program -> str`. Imports [`contrib/parser/ast.mere`](../parser/ast.mere) for AST type definitions so the parser and the formatter share one `expr` / `program` definition. | 683 |
 
 The AST definitions live in `contrib/parser/ast.mere` since Phase 50.7
 — fmt.mere used to keep its own copy with a bare `T` prefix on ty
@@ -37,7 +37,7 @@ Variants renamed to match the parser's `Ty` prefix convention
 | **49a** | AST variant declarations + minimal `fmt_expr` (int / var / binop / let / if / fn / app) + hand-coded demos | **complete** |
 | **49b** | Full pretty-printer: precedence-driven paren insertion, block-form layout, `else if` chain flattening, sugar reconstruction (range / Cons-Nil list literal / lambda shorthand), full pattern coverage | **complete** |
 | **49d** | Wasm-compile 49a + 49b and wire up a browser playground demo | **complete** — [merelang.github.io/mere/playground/selfhost-fmt.html](https://merelang.github.io/mere/playground/selfhost-fmt.html) |
-| **49c** | Mere parser written in Mere (the real self-host bottleneck — ~800 lines) | deferred to Phase 50 |
+| **49c** | Mere parser written in Mere (the real self-host bottleneck) | moved to Phase 50 — done in [`contrib/parser/`](../parser/) |
 
 ### Cross-validation against OCaml side
 
@@ -52,31 +52,33 @@ let rec fact = fn n -> if n < 1 then 1 else n * fact (n - 1) in
 fact 10
 ```
 
-## Running the Stage 49a demo
+## Running the demos
 
 ```sh
 dune exec mere -- contrib/fmt/fmt.mere
 
 # Wasm (works in browser):
 mere -w contrib/fmt/fmt.mere > /tmp/fmt.wat
-wat2wasm /tmp/fmt.wat -o /tmp/fmt.wasm
+wat2wasm --enable-tail-call /tmp/fmt.wat -o /tmp/fmt.wasm
 node scripts/run_wasm.js /tmp/fmt.wasm
 ```
 
-Expected output:
+The compiler emits `return_call`, so `wat2wasm` needs `--enable-tail-call`.
+Expected output starts:
 
 ```
-demo1: let x = 42 in x
-demo2: 1 + 2 * 3
-demo3: if <expr> then 1 else n * fact n - 1
-demo4: fn x -> x + 1
-0
+=== Stage 49b pretty-printer demos ===
+simple:        let x = 42 in
+x
+prec (no par): 1 + 2 * 3
+paren needed:  (1 + 2) * 3
+list literal:  [1, 2, 3]
+range sugar:   1..10
+lambda chain:  \x y -> x + y
 ```
 
-The `<expr>` in demo3 is the placeholder arm in `fmt_expr` — `ECmp` is
-intentionally uncovered at Stage 49a; Stage 49b widens the match.
-`demo2` doesn't reflect precedence yet either; 49b adds the
-precedence-driven paren insertion the OCaml side has.
+followed by the factorial round trip above and the Stage 50g
+`format_program` demos (top-level `let`, `let rec`, `type` declarations).
 
 ## Declaration and runtime checks
 
