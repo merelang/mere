@@ -117,7 +117,8 @@ if "$MERE" -c "$T/with/tiny.mere" > "$T/tiny.c" 2>/dev/null \
 fi
 
 # --- the backends that cannot honour it say so ------------------------------
-for pair in "-w Wasm" "-rv RV32IM"; do
+# -rv64 is the RISC-V backend at 64 bits; its refusal names RV64IM, not RV32IM.
+for pair in "-w Wasm" "-rv RV32IM" "-rv64 RV64IM"; do
   set -- $pair
   flag="$1"; name="$2"
   if "$MERE" "$flag" "$T/with/p.mere" >/dev/null 2>"$T/ref.err"; then

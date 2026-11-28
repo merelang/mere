@@ -43,9 +43,17 @@ let usage () =
   print_endline "                        emulator; integer subset — see codegen_riscv.ml)";
   print_endline "  mere -rve <expr>      emit an RV32IM binary for an inline expression";
   print_endline "  mere -rvs <file.mere> print an RV32IM assembly listing (disassembled)";
+  print_endline "  mere -rvse <expr>     print an RV32IM assembly listing for an inline expression";
   print_endline "  mere -rvd <file.bin>  disassemble a flat RV32IM binary";
   print_endline "  mere -rvg <file.mere> print the debug map (symbols, frames, line table)";
-  print_endline "        -rv/-rvs/-rvg accept these in any order:";
+  print_endline "  mere -rv64 <file.mere>";
+  print_endline "                        emit a flat RV64IM binary: the same backend at";
+  print_endline "                        64 bits (8-byte ints and cells, LD/SD)";
+  print_endline "  mere -rv64s <file.mere>";
+  print_endline "                        print an RV64IM assembly listing (disassembled)";
+  print_endline "  mere -rv64g <file.mere>";
+  print_endline "                        print the debug map of an RV64IM binary";
+  print_endline "        -rv/-rvs/-rvg and -rv64/-rv64s/-rv64g accept these in any order:";
   print_endline "        `--ram <MB>` (default 8): the RAM the binary expects —";
   print_endline "        the stack starts at the top of it";
   print_endline "        `--coro-stack <MB>`: the region coroutines run in (default";
@@ -151,7 +159,7 @@ let usage () =
   print_endline "                        is opt-in.";
   print_endline "";
   print_endline "Docs: docs/tutorial.md / docs/language-reference.md / docs/stdlib-reference.md";
-  print_endline "Examples: examples/ (280 .mere files; see examples/README.md for category index)"
+  print_endline "Examples: examples/ (see examples/README.md for a category index)"
 
 let version () =
   Printf.printf "mere v%s\n" Mere.Version.v
@@ -735,7 +743,11 @@ let set_riscv_coro_stack mb =
   Mere.Codegen_riscv.coro_stack_bytes := n * 1024 * 1024
 
 let compile_to_riscv ?base_dir source =
-  refuse_stack_request "RV32IM" "The image's stack is laid out by the linker script.";
+  (* -rv64 reaches here too, with xlen already set to 64: name the backend
+     that was selected, not the 32-bit one. *)
+  refuse_stack_request
+    (if !Mere.Codegen_riscv.xlen = 64 then "RV64IM" else "RV32IM")
+    "The image's stack is laid out by the linker script.";
   let open Mere in
   let (prog, main_ty) = infer_program ?base_dir (rv_source source) in
   Codegen_riscv.emit_program ~main_ty prog

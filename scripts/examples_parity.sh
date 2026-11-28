@@ -37,12 +37,23 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-$ROOT/_build/default/bin/mere.exe}"
 [ -x "$MERE" ] || { echo "examples_parity: $MERE not built" >&2; exit 2; }
+# The programs run from a scratch directory (below), so a relative MERE=path
+# is made absolute here, while it still resolves.
+case "$MERE" in /*) ;; */*) MERE="$(pwd)/$MERE" ;; esac
 command -v clang >/dev/null 2>&1 || {
   echo "examples_parity: clang not found — skipping"; exit 2; }
 
 tmp="${TMPDIR:-/tmp}/examples_parity.$$"
 mkdir -p "$tmp"
 trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# Every program runs with a scratch directory as its working directory. Some
+# examples write their result to a relative path (png_encode.mere writes
+# out.png, mandelbrot.mere and raytrace.mere a .ppm); run from the checkout,
+# those land in the repository root, where one was once committed by accident.
+# `$f` and the built binary are absolute paths, so nothing else changes.
+work="$tmp/cwd"
+mkdir -p "$work"
 
 # `timeout` is not on a stock macOS, and this has to run in both places.
 to() { perl -e 'alarm shift; exec @ARGV' "$@"; }
@@ -54,7 +65,7 @@ for f in "$ROOT"/examples/*.mere; do
   [ -f "$f" ] || continue
   name=$(basename "$f")
   # THE SELECTOR: does the interpreter finish, quietly, on its own?
-  if ! to 10 "$MERE" "$f" >"$tmp/i.out" 2>"$tmp/i.err" </dev/null; then
+  if ! (cd "$work" && to 10 "$MERE" "$f") >"$tmp/i.out" 2>"$tmp/i.err" </dev/null; then
     skipped=$((skipped + 1)); continue
   fi
   if ! to 120 "$MERE" -c "$f" >"$tmp/p.c" 2>/dev/null \
@@ -63,7 +74,7 @@ for f in "$ROOT"/examples/*.mere; do
     # saying what it does not do. Counted, so the number is visible.
     buildfail=$((buildfail + 1)); continue
   fi
-  to 30 "$tmp/pc" >"$tmp/c.out" 2>/dev/null </dev/null
+  (cd "$work" && to 30 "$tmp/pc") >"$tmp/c.out" 2>/dev/null </dev/null
   compared=$((compared + 1))
   # IS THE OUTPUT A FUNCTION OF THE PROGRAM? Asked here rather than by keeping
   # a list of the ones that print a clock -- `examples/log_levels_demo.mere`
@@ -73,7 +84,7 @@ for f in "$ROOT"/examples/*.mere; do
   # per-second clock looks stable. The gap is the build, which is seconds, so
   # nothing here is a fixed sleep guessing at the machine. This is
   # determinism_check.sh's precondition, asked per example.
-  if ! to 10 "$MERE" "$f" >"$tmp/i2.out" 2>/dev/null </dev/null \
+  if ! (cd "$work" && to 10 "$MERE" "$f") >"$tmp/i2.out" 2>/dev/null </dev/null \
      || ! cmp -s "$tmp/i.out" "$tmp/i2.out"; then
     nondet=$((nondet + 1)); compared=$((compared - 1)); continue
   fi
