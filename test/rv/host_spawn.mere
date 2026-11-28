@@ -19,6 +19,9 @@ let rec non_memu = fn (ls: str list) -> fn (n: int) -> match ls with
 let _ = print ("env pid>0 " ++ (if p1 > 0 then "yes" else str_of_int p1));
 let w1 = proc_waitpid p1 0;
 let _ = print ("env lines " ++ str_of_int (non_memu (str_split (read_file "spawn_env.txt") "\n") 0));
+// the files this test writes are its own: removed once read, so a run from a
+// checkout's root leaves nothing behind to be committed
+let _ = file_delete "spawn_env.txt";
 let _ = print ("waited " ++ (if w1 == p1 then "it" else str_of_int w1) ++ " status " ++ str_of_int (proc_wait_status ()));
 // 2. a given environment, stderr onto stdout, exit 3
 let p2 = proc_spawn "/bin/sh" ("sh" ++ z ++ "-c" ++ z ++ "echo $FOO; echo err 1>&2; exit 3") ("FOO=bar" ++ z ++ "X=1") ("d" ++ two ++ "1" ++ two ++ "2") (0 - 1) "";
@@ -40,5 +43,6 @@ let _ = print ("sigterm status " ++ str_of_int (proc_wait_status ()));
 let p7 = proc_spawn "/bin/sh" ("" ++ z ++ "-c" ++ z ++ "pwd; echo hi") "" ("o" ++ two ++ "1" ++ two ++ "577" ++ two ++ "420" ++ two ++ "spawn_out.txt") (0 - 1) "/tmp";
 let _ = proc_waitpid p7 0;
 let _ = print ("file " ++ read_file "spawn_out.txt");
+let _ = file_delete "spawn_out.txt";
 let _ = print ("bad flag " ++ str_of_int (proc_spawn "/bin/true" "true" "" ("o" ++ two ++ "1" ++ two ++ "1052672" ++ two ++ "0" ++ two ++ "/tmp/x") (0 - 1) ""));
 print ("echild " ++ str_of_int (proc_waitpid (0 - 1) 0))

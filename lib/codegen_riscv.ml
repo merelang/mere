@@ -83,16 +83,16 @@ let wshift () = if !xlen = 64 then 3 else 2     (* index -> byte offset: slli by
 let field_check what bits v =
   let lo = -(1 lsl (bits - 1)) and hi = (1 lsl (bits - 1)) - 1 in
   if v < lo || v > hi then
-    failwith (Printf.sprintf
+    failwith (target_msg (Printf.sprintf
       "RV32I internal: %s %d does not fit %d bits [%d..%d] -- a code-layout bug \
-       in this backend, not in the program being compiled" what v bits lo hi)
+       in this backend, not in the program being compiled" what v bits lo hi))
 
 let enc_i imm rs1 f3 rd op =
   (* SYSTEM (0x73) carries a CSR number in the immediate field, and CSR
      addresses use all 12 bits UNSIGNED -- 0xC00 is the cycle counter, not -1024.
      Everything else is a signed offset. *)
   if op = 0x73 then (if imm < 0 || imm > 0xFFF then
-    failwith (Printf.sprintf "RV32I internal: CSR number %d does not fit 12 bits" imm))
+    failwith (target_msg (Printf.sprintf "RV32I internal: CSR number %d does not fit 12 bits" imm)))
   else field_check "I-type immediate" 12 imm;
   ((imm land 0xFFF) lsl 20) lor (rs1 lsl 15) lor (f3 lsl 12) lor (rd lsl 7) lor op
 
@@ -5125,10 +5125,10 @@ let emit_function ~label ~params ~body =
      bodies were not counted), and the overflow happened to land on a live
      binding. This check makes the two walks provably agree at every compile. *)
   if !slot_hwm > total then
-    failwith (Printf.sprintf
+    failwith (target_msg (Printf.sprintf
       "RV32I internal: %s reserved %d frame slots but used %d -- max_lets \
        undercounts a node the slot_ctr walk visits, a backend bug that sizes \
-       the frame too small" label total !slot_hwm);
+       the frame too small" label total !slot_hwm));
   emit_epilogue fr
 
 (* a lifted lambda: closure env ptr in a0, the (single) argument in a1.
@@ -5170,8 +5170,8 @@ let emit_direct ~label ~captures ~params ~body =
   tail_pos := false;
   cur_self := None;
   if !slot_hwm > total then
-    failwith (Printf.sprintf
-      "RV32I internal: %s reserved %d frame slots but used %d" label total !slot_hwm);
+    failwith (target_msg (Printf.sprintf
+      "RV32I internal: %s reserved %d frame slots but used %d" label total !slot_hwm));
   emit_epilogue fr
 
 let emit_lambda ~label ~captures ~param ~body =
@@ -5210,10 +5210,10 @@ let emit_lambda ~label ~captures ~param ~body =
      bodies were not counted), and the overflow happened to land on a live
      binding. This check makes the two walks provably agree at every compile. *)
   if !slot_hwm > total then
-    failwith (Printf.sprintf
+    failwith (target_msg (Printf.sprintf
       "RV32I internal: %s reserved %d frame slots but used %d -- max_lets \
        undercounts a node the slot_ctr walk visits, a backend bug that sizes \
-       the frame too small" label total !slot_hwm);
+       the frame too small" label total !slot_hwm));
   emit_epilogue fr
 
 (* __main: initialise the top-level value bindings (in order, into the
@@ -5239,8 +5239,8 @@ let emit_main ?bare_entry main_body =
   compile_expr [] main_body;
   tail_pos := false;
   if !slot_hwm > total then
-    failwith (Printf.sprintf
-      "RV32I internal: __main reserved %d frame slots but used %d" total !slot_hwm);
+    failwith (target_msg (Printf.sprintf
+      "RV32I internal: __main reserved %d frame slots but used %d" total !slot_hwm));
   (* --bare: build the machine capability and hand it to the program's `main`.
      Constructed here rather than exposed as a builtin on purpose — a function
      that mints one would make every signature meaningless. *)
@@ -8605,7 +8605,7 @@ let build_items (prog : Ast.program) (full : Ast.expr) : item list =
      (__substring) -- build their message with it *)
   if not !bare then visit "rvoob";
   if !coro_mode && coro_co_lo () - globals_base () < !ram_bytes / 8 then
-    raise (Codegen_error (Loc.dummy, Printf.sprintf
+    raise (Codegen_error (Loc.dummy, target_msg @@ Printf.sprintf
       "RV32I: the coroutines' stack region (%d KB) and the main stack (%d KB) leave \
        less than an eighth of the %d MB of RAM for the heap -- a smaller \
        --coro-stack, or a larger --ram"

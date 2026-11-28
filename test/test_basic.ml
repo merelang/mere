@@ -15732,6 +15732,25 @@ let () =
   rv_err_contains "rv32i: a Raw window cannot be forged out of ints"
     "let _ = raw_poke8 (raw_window 0 0 1) 0 65;"
     "expected `Raw`, got `int`";
+  (* A refusal raised outside `err` still names the machine that was selected:
+     the coroutine-region check is shared by both widths, and at 64 bits it
+     used to say RV32I. The coroutine runtime lives in the RISC-V prelude, so
+     the program is compiled with it, as `mere -rv` does. *)
+  (let coro_src = Rv_prelude.contents ^ "\n" ^
+     "let root = coro_root ();\n\
+      let c = coro_new (fn _me -> fn (_u: unit) -> coro_exit root ());\n\
+      let _ = coro_switch c;\n\
+      print_int 1" in
+   Codegen_riscv.ram_bytes := 4 * 1024 * 1024;
+   Codegen_riscv.coro_stack_bytes := 3 * 1024 * 1024;
+   rv_err_contains "rv32i: a coroutine region that starves the heap is refused as RV32I"
+     coro_src "RV32I: the coroutines' stack region";
+   Codegen_riscv.xlen := 64;
+   rv_err_contains "rv64i: the same refusal at 64 bits names RV64I"
+     coro_src "RV64I: the coroutines' stack region";
+   Codegen_riscv.xlen := 32;
+   Codegen_riscv.coro_stack_bytes := 0;
+   Codegen_riscv.ram_bytes := 8 * 1024 * 1024);
   (* `exit` lowers to the same ecall `fail` ends with (a7 = 93), with the
      status the program chose instead of the literal 1. The emulator's syscall
      ABI answers it by halting, so the instructions after the call are not
