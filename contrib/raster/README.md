@@ -13,8 +13,8 @@ comes later.
 
 | file | exports | lines |
 |---|---|---|
-| `canvas.mere` | `type canvas`, `type clip`, `module Canvas { new_, clear, rgba, get, set, blend, fill_rect, full_clip, clip_of, clip_intersect, to_ppm, to_ascii }` | ~200 |
-| `path.mere` | `type point`, `module Path { pt, quad_to, cubic_to, fill, stroke, stroke_segment }` | ~230 |
+| `canvas.mere` | `type canvas`, `type clip`, `module Canvas { new_, clear, rgba, red_of, green_of, blue_of, alpha_of, get, set, blend, fill_rect, full_clip, clip_of, clip_intersect, clip_is_empty, to_ppm, to_ascii }` | ~210 |
+| `path.mere` | `type point`, `module Path { pt, quad_to, cubic_to, fill, stroke, stroke_segment }` (imports `canvas.mere`) | ~280 |
 
 ## Usage
 
@@ -93,16 +93,12 @@ zero-length segments).
 
 ## Which backends this runs on
 
-**interp and C.** The framebuffer is a `ByteBuf`, which the LLVM and Wasm backends
-do not have — they refuse `bytebuf_new` at emit time, so the parity harness records
-them as `UNSUP` rather than as failures. C is the backend a native renderer targets,
-and the interpreter is an independent second implementation, so the gate still
-compares two.
-
-Worth knowing if you go looking: a bare `bytebuf_new` on the LLVM backend reports
-`unsupported LLVM codegen type element: 'a` rather than naming the builtin, while
-the same call inside a record correctly says `unbound variable: bytebuf_new`. Same
-missing feature, two messages, one of them meaningless.
+**interp, C, LLVM and Wasm.** The framebuffer is a `ByteBuf`; when this was
+written only the interpreter and C had one, and the LLVM and Wasm backends
+refused `bytebuf_new` at emit time. They have it now, and
+`test/parity/raster.mere` prints the same output on all four. Both files are
+also in `test/contrib_ctests.txt`, so `scripts/contrib_ctest.sh` builds them
+natively and diffs against the interpreter.
 
 ## Not here yet
 

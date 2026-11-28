@@ -13,7 +13,7 @@ the other.
 
 | file | exports | lines |
 |---|---|---|
-| `font.mere` | `type font`, `module Font { load, glyph, kern, advance, line_height, codepoint, text_units, text_units_of_px, scale, text_width, segments_str, raster_str, coverage_str, text_raster, glyph_quads, quads_cover, outline_str }` | ~780 |
+| `font.mere` | `type font`, `module Font { load, glyph, kern, advance, line_height, codepoint, text_units, text_units_of_px, scale, text_width, segments_str, raster_str, coverage_str, text_raster, glyph_quads, quads_cover, outline_str }` | 798 |
 
 `font.mere` imports nothing. It takes bytes and returns numbers and curves.
 
@@ -47,13 +47,17 @@ satisfies every condition above and still comes out thin, and no error says so.
 
 ## Backends
 
-interp, C and RV32I take this file. **Wasm and LLVM do not**, both inside the
-contour walker in `_points`, and with different symptoms — the Wasm backend
-cannot see an inner-lifted capture (`os`), the LLVM backend an inner binding
-(`ends`). Neither is caused by anything here; they are the two backends' MVP
-limits on inner-lifted functions meeting the most nested code in the tree. So
-there is no `bootstrap_wat_ok` entry for this module, and its absence is a fact
-about the backends rather than an oversight.
+interp, C and RV32I took this file from the start. **Wasm and LLVM did not**,
+both inside the contour walker in `_points`, and with different symptoms — the
+Wasm backend could not see an inner-lifted capture (`os`), the LLVM backend an
+inner binding (`ends`). Neither was caused by anything here; they were the two
+backends' MVP limits on inner-lifted functions meeting the most nested code in
+the tree.
+
+Both limits have since been lifted: a program that loads a TrueType file and
+prints `outline_str`, `segments_str`, `line_height` and a `text_raster` now
+compiles on Wasm and LLVM and prints the same bytes as the interpreter and C.
+There is still no `bootstrap_wat_ok` entry for this module.
 
 ## Where the gates are
 

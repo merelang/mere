@@ -9,7 +9,7 @@ failure log. Uses the polymorphism of the `show` builtin to compare int / str
 
 | file | export | lines |
 |---|---|---|
-| `test.mere` | `module Test { new_suite, assert_eq, assert_true, assert_false, summary, exit_status }` | ~90 |
+| `test.mere` | `module Test { new_suite, assert_eq, assert_true, assert_false, summary, exit_status }` | 86 |
 
 ## Usage
 
@@ -20,9 +20,15 @@ let s = Test.new_suite () in
 let _ = Test.assert_eq s "1 + 1 = 2"   2 (1 + 1) in
 let _ = Test.assert_eq s "concat"      "hi" ("h" ++ "i") in
 let _ = Test.assert_true s "5 > 3"     (5 > 3) in
+let _ = Test.assert_eq s "wrong value" 42 41 in
 let _ = Test.summary s in
-Test.exit_status s   // 0 if all pass, 1 if any fail
+exit (Test.exit_status s)   // exit code: 0 if all pass, 1 if any fail
 ```
+
+`exit_status` returns the code; it does not end the process. Leaving it as
+the program's last value only prints it, so pass it to `exit` when the
+exit code matters (CI, shell pipelines). A complete demo is
+[examples/test_framework_demo.mere](../../examples/test_framework_demo.mere).
 
 Example output:
 ```
@@ -30,6 +36,7 @@ Example output:
   ok | concat
   ok | 5 > 3
 FAIL | wrong value
+
 --- 3/4 passed ---
 FAIL | wrong value
   expected: 42
@@ -45,7 +52,7 @@ FAIL | wrong value
 | `assert_true` | `suite -> str -> bool -> unit` | passes if cond is true |
 | `assert_false` | `suite -> str -> bool -> unit` | passes if cond is false |
 | `summary` | `suite -> unit` | print pass/fail/total |
-| `exit_status` | `suite -> int` | all pass = 0, any failure = 1 (for CI) |
+| `exit_status` | `suite -> int` | all pass = 0, any failure = 1 (for CI; pass it to `exit`) |
 
 ## Backend support
 
@@ -62,10 +69,10 @@ FAIL | wrong value
   bool) in one test program is OK (Phase 43 fixed DEFERRED §1.7 so chained
   poly inst follows through)
 - No test grouping (describe/context)
-- No parallel execution (Mere has no threads)
+- No parallel execution (assertions run in order on the calling thread)
 - No setup/teardown hooks
 - `fail` is not caught (if user code `fail`s, the runner also goes down) —
-  future work to wrap with `try_or`
+  wrap the code under test in `try_or` / `try_or_msg` yourself for now
 
 ## Position
 
