@@ -11832,7 +11832,6 @@ let region_runtime_helpers () =
       "static void __lang_blk_link(__lang_region* r, __lang_region_block* b) {";
       "  b->dflt = (r == &__lang_default_region || r->xthread);";
       "  b->owner = r;";
-      "  b->shed = NULL;";
       "  b->gprev = NULL;";
       "  if (b->dflt) {";
       "    pthread_mutex_lock(&__lang_blk_dl_lock);";
@@ -12041,6 +12040,9 @@ let region_runtime_helpers () =
       "  if (!b) return 0;";
       "  __lang_block_note(b, cap);";
       "  b->ep = __lang_region_epoch;";
+      (* set where a block is made, not in __lang_blk_link: a block relinked
+         onto the shared list keeps the ranges it handed back *)
+      "  b->shed = NULL;";
       (* v0.1.299: the pad field (there for 16-alignment) carries the block's
          capacity, so map_bytes / vec_bytes can sum a container's private
          arena without any hot-path counter. *)
@@ -12265,6 +12267,7 @@ let region_runtime_helpers () =
       "      if (!big) { if (shared) pthread_mutex_unlock(&__lang_default_region_lock); __lang_fail_impl(\"out of memory\"); }";
       "      __lang_block_note(big, aligned);";
       "      big->ep = __lang_region_epoch;";
+      "      big->shed = NULL;";
       "      big->pad = aligned;";
       "      __lang_blk_link(r, big);";
       "      big->prev = r->blocks->prev;";
@@ -12351,6 +12354,7 @@ let region_runtime_helpers () =
       "    while (pred && pred->prev) {";
       "      __lang_region_block* blk = pred->prev;";
       "      if ((char*)(blk + 1) == (char*)old && blk->pad == old_al) {";
+      "        __lang_blk_unshed(blk);   /* realloc reads and frees it outside __lang_blk_free */";
       "        __lang_blk_unlink(blk);";
       "        __lang_region_block* nb =";
       "          (__lang_region_block*) __lang_blk_raw_realloc(blk, sizeof(__lang_region_block) + blk->pad, sizeof(__lang_region_block) + new_al);";
@@ -12615,6 +12619,14 @@ let region_runtime_helpers () =
       "   Vec's array), and what it can reach is kept with it. A closure env inside";
       "   the arena, which the walk cannot size, stops the shedding of that arena.";
       "";
+      "   A page handed back holds nothing anyone reads, but a stale word can still";
+      "   point there, and a conservative scan that READS memory at an address it";
+      "   found must not read it (zeros by default; a fault under protect). Today";
+      "   those are the two users of the live-block span table: __lang_scan_words";
+      "   (the pin's reach) and __lang_string_root_word (coro_scan_strings). Both";
+      "   ask __lang_shed_was / __lang_shed_meets first; a new scan of that kind";
+      "   needs the same.";
+      "";
       "   MERE_ARENA_SHED=0 turns it off; MERE_ARENA_SHED=protect makes the pages";
       "   inaccessible instead of handing them back (mprotect PROT_NONE), so a page";
       "   that should have been kept faults at once -- the check mode for a test";
@@ -12653,6 +12665,14 @@ let region_runtime_helpers () =
       "  while (lo < hi) { size_t m = lo + (hi - lo) / 2; if (s->r[2 * m] <= a) lo = m + 1; else hi = m; }";
       "  return lo > 0 && a < s->r[2 * (lo - 1) + 1];";
       "}";
+      "/* does [lo, hi) meet a range block b handed back? */";
+      "static int __lang_shed_meets(__lang_region_block* b, uintptr_t lo, uintptr_t hi) {";
+      "  __lang_shed_runs* s = (__lang_shed_runs*)b->shed;";
+      "  if (!s || lo >= hi) return 0;";
+      "  size_t a = 0, z = s->n;";
+      "  while (a < z) { size_t m = a + (z - a) / 2; if (s->r[2 * m + 1] <= lo) a = m + 1; else z = m; }";
+      "  return a < s->n && s->r[2 * a] < hi;";
+      "}";
       "static int __lang_shed_rcmp(const void* x, const void* y) {";
       "  uintptr_t a = *(const uintptr_t*)x, b = *(const uintptr_t*)y;";
       "  return a < b ? -1 : a > b;";
@@ -12668,9 +12688,18 @@ let region_runtime_helpers () =
       "  }";
       "  s->r[2 * s->n] = a; s->r[2 * s->n + 1] = z; s->n++;";
       "}";
+      "/* sorted and merged: the lookups above take the ranges as disjoint */";
       "static void __lang_shed_sort(__lang_region_block* b) {";
       "  __lang_shed_runs* s = (__lang_shed_runs*)b->shed;";
-      "  if (s && s->n > 1) qsort(s->r, s->n, 2 * sizeof(uintptr_t), __lang_shed_rcmp);";
+      "  if (!s || s->n < 2) return;";
+      "  qsort(s->r, s->n, 2 * sizeof(uintptr_t), __lang_shed_rcmp);";
+      "  size_t w = 0;";
+      "  for (size_t k = 0; k < s->n; k++) {";
+      "    if (w > 0 && s->r[2 * k] <= s->r[2 * (w - 1) + 1]) {";
+      "      if (s->r[2 * k + 1] > s->r[2 * (w - 1) + 1]) s->r[2 * (w - 1) + 1] = s->r[2 * k + 1];";
+      "    } else { s->r[2 * w] = s->r[2 * k]; s->r[2 * w + 1] = s->r[2 * k + 1]; w++; }";
+      "  }";
+      "  s->n = w;";
       "}";
       "static void __lang_blk_unshed(__lang_region_block* b) {";
       "  if (!b->shed) return;";
@@ -12797,6 +12826,13 @@ let region_runtime_helpers () =
       "    /* the header's page; the whole of the oldest block (a recycle reuses it) */";
       "    cx->bits[i][0] = 1;";
       "    if (!b->prev) memset(cx->bits[i], 1, cx->npg[i]);";
+      "    /* what an earlier shedding handed back stays so, and is not handed back again */";
+      "    if (b->shed) {";
+      "      __lang_shed_runs* s = (__lang_shed_runs*)b->shed;";
+      "      for (size_t k = 0; k < s->n; k++)";
+      "        for (uintptr_t q = (s->r[2 * k] - cx->pbase[i]) / cx->page; q < (s->r[2 * k + 1] - cx->pbase[i]) / cx->page && q < cx->npg[i]; q++)";
+      "          cx->bits[i][q] |= 4;";
+      "    }";
       "  }";
       "  return 1;";
       "}";
@@ -15147,9 +15183,14 @@ let coro_runtime ~(stack_bytes : int) =
         "  }";
         "  uintptr_t end = a <= UINTPTR_MAX - sizeof(size_t) ? a + sizeof(size_t) : a;";
         "  if (end > used) end = used;";
+        (* a page the block handed back while it was pinned (__lang_shed_end) holds
+           nothing: a candidate header or bytes there is not read *)
+        "  __lang_region_block* shb = sp->b->shed ? sp->b : NULL;";
         "  for (uintptr_t p = begin; p <= end; p += 8) {";
+        "    if (shb && __lang_shed_meets(shb, p - sizeof(size_t), p)) { if (end - p < 8) break; continue; }";
         "    size_t n; memcpy(&n, (const void*)(p - sizeof(size_t)), sizeof n);";
-        "    if (n <= s->maxlen && n <= used - p && (p > a || a - p <= n))";
+        "    if (n <= s->maxlen && n <= used - p && (p > a || a - p <= n)";
+        "        && !(shb && __lang_shed_meets(shb, p, p + n + 1)))";
         "      __lang_string_root_match(s, (const char*)p, n);";
         "    if (end - p < 8) break;";
         "  }";
