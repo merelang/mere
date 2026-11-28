@@ -42,6 +42,5 @@ the interpreter and the C backend.
 - **interp / C / LLVM / Wasm**: full, exact — all four backends use 64-bit
   ints (Wasm widened in v0.1.127), so a base-1e9 limb product stays in range.
 
-The base is 1e9 so that a limb product stays under 2^63 on the 64-bit
-backends; addition's limb sum stays under 2^31, which is why it survives even
-the 32-bit Wasm backend.
+The base is 1e9 so that a limb product stays under 2^63 (every backend's
+`int` is 64-bit); addition's limb sum stays under 2^31.

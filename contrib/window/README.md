@@ -6,7 +6,8 @@ takes keys and clicks back. **A window is for interaction** — checking that a 
 was drawn correctly is a comparison against reference pixels, and needs no display.
 
 ```
-import "contrib/window/window.mere";
+import "contrib/window/window.mere";   // brings contrib/raster's Canvas with it
+import "contrib/raster/path.mere";     // for Path.fill
 
 match Window.open_ 640 480 "mere" with
 | None -> print "no display"
@@ -26,6 +27,7 @@ match Window.open_ 640 480 "mere" with
 |---|---|---|
 | `Window.open_` | `int -> int -> str -> window option` | `None` when there is no display, no SDL, or eight windows are already open |
 | `Window.size` | `window -> (int * int)` | the **renderer's** size — see below |
+| `Window.width` / `Window.height` | `window -> int` | the two halves of `size` |
 | `Window.show` | `window -> canvas -> int -> bool` | composite over a background and present |
 | `Window.capture` | `window -> canvas option` | the window's pixels, read back |
 | `Window.poll` | `int -> event` | one event or `Nothing`; the argument is a timeout in ms |

@@ -9,7 +9,7 @@ recursive matching.
 | file | export | lines |
 |---|---|---|
 | `regex.mere` | `type regex` + `module Regex { parse_re: str -> regex; match_re: regex -> str -> bool }` | ~230 |
-| `engine.mere` | More detailed engine prototype (top-level; module-wrapping is future work) | ~110 |
+| `engine.mere` | Engine prototype over its own `type re` AST, adding alternation (`RAlt`); continuation-passing backtracking, no pattern parser (build the AST directly). Top-level `re_match` / `regex_search` / `regex_full_match` (module-wrapping is future work) | ~80 |
 
 ## Usage
 
@@ -39,7 +39,7 @@ else print "no match"
 
 - groups `(...)`
 - character classes `[a-z]`
-- alternation `|`
+- alternation `|` (`engine.mere` has it at the AST level, as `RAlt`)
 - bounded quantifier `{n,m}`
 - backreferences `\1`
 - Unicode

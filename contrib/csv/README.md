@@ -8,8 +8,11 @@ self-contained on stdlib (`str_*` / `char_at` / `is_*`).
 
 | file | export | lines |
 |---|---|---|
-| `parser.mere` | `module Csv { parse_csv: str -> str list list }` | ~140 |
-| `writer.mere` | `type Person` + `module CsvWriter { needs_quote, escape_field, row_of, render }` | ~60 |
+| `parser.mere` | `module Csv { parse_csv: str -> str list list }` (plus the step functions `parse_row` / `parse_field` / `parse_quoted` / `parse_bare`) | 96 |
+| `writer.mere` | `type Person` + `module CsvWriter { needs_quote, escape_field, row_of, header, render }` | 52 |
+
+Both files are main-free. A runnable writer demo is
+[examples/csv_writer_demo.mere](../../examples/csv_writer_demo.mere).
 
 ## Usage
 
@@ -39,6 +42,8 @@ cp contrib/csv/parser.mere my_project/
 ## Known limitations
 
 - CRLF (`\r\n`) not supported
+- the writer quotes a field only when it contains `,` or `"`; a field
+  containing a newline is written unquoted
 - `writer.mere` is bound to the fixed `Person { name; age; city }` record —
   generalization is future work (per-record polymorphism not implemented; a
   generic API like `record_to_csv` waits on trait / row poly). Since Phase 42

@@ -103,8 +103,11 @@ its first NUL and silently wrong after v0.1.264 gave a str a length header.
   the backend after the first four, rather than waiting for a gate to point at
   them
 
-And two that are recorded rather than fixed, each in its own pinned case:
-`test/parity/prop_utf8.mere` (UTF-8 character splitting: the interpreter says
-`"A" ++ chr 128` is two characters and the three compiled backends say one) and
-`test/parity/llvm_loop_guard_global.mere` (a loop bounded by a top-level binding
-stops after one iteration on LLVM).
+And two that were recorded rather than fixed at the time, each in its own
+case: `test/parity/prop_utf8.mere` (UTF-8 character splitting: the interpreter
+said `"A" ++ chr 128` is two characters and the three compiled backends said
+one) and `test/parity/llvm_loop_guard_global.mere` (a loop bounded by a
+top-level binding stopped after one iteration on LLVM). Both have since been
+fixed — `utf8_chars` splits forward on every backend as of v0.1.537, and the
+LLVM loop now runs to completion — and the two files stay in the parity suite
+as regression cases.

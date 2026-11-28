@@ -39,11 +39,12 @@ mere contrib/mlint/mlint.mere path/to/file.mere
 
 ## Backends
 
-`mlint` runs on the **interpreter** and the **native (C)** backend — a linter's
-natural targets. File input uses `args` / `read_file`, which the LLVM and Wasm
-MVP backends do not bind (Wasm has no filesystem), so those two cleanly refuse
-at emit time (`unsupported … unbound variable: args`). The trait-object
-machinery itself works on all four backends (see `examples/trait_object.mere`).
+`mlint` runs on the **interpreter**, **C**, **LLVM** and **Wasm** backends,
+including file input: `args` / `read_file` are bound on all four now (on Wasm
+through the host, e.g. `node scripts/run_wasm.js mlint.wasm path/to/file.mere`).
+The library is in `test/contrib_ctests.txt`, so `scripts/contrib_ctest.sh`
+checks that its C output agrees with the interpreter. The trait-object
+machinery is also exercised on its own in `examples/trait_object.mere`.
 
 ## Dogfood pain (what building this exercised / surfaced)
 

@@ -7,7 +7,7 @@ in **O(longest line)** memory instead of O(file).
 import "contrib/stream/stream.mere";
 
 // grep-style: print matching lines (side effect inside the per-line scope)
-Stream.each_line "big.txt" (fn line ->
+let _ = Stream.each_line "big.txt" (fn line ->
   if str_contains line "needle" then print line else ());
 
 // count lines satisfying a predicate
@@ -42,5 +42,6 @@ with an escape-clean accumulator follows the same pattern.
 
 ## Backends
 
-interp + C. `file_open` / `file_read_line` / `file_close` are C+interp only;
-the Wasm and LLVM backends do not implement per-line file input.
+interp / C / LLVM / Wasm: `file_open` / `file_read_line` / `file_close` are
+implemented on all four (Wasm through the Node host). The peak-RSS table
+above was measured on the C backend only.

@@ -28,19 +28,18 @@ module-qualified type names share one canonical identity. Module flattening
 preserves declaration order, so later aliases cannot capture earlier annotations,
 alias bodies or fields. Annotation and ordinary inference use the same declaration registration path.
 
-The OCaml `Mere.Typer` (`lib/typer.ml`, 1893 lines) is the reference
-implementation; this directory holds the in-progress Mere self-host of
-the same type inferencer. §S2.B closes once 52a–52g land.
+The OCaml `Mere.Typer` (`lib/typer.ml`) is the reference
+implementation; this directory holds the Mere self-host of the same type
+inferencer. Stages 52a–52g have landed; the paragraphs above describe what
+has been added to it since.
 
-`typer.mere` is now ~920 lines.
-
-> See the design notes for the full plan.
+`typer.mere` is now 2,004 lines.
 
 ## Files
 
 | file | scope | lines |
 |---|---|---|
-| `typer.mere` | Unification (52a) + monomorphic `infer` (52b) + Hindley-Milner `scheme` / `generalize` / `instantiate` + `ELet` / `ELetRec` (52c) + pattern type checking + `ETuple` / `EConstr` / `EMatch` (52d) + records (`ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`) (52e) + top-level `infer_decl` / `infer_decls` (52f) + `parse_and_infer` glue. | ~920 |
+| `typer.mere` | Unification (52a) + monomorphic `infer` (52b) + Hindley-Milner `scheme` / `generalize` / `instantiate` + `ELet` / `ELetRec` (52c) + pattern type checking + `ETuple` / `EConstr` / `EMatch` (52d) + records (`ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`) (52e) + top-level `infer_decl` / `infer_decls` (52f) + `parse_and_infer` glue. | 2,004 |
 
 ## Status
 
@@ -51,8 +50,8 @@ the same type inferencer. §S2.B closes once 52a–52g land.
 | **52c** | Hindley-Milner let-polymorphism: `scheme = (int list, ty)` (quantified meta ids + body), `mono` / `generalize` / `instantiate` / `subst_quants`. `type_env` lifts to `(str * scheme) list`. New AST cases: `ELet (PVar / PWild)` (generalize at let-binding) and `ELetRec` (pre-bind fresh metas, infer bodies, unify, generalize against outer env). 11 demos including `let id = fn x -> x in if (id true) then id 1 else 0` — `id` used at both `bool -> bool` and `int -> int` in the same body. | **complete** |
 | **52d** | Pattern type checking (`check_pattern` / `check_pattern_list` / `concat_scheme_bindings`) over `PWild` / `PVar` / `PInt` / `PBool` / `PStr` / `PUnit` / `PTuple` / `PAs` / `POr` / `PConstr` — pattern types unify against an expected type and emit `(str * scheme) list` mono bindings. `ELet` with a non-`PVar`/`PWild` pattern threads through `check_pattern`. New `infer` cases for `ETuple` (sequence-infer + `TyTuple`), `EConstr` (permissive: any constructor → fresh meta, payload typed but unconstrained — proper registry-aware checking lands in 52f), and `EMatch` (infer scrutinee, allocate a fresh result meta, `infer_arms` walks each arm: `check_pattern` against scrutinee, optional `when`-guard unified against `TyBool`, body unified against the shared result meta). 10 demos covering tuple literal / nested destructure / int match / tuple match / `when`-guard / `PAs` / `EConstr Some 5`. | **complete** |
 | **52e** | Records via `ERecordLit` / `EFieldGet` / `ERecordUpdate` / `PRecord`. Permissive (no record registry yet — that lands in 52f): record literal types as the nominal `TyCon name []`, field-get returns a fresh meta, record update preserves the base's type, `PRecord` unifies the expected type with `TyCon name []` and threads each field pattern through a fresh meta. `infer_record_fields` and `check_record_field_pats` are added to the `let rec ... and ...` chain. `EAnnot` was already covered by Stage 52b — this stage's annotation demo (`(Point { x = 1, y = 2 } : Point)`) double-checks that annotation tightening still works on record literals. 8 demos covering record literal / empty record / field-get / record update / `PRecord` destructure / annotation pin. | **complete** |
-| **52f** | Top-level decl integration — `infer_decl` / `infer_decls` thread `TopLet` / `TopLetRec` through the type_env via the same generalize/let-rec logic as inner `ELet` / `ELetRec`. `TopType` / `TopRecord` / `TopTypeAlias` are no-ops (the permissive `EConstr` / record paths from 52d/52e don't need a registry yet — a real field-by-field check stays deferred behind the OCaml side's borrow-checker complexity). `parse_and_infer` now processes decls before the `main` expression. **Cross-validation harness**: 12 new test cases in `test/test_basic.ml` run a source string through both `Pipeline.type_of` (OCaml typer) and the self-host `parse_and_infer`, comparing the displayed type string. Monomorphic results compared only (`'_0` vs `'a` differ between sides). `dune runtest` goes 1610 → 1622 with the new harness. 8 demos covering top-let int/fn/rec/poly/cascade and `TopType` + `TopRecord` no-op interaction. | **complete** (this commit) |
-| **52g** | Browser bridge — `selfhost-tyck.html` page, sibling of `selfhost-fmt` / `selfhost-repl`. **Live in-browser type-checker**. | future |
+| **52f** | Top-level decl integration — `infer_decl` / `infer_decls` thread `TopLet` / `TopLetRec` through the type_env via the same generalize/let-rec logic as inner `ELet` / `ELetRec`. `TopType` / `TopRecord` / `TopTypeAlias` are no-ops (the permissive `EConstr` / record paths from 52d/52e don't need a registry yet — a real field-by-field check stays deferred behind the OCaml side's borrow-checker complexity). `parse_and_infer` now processes decls before the `main` expression. **Cross-validation harness**: 12 new test cases in `test/test_basic.ml` run a source string through both `Pipeline.type_of` (OCaml typer) and the self-host `parse_and_infer`, comparing the displayed type string. Monomorphic results compared only (`'_0` vs `'a` differ between sides). `dune runtest` goes 1610 → 1622 with the new harness. 8 demos covering top-let int/fn/rec/poly/cascade and `TopType` + `TopRecord` no-op interaction. | **complete** |
+| **52g** | Browser bridge — `contrib/site/playground/selfhost-tyck.html` (+ `selfhost-tyck.mere`), sibling of `selfhost-fmt` / `selfhost-repl`. **Live in-browser type-checker**. | **complete** |
 
 ## Why `TyMeta` is separate from `TyVar`
 
@@ -85,7 +84,12 @@ building blocks 52b will call:
 
 - 63 demos (11 unify + 15 mono-infer + 11 let-poly + 10 pattern/match
   + 8 records + 8 top-decl) byte-identical on interp / Wasm / C.
-- `dune runtest` 1622 passing (1610 baseline + 12 self-host typer
-  cross-validation cases against OCaml `Pipeline.type_of`).
+- `dune runtest` runs the self-host typer cross-validation cases against
+  OCaml `Pipeline.type_of` (`test/test_basic.ml`); there were 12 when 52f
+  landed, and the alias, polymorphic-declaration and module cases added
+  since run in the same harness.
+- `scripts/selfhost_check.sh` runs the fixtures under `test/selfhost/`
+  (patterns, records, aliases, polymorphic types, type modules,
+  annotations, constructors) through the self-host pipeline as well.
 - `fmt.mere`'s `fmt_ty` and `parser.mere`'s `ty_to_str` both grow a
   `TyMeta n -> "'_n"` arm to keep their matches exhaustive.

@@ -8,7 +8,7 @@ only).
 
 | file | export | lines |
 |---|---|---|
-| `path.mere` | `module Path { join, basename, dirname, ext, drop_ext, has_ext }` | ~100 |
+| `path.mere` | `module Path { join, basename, dirname, ext, drop_ext, has_ext }` | ~75 |
 
 ## API
 

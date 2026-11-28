@@ -7,7 +7,7 @@ into flags / options / positional. Namespaced as `module Argparse { ... }`.
 
 | file | export | lines |
 |---|---|---|
-| `argparse.mere` | `module Argparse { parse, has_flag, get_opt, get_pos }` | ~130 |
+| `argparse.mere` | `module Argparse { parse, has_flag, get_opt, get_pos }` (plus the helpers `list_has`, `strip_double_dash`, `split_eq`) | 118 |
 
 ## Usage
 
@@ -19,11 +19,14 @@ let flag_specs = Cons ("verbose", Cons ("dry-run", Nil)) in
 let opt_specs = Cons ("output", Cons ("config", Nil)) in
 let r = Argparse.parse flag_specs opt_specs argv in
 
-if Argparse.has_flag r "verbose" then print "verbose mode" else ();
+let _ = if Argparse.has_flag r "verbose" then print "verbose mode" else () in
 let out = Argparse.get_opt r "output" "default.bin" in
 let positional = Argparse.get_pos r in
 ...
 ```
+
+The library file is main-free (importing it runs nothing); a runnable demo is
+[examples/argparse_demo.mere](../../examples/argparse_demo.mere).
 
 ## Supported syntax
 
@@ -49,6 +52,7 @@ let positional = Argparse.get_pos r in
 - type conversion is up to the caller (e.g. `int_of_str (Argparse.get_opt r "n" "0")`)
 - no auto-generated help message
 - unknown `--foo` treated as positional (will become an error in the future)
+- an option given last with no value (`--output` at the end of argv) is ignored
 
 ## Implementation notes
 

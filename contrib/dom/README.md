@@ -16,8 +16,8 @@ change, checkbox state, and removing an attribute.
 
 | file | content | lines |
 |---|---|---|
-| `dom.mere` | `extern type JsRef;` + 34 `extern fn` declarations | ~215 |
-| `dom.glue.js` | ES module exporting `makeDomGlue()` — the browser host implementation | ~490 |
+| `dom.mere` | `extern type JsRef;` + 35 `extern fn` declarations | 224 |
+| `dom.glue.js` | ES module exporting `makeDomGlue()` — the browser host implementation | 510 |
 
 ## API
 
@@ -167,6 +167,16 @@ exists) and `attach(instance)` (called after) is forced by the order of
 Wasm instantiation — `env` imports must be ready before the instance,
 but the glue needs the instance's `memory` + exported function table to
 do anything.
+
+`attach` also checks the module's exported `__mere_abi` against the
+glue's and throws on a mismatch, so a module built by an older compiler
+fails at load instead of handing back empty strings.
+
+Besides `glue` and `attach`, `makeDomGlue()` returns two setters:
+`setRom(u8)` supplies the bytes `dom_rom_size` / `dom_rom_byte` serve,
+and `setWorkerTransport(fn)` answers `worker_call` — an import the glue
+provides but `dom.mere` does not declare; an app that hands work to a
+Worker declares it itself (`examples/tally/app.mere`).
 
 ## How it works
 

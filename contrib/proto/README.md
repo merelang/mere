@@ -9,10 +9,10 @@ a hand-written one and a schema-less inspector share it.
 
 | file | exports | lines |
 |---|---|---|
-| `gen.mere` | `module Pgen { file_source }` — a `.proto` into Mere source | ~420 |
-| `parse.mere` | `type pty/pfield/penum/pmsg/pmethod/psvc/pfile/pdecl`; `module Pparse { parse_file, collect, resolve, json_name, type codes }` | ~360 |
-| `descriptor.mere` | `module Pdesc { of_source, file_set, file_desc }` | ~150 |
-| `wire.mere` | `module Wire { varint / fixed64 / delimited / fixed32 constants; lshr; put_varint / tag / zz32 / zz64 / put_fixed32 / put_fixed64 / put_delimited / put_bytes / put_str; get_varint / get_tag / unzz32 / unzz64 / get_fixed32 / get_fixed64 / get_delimited / skip_value }` | ~185 |
+| `gen.mere` | `module Pgen { file_source }` — a `.proto` into Mere source (`file_source wire_path pfile`) | ~480 |
+| `parse.mere` | `type pty/pfield/penum/penumv/pmsg/pmethod/psvc/pimport/popt/poptval/pfile/pdecl`; `module Pparse { parse_file, collect, visible_decls, file_imports, resolve, json_name, ty_* type codes }` | ~580 |
+| `descriptor.mere` | `module Pdesc { of_source, of_sources, file_set, file_set_in, file_desc, file_desc_in }` | ~350 |
+| `wire.mere` | `module Wire { varint / fixed64 / delimited / start_group / end_group / fixed32 constants; lshr; put_varint / tag / zz32 / zz64 / put_fixed32 / put_fixed64 / put_double / put_float / put_delimited / put_bytes / put_str; get_varint / get_tag / unzz32 / unzz64 / get_fixed32 / get_fixed64 / get_double / get_float / get_delimited / skip_value }` | ~220 |
 
 ## Usage
 
@@ -75,9 +75,9 @@ tolerance. On the day the interpreter becomes 64-bit, that section fails and say
 the pin must be retired — a gate that cannot detect its own repair leaves a claim
 in the tree that stopped being true.
 
-Related: integer literals above 2^62−1 cannot be written at all (the lexer dies
-with an uncaught `Failure("int_of_string")`), so the edge values in the harness
-are *computed* from 2^62−1.
+Related: integer literals above 2^62−1 cannot be written at all (the lexer
+refuses them with `integer literal out of range`, on every backend), so the edge
+values in the harness are *computed* from 2^62−1.
 
 ## The schema half
 
@@ -289,7 +289,7 @@ fields in a different sequence and different bytes.
 ### The gate, and the two gaps poisoning found
 
 `scripts/proto_gen_parity.sh` runs protoc's bytes through the generated codec and back:
-`protoc --encode` → `decode_M` → `encode_M` → compare. 20 schemas. A round trip through
+`protoc --encode` → `decode_M` → `encode_M` → compare. 25 schemas. A round trip through
 the oracle's bytes catches more than it looks like — a field the decoder ignores cannot
 be written back, so it shows up as a shorter byte string — and the one thing it cannot
 see is a consistent swap of two fields holding equal values, which is why every field

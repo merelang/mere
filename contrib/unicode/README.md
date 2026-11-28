@@ -7,14 +7,14 @@ character.
 
 | file | exports | lines |
 |---|---|---|
-| `grapheme.mere` | `module Grapheme { clusters, count, breaks_between, class_of }` | ~150 |
-| `gcb_table.mere` | `module GcbTable { class_of, the 18 class constants }` — **generated** | ~40 + a 22,834-char literal |
-| `linebreak.mere` | `module LineBreak { opportunities, split_lines, breaks_at, units_of }` | ~330 |
-| `lb_table.mere` | `module LbTable { key_of, class_of, flags_of, the 44 class constants }` — **generated** | ~50 + a 32,625-char literal |
-| `normalize.mere` | `module Normalize { nfc, nfd, is_nfc, is_nfd, ccc_of }` | ~200 |
-| `nfc_table.mere` | `module NfcTable { ccc_of, decomp_row, compose_pair }` — **generated** | ~90 + three literals |
-| `width.mere` | `module Width { of_cp, of_cp_amb, is_ambiguous, of_str, of_str_amb, of_str_narrow, of_str_wide, take_cols, take_cols_amb, cols_before, cols_before_amb }` | ~100 |
-| `width_table.mere` | `module WidthTable { class_of, the four width constants }` — **generated** | ~40 + a 8,814-char literal |
+| `grapheme.mere` | `module Grapheme { clusters, count, breaks_between, class_of }` | 158 |
+| `gcb_table.mere` | `module GcbTable { class_of, the 18 class constants }` — **generated** | 92, one of them a 22,834-char literal |
+| `linebreak.mere` | `module LineBreak { opportunities, opportunities_of_units, split_lines, breaks_at, units_of }` | 402 |
+| `lb_table.mere` | `module LbTable { key_of, class_of, flags_of, the 44 class constants }` — **generated** | 159, one of them a 32,625-char literal |
+| `normalize.mere` | `module Normalize { nfc, nfd, nfc_codepoints, nfd_codepoints, is_nfc, is_nfd, ccc_of, is_hangul_syllable }` | 201 |
+| `nfc_table.mere` | `module NfcTable { ccc_of, decomp_row, compose_pair }` — **generated** | 97, three of them literals |
+| `width.mere` | `module Width { of_cp, of_cp_amb, is_ambiguous, width_of_cluster, width_of_cluster_amb, of_str, of_str_amb, of_str_narrow, of_str_wide, take_cols, take_cols_amb, cols_before, cols_before_amb }` | 138 |
+| `width_table.mere` | `module WidthTable { class_of, the four width constants }` — **generated** | 69, one of them an 8,814-char literal |
 
 ## Usage
 
@@ -75,13 +75,17 @@ Reline reports 1 for `U+200B ZERO WIDTH SPACE` and friends, and it implements an
 older Unicode than the table (15.0 against 17.0), so `U+2630 ☰` — `N` in 15.0 and
 `W` in 17.0 — differs for a reason that will disappear when ruby catches up.
 
-**Code points, not clusters.** `Width` walks code points and gives combining
-marks zero width, which gets `é` and Hangul right; it does not run UAX #29, so an
-emoji ZWJ sequence counts each pictograph. That is deliberate and the reason is
-measured: `Grapheme.clusters` allocates a `StrBuf` per cluster into the
-program-lifetime region, so calling it once per visible line per redraw leaks
-about 60 KB a frame. A renderer cannot pay that. When the clustering allocates in
-the caller's region, this should walk clusters instead.
+**Clusters, and that took making them affordable first.** The string-level
+functions (`of_str`, `take_cols`, `cols_before` and their `_amb` forms) sum over
+grapheme clusters, taking each cluster's width from its **base** character —
+the marks, joiners and continuations after it add none — so `é` is one column
+and `👩‍👩‍👦` is two (`width_of_cluster` is that per-cluster answer). They used
+to walk code points instead, because `Grapheme.clusters` allocated a `StrBuf`
+per cluster into the program-lifetime region — about 60 KB a frame for a
+renderer calling it once per visible line per redraw. Clusters are now built
+as plain `str` values, which made the same run flat, and the reason to avoid
+them went away. `of_cp` stays the per-code-point answer, which is what a table
+comparison wants and what `scripts/width_check.sh` asks.
 
 ## Why grapheme clusters and not code points
 
@@ -128,9 +132,9 @@ or `ZWJ`.
 1,631 ranges, fourteen characters each — six for the start, six for the end, two
 for the class — with `Other` as the unstored default, which is most of the code
 space. A lookup is a binary search over a fixed-width hexadecimal literal. That
-shape is the one settled in `scripts/gen_jis_index.sh`, for the same reason: a
-`str` is `strlen`-based on the LLVM backend, so a table has to be NUL-free, and
-hex is NUL-free by construction.
+shape is the one settled in `scripts/gen_jis_index.sh`, for the reason that
+settled it there: when the tables were written, a `str` was `strlen`-based on the
+LLVM backend, so a table had to be NUL-free, and hex is NUL-free by construction.
 
 **The table's Unicode version is pinned to the oracle's** (17.0). `Intl.Segmenter`
 follows whatever node's ICU implements, and a table of a different vintage would
@@ -287,13 +291,6 @@ actually compiled in rather than from a second copy of the UCD.
 
 ## Not here yet
 
-- **East Asian Width** (UAX #11) as an exported property. The line break table
-  already carries the wide/fullwidth/halfwidth bit, because LB19a and LB30 need it
-  as a *set*. Exporting it usefully means distinguishing halfwidth from wide, which
-  that bit does not — and it is worth being clear that a renderer with a font takes
-  advance widths from the font's metrics, not from this property. EAW is for
-  terminal-style layout and for a fallback when there are no metrics, which is why
-  it is here rather than higher up.
 - **NFKC and NFKD.** They fold compatibility differences, which needs the 3,833
   compatibility mappings `gen_normalize_tables.sh` currently counts and discards.
   The first caller will be UTS #46 for IDNA.

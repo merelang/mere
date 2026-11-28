@@ -8,7 +8,7 @@ complement the prelude** into `module Option { ... }`.
 
 | file | export | lines |
 |---|---|---|
-| `option.mere` | `module Option { zip, filter, or_else, is_none, unwrap_or_fail }` | ~130 |
+| `option.mere` | `module Option { zip, filter, or_else, is_none, unwrap_or_fail }` | ~60 |
 
 ## API (helpers not in prelude)
 
@@ -44,14 +44,11 @@ let value = Option.unwrap_or_fail maybe_value "invariant violated";
 
 ## Known gotchas
 
-- **None requires annotation**: when standalone `None` has no type, codegen
-  environments can't resolve multi-instantiation and you may get a `'a leak`.
-  The demo works around this with explicit annotation like `(None : int option)`.
-  Example:
-  ```mere
-  Option.is_none None              // fails in C codegen (type not pinned)
-  Option.is_none (None: int option)  // OK
-  ```
+- **A bare `None` used to need an annotation** on the compiled backends
+  (`Option.is_none None` failed in C codegen with the type not pinned, and
+  `(None: int option)` was the workaround). That is no longer the case:
+  `Option.is_none None` compiles and runs on interp / C / LLVM / Wasm. The
+  annotation is still accepted and harmless.
 
 ## Backend support
 
