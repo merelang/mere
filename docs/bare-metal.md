@@ -1,4 +1,4 @@
-# Bare metal (the RV32I backend)
+# Bare metal (the RISC-V backend)
 
 `mere -rv` lowers a program all the way to a flat little-endian RV32IM binary —
 no external assembler, no linker, no runtime beneath it. `--bare` goes one step
@@ -14,7 +14,11 @@ mere -rv examples/riscv_backend.mere > prog.bin        # a hosted program
 mere -rv --bare examples/riscv_bare_uart.mere > prog.bin   # no host at all
 ```
 
-The binary runs on the Mere-written RV32I emulator in the
+`mere -rv64` (v0.1.394), with its `-rv64s` listing and `-rv64g` debug map, is the
+same backend at twice the width: an RV64IM binary from the same code generator,
+taking the same flags.
+
+The binary runs on the Mere-written RISC-V emulators (RV32IM and RV64IM) in the
 [memu](https://github.com/284km/memu) project (`riscv-runc`), which is where the
 matching device side lives: a UART, a CLINT, CSRs and traps.
 
@@ -27,10 +31,10 @@ matching device side lives: a UART, a CLINT, CSRs and traps.
 | `--bare` | No host. The program's top-level `main` is handed the machine as a `Raw`; the print builtins are refused |
 | `--load-base <addr>` | Load somewhere other than address 0, 4KB-aligned. Everything absolute in the binary shifts with it |
 
-The three flags may come in any order. `-rvg <file>` prints the **debug map** that
+The flags may come in any order. `-rvg <file>` prints the **debug map** that
 makes source-level debugging possible (see below); it must be given the same flags
-as the `-rv` that produced the binary, since the map records addresses and all
-three of them move addresses. `-rvs` prints an assembly listing and `-rvd`
+as the `-rv` that produced the binary, since the map records addresses and the
+flags move them. `-rvs` prints an assembly listing and `-rvd`
 disassembles a binary — the disassembler covers RV32IM and RV64IM (including
 `ld`/`sd`/`lwu` and the `addiw`/`addw`/`mulw` family), the CSR instructions,
 `mret` and `wfi`.

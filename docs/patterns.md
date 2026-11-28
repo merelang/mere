@@ -445,7 +445,7 @@ for x in xs do
 
 // while: inside an fn body
 let consume_stream = fn stream ->
-  while !(stream_eof stream) do
+  while not (stream_eof stream) do
     let x = stream_next stream in
     let _ = process x in ();
 

@@ -1,10 +1,12 @@
 # Stdlib reference (mere)
 
-221 builtins are always available via `initial_env`. Check a name's type with
-`mere -te NAME`, and the count with `sh scripts/host_matrix.sh`, which
-enumerates the environment rather than reading this document — a
+Builtins are always available via `initial_env`: 341 names as of v0.1.732.
+The 56 that begin with `__` are backend-internal spellings a program does not
+write; most are listed with the reason in `docs/UNDOCUMENTED_ALLOW`. Check a name's type with `mere -te NAME`, and the
+current list with `mere --dump-builtins` or `sh scripts/host_matrix.sh`, which
+enumerate the environment rather than reading this document — a
 hand-maintained tally rots, and this one had (it read 202 while the
-environment held 226).
+environment held 226, and later 221 while it held 341).
 
 Legend:
 - ⚡ = may raise `Eval_error`
@@ -1042,7 +1044,7 @@ match (of_json_opt body : User option) with
 
 `== / !=` (structural equality) and `< <= > >=` (structural **ordering**)
 are compile-time-specialized per operand type — the same no-trait
-mechanism as `show` / `to_json`. Both work on interp / C / Wasm.
+mechanism as `show` / `to_json`. Both work on every backend.
 
 - **Scalars**: `int` / `float` / `bool` / `str` compare directly (`str`
   lexicographically).
@@ -1060,6 +1062,10 @@ list_sort_by (fn (a: float) -> fn (b: float) -> a < b) [3.1, 1.2]  // [1.2, 3.1]
 ```
 
 **Honest edges.** `float` uses a total order where `NaN` sorts as least.
+Equality is IEEE, inside a compound value as well as outside: `(1.5, 2) ==
+(1.5, 2)` is true and a `NaN` equals nothing. Until late November 2026 (after
+v0.1.732) the C, Wasm and RISC-V backends answered false for any tuple, record
+or variant holding a float, even compared with itself.
 Comparing two functions is defined but meaningless (they order as equal).
 The bare default `list_sort` still bakes in an `int` comparison — its
 comparator's type variables default to `int`, the same rule that keeps
@@ -1105,7 +1111,7 @@ let m = mk_metrics () in
 
 For a complete cap-passing example see [examples/effects.mere](../examples/effects.mere).
 
-### Raw memory, CSRs, traps and tasks (14, RV32I bare-metal only)
+### Raw memory, CSRs, traps and tasks (16, RISC-V `--bare` only)
 
 A `Raw` is a **window onto physical memory** — the one capability that is not a
 record of functions, because its operations lower to load and store
@@ -1759,9 +1765,9 @@ iter_n 3 (fn () -> print "===")   // prints === three times
 
 ---
 
-## The named builtins, alphabetical (122)
+## The named builtins, alphabetical (123)
 
-Not the whole 221: the `vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` families
+Not the whole environment: the `vec_*` / `owned_vec_*` / `strbuf_*` / `map_*` families
 below are registered separately. `id` / `pair` / `swap` / `const` / `flip` left
 this list in v0.1.318 — they are prelude definitions now (see Polymorphic
 helpers above). The heading said 129 while the list held 127, before that.
@@ -1812,7 +1818,7 @@ satisfy it and hide the very row it was describing.
 | `bytes_of_hex` / `hex_of_bytes` | `str -> bytes` / `bytes -> str` | lowercase hex, no separators |
 | `bytes_of_vec` / `vec_of_bytes` | `Vec[R, int] -> bytes` / `bytes -> Vec[R, int]` | the bridge to the integer view |
 
-**`f64x2` / `f32x4` / `u8x16` — the 128-bit SIMD types** (Q-109; two doubles, four floats, or sixteen bytes in one value. C: the compiler's vector extension; LLVM: `<2 x double>` / `<4 x float>` / `<16 x i8>`; Wasm: `v128`, boxed only when it escapes; RV32IM / RV64IM: `u8x16` only, as a 16-byte box through the RISC-V Vector extension (v0.1.426) -- `f64x2` and `f32x4` are refused there, which is the floating-point unit it does not have. Not comparable with `==` or `<` -- compare lanes. `show` prints `f64x2(a, b)` / `f32x4(a, b, c, d)` / `u8x16[32 hex digits]`, `to_json` `[a, b]` / `[a, b, c, d]` / a hex string.
+**`f64x2` / `f32x4` / `u8x16` — the 128-bit SIMD types** (Q-109; two doubles, four floats, or sixteen bytes in one value. C: the compiler's vector extension; LLVM: `<2 x double>` / `<4 x float>` / `<16 x i8>`; Wasm: `v128`, boxed only when it escapes; RV32IM / RV64IM: `u8x16` as a 16-byte box through the RISC-V Vector extension (v0.1.426), and `f64x2` / `f32x4` since v0.1.656 as the prelude's boxes of lanes computed in software, since the target has no floating-point unit. Not comparable with `==` or `<` -- compare lanes. `show` prints `f64x2(a, b)` / `f32x4(a, b, c, d)` / `u8x16[32 hex digits]`, `to_json` `[a, b]` / `[a, b, c, d]` / a hex string.
 
 **`f32x4` is the one whose boundary converts.** Its lanes are single precision and the language's scalar `float` is a double, so a value is narrowed going in and widened coming out, and both conversions are the backend's own round-to-nearest-even -- the delegation `f32_bits` makes (Q-038). A double with no float32 becomes an infinity rather than wrapping. The arithmetic between the conversions is f32: `f32x4_add (f32x4_splat 1.0) (f32x4_splat 0.1)` is not `1.1`, it is the float32 nearest it. There is deliberately **no `f32x4_load` / `f32x4_store`**: for `f64x2` a load is a load because `Vec[R, float]` already holds doubles, but the same spelling on f32 lanes would be a narrowing conversion of four doubles wearing the name of a load, and a caller that wants four real f32 lanes off a buffer wants them from `bytes`. Two different right answers, so neither is defined until a caller settles it):
 
@@ -1876,7 +1882,7 @@ snapshot across replacement and compaction.
 
 | builtin | signature | notes |
 |---|---|---|
-| `mem_trim` | `unit -> unit` | On C, release inactive cached regions beyond the calling thread's first eight. Also drain Darwin's shared pool of reusable mapped blocks, or request `malloc_trim(0)` on glibc. Active region data stays live; the call makes no guarantee about process RSS, and other threads may refill shared pools. Other backends evaluate the argument and return unit without trimming (v0.1.729). |
+| `mem_trim` | `unit -> unit` | On C, release the calling thread's inactive cached regions: all of them when at least 4,096 regions have been acquired since the previous trim, otherwise those beyond the first eight (so a loop of back-to-back trims does not map its scratch again each time). Also drain Darwin's shared pool of reusable mapped blocks, or request `malloc_trim(0)` on glibc. Active region data stays live; the call makes no guarantee about process RSS, and other threads may refill shared pools. Other backends evaluate the argument and return unit without trimming (v0.1.729; the release-all case after real work is from 2026-11-22, after v0.1.732). |
 
 **`snapshot : 'a -> 'a` (v0.1.712) copies an immutable plain value** into the enclosing
 allocation scope, using the same deep copy as a region result. It supports

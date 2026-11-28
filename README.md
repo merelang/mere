@@ -21,7 +21,8 @@ The type system's job is to stop a value from outliving the arena it came from, 
 shown you could try, with what each entry point answers and which holes are still open.
 
 Measured against other implementations of the same program
-([`benchmarks/`](benchmarks/README.md), `python3 benchmarks/run.py`):
+([`benchmarks/`](benchmarks/README.md), `python3 benchmarks/run.py`), at v0.1.323
+(2026-08-25, macOS arm64; the changelog entry for that version has the before and after):
 
 | binarytrees — same program, same input | wall | peak RSS |
 |---|---|---|
@@ -32,12 +33,15 @@ Measured against other implementations of the same program
 
 A reference counter runs whether or not you needed it to. A region block is you saying
 where. On this workload, saying where beats both the collector and hand-written `malloc`.
+(The naive row's footprint has moved since: v0.1.419 packed a variant's tag into the
+pointer and recorded it at 118.7 MiB. Rerun the suite for today's numbers.)
 
 Larger programs written in Mere, each of which forced something into the language:
 
-- [mere-ruby](https://github.com/284km/mere-ruby) — an interpreter for a subset of Ruby
-  (45,000 lines of Mere), checked against `ruby` itself on a 190-program corpus. It runs on
-  the RISC-V backend, on the CPU below, at both 32 and 64 bits.
+- [mere-ruby](https://github.com/284km/mere-ruby) — a Ruby interpreter written in Mere
+  (tens of thousands of lines), checked byte for byte against `ruby` itself on a corpus of
+  several hundred programs. It runs on the RISC-V backend, on the CPU below, at both 32
+  and 64 bits.
 - [memu](https://github.com/284km/memu) — RV32IM and RV64IM cores written in Mere; the
   RISC-V backend's own machines, diffed against QEMU (`scripts/qemu_virt.sh`). The
   kernel, shell and user-process examples under `examples/riscv_bare_*` run there
@@ -46,12 +50,12 @@ Larger programs written in Mere, each of which forced something into the languag
   rasterisation, all in Mere.
 
 **And it is not free, which the same suite says out loud.** Mere with no `region` written
-holds 29x the memory MoonBit does, because nothing is reclaimed by default. The language
+held 29x the memory MoonBit does in that table, because nothing is reclaimed by default. The language
 does not decide for you; it makes deciding cheap to write.
 
-The safety claim is enumerated rather than asserted. Sixteen routes: **ten rejected by
-every compiling backend, six accepted with the reason stated, no open holes today.** Two
-of those ten were found by writing the table rather than by hitting them (Q-067), and a
+The safety claim is enumerated rather than asserted. Twenty-seven routes: **fourteen
+rejected by every compiling backend (and by the interpreter), thirteen accepted with the
+reason stated, no open holes today.** Two of the rejected routes were found by writing the table rather than by hitting them (Q-067), and a
 route that dangles is a row with a Q number rather than an absence from the file — so
 `scripts/escape_check.sh` fails if one closes without the table being updated, which is
 how it reported those two being fixed. Where this lands first is bare metal, embedded, and
@@ -61,7 +65,7 @@ the memory is something you were going to have to think about anyway.
 ### The row to read twice
 
 The suite carries two implementations of `crc32` that differ **only in which API they
-call** — same algorithm, same file, same input:
+call** — same algorithm, same file, same input (recorded 2026-08-26, v0.1.325):
 
 | `crc32` | wall | peak RSS |
 |---|---|---|
@@ -113,17 +117,17 @@ It **self-hosts** — the Mere-in-Mere compiler, compiled by itself and run as W
 - **🏆 Bootstrap fixpoint — truly self-hosting** (v0.1.10, 2026-07-12): the Mere-in-Mere compiler, **compiled by itself and run as wasm, produces byte-identical output to the reference** — and that output runs correctly. Compiling a program with (A) the compiler under the interpreter and (B) the compiler compiled by itself yields the same WAT, byte for byte (CI-verified by a permanent fixpoint regression test). Getting there required guaranteed tail calls in the self-host codegen (`return_call_indirect`, Stage 55f) and fixing three latent self-compilation bugs (an eager pattern-check payload dereference, pointer-equality string compares in the untyped self-host codegen, and a missing `\r` lexer escape — Stage 55g). See [docs/changelog.md](docs/changelog.md).
 - **🏗️ A fifth backend, and an operating system on top of it** (v0.1.134–198): `mere -rv` emits a flat RV32IM binary with no external assembler or linker, and `--bare` hands the program the machine instead of a host — raw memory arrives as an unforgeable window capability, traps as ordinary Mere closures. On that: a preemptive scheduler, a shell, a syscall boundary, and finally **Mere's own self-hosted compiler running as a user process on a Mere kernel, on a CPU written in Mere**, emitting WAT byte-identical to the native interpreter. `mere -rvg` then emits a debug map beside the binary — from the same item list the assembler consumes, so it describes the bytes that actually ran — which is what lets [riscv-dbg](https://github.com/284km/memu/tree/main/riscv-dbg) break on Mere **source lines**, print a backtrace, and step **backwards**. `mere -rv64` (v0.1.394) is the same backend at twice the width: an RV64IM binary from the same code generator. See [docs/bare-metal.md](docs/bare-metal.md).
 - **🛰️ gRPC and GraphQL, against real clients** (v0.1.280–283): `contrib/proto` (protobuf wire both ways, `FileDescriptorSet`, and a code generator from `.proto`), `contrib/http2` (framing + HPACK + an h2c server with flow control in both directions and a worker pool), and `contrib/graphql` (lexer / parser / printer / SDL / executor with null propagation, introspection, and 21 of the specification's 32 validation rules). `grpcurl` and `graphql-js` are the oracles, and interfaces and unions resolve from `__typename` the way graphql-js's default `resolveType` does. See [contrib/proto/README.md](contrib/proto/README.md), [contrib/http2/README.md](contrib/http2/README.md), [contrib/graphql/README.md](contrib/graphql/README.md).
-- **🖥️ Editor support from the compiler's own answers** (v0.1.203–215, code actions v0.1.503): diagnostics, hover, go-to-definition, completion, outline, formatting, semantic tokens, references, rename and **code actions**, all served by `mere lsp` — the editor's three questions turned out to be one the compiler could already answer. The actions are that discovery again: the exhaustiveness checker had always written the missing arm, and what stood between it and an editor was a `string`. Debug info is emitted by every backend (C `#line`, LLVM `!dbg`, a Wasm source map, an RV32I map). The extension lives in [merelang/mere-vscode](https://github.com/merelang/mere-vscode).
+- **🖥️ Editor support from the compiler's own answers** (v0.1.203–215, code actions v0.1.503, folding v0.1.576): diagnostics, hover, go-to-definition, go-to-type-definition, completion, signature help, outline, folding, formatting, semantic tokens, references, document highlight, rename and **code actions**, all served by `mere lsp` — the editor's three questions turned out to be one the compiler could already answer. The actions are that discovery again: the exhaustiveness checker had always written the missing arm, and what stood between it and an editor was a `string`. Debug info is emitted by every backend (C `#line`, LLVM `!dbg`, a Wasm source map, a RISC-V debug map). The extension lives in [merelang/mere-vscode](https://github.com/merelang/mere-vscode).
 - **🌍 A browser for static pages, written in Mere** ([mbrowse](https://github.com/284km/mbrowse)): HTML tokenizer and tree construction, CSS cascade, layout and painting, gated against html5lib and by reftests — the one gate that needs no oracle.
 - **📦 Package system v0.2**: `mere install` reads a `mere.toml`, fetches git dependencies (monorepo `subdir` supported) into `.mere_modules/`, resolves transitive cross-package imports, and writes a `mere.lock`. An optional `[host]` entry also vendors the Node runtime host into `.mere_host/`, so `mere serve app.wasm` runs a compiled server with no compiler source tree. See [docs/packages.md](docs/packages.md).
 - **🧵 Concurrency**: `spawn` / channels / `join` / `par_map`, with Send/Sync classification, spawn-capture move checks and inferred Send bounds on channel elements. The interpreter, C and LLVM use native threads; the Node Wasm host uses workers; RISC-V uses coroutine-based green threads. Runtime container-owner guards cover the interpreter, C and LLVM, plus `Vec` and `Map` on Wasm. See the [memory and concurrency contract](docs/memory-model.md#concurrency-and-sharing) for callback and backend limits, and `examples/parallel_compute.mere` / `examples/par_map.mere` for examples.
 - **🎉 Self-host bootstrap** (Phase 54, 2026-06-30 → 2026-07-01): the Mere source of the compiler compiles itself. Five major runtime components — `lexer`, `parser`, `evaluator`, `type inferencer`, `formatter` — are written in Mere, compiled through the self-host `parse_and_emit_file` pipeline to WAT, and confirmed running correctly under wasm at runtime (10 CI-verified bootstrap tests exercising parse / eval / infer / format on real inputs). The self-host codegen (`codegen_wasm.mere`) also compiles itself at compile-time (1.56 MB WAT, wat2wasm-verified). **All 18 contrib libraries** self-host-compilable: `ast` / `lexer` / `parser` / `typer` / `eval` / `fmt` / `json` / `path` / `option` / `regex` / `regex.engine` / `argparse` / `test` / `toml` / `markdown/to_html` / `markdown/to_text` / `markdown/toc` / `time`. 13 of the 18 have CI compile-time verification via `bootstrap_wat_ok` (wat2wasm-checks the emitted module).
 - **🌐 Web backend Stage A** (Phase 54.35, 2026-07-02): `contrib/http/` adds Node-hosted HTTP server bindings via five extern fns (`http_serve` + `http_current_body` + `http_set_status` + `http_set_content_type` + `http_set_header`), sibling of `contrib/dom` for the server side. Real HTTP JSON REST APIs are now expressible in Mere — see `examples/http_todo_api.mere` (in-memory CRUD with routing, status codes, JSON, and top-level mutable `Map` state) and `examples/http_json_api.mere` (six endpoints incl. CORS).
 - **🧩 One schema, both replicas** (v0.1.183-184, 2026-08-11): `contrib/schema` reads a record's field names, values and updates off the name-keyed view the compiler already synthesises for `to_json`, so a form can be generated from a record declaration instead of written out beside it. It became a library rather than a per-app trick once `of_json_like` let a decoder take its target type from a witness value — `of_json` reads the call node's type, which inside a polymorphic helper is a variable the interpreter cannot resolve. `examples/claims` is the app that forced it.
-- **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); subsequent phases grew the example set to 136.
+- **4-backend feature parity**: interp + C / LLVM IR / Wasm runtime — all match interp **diff = 0 PERFECT** across 16 realistic examples (~1500 LoC) (Phase 24-27); the parity programs now live in `test/parity/` (the count is in the first bullet above).
 - **Range-check versioning**: a loop over a `Vec` checks its whole index range once and runs an unchecked copy, so clang vectorizes the emitted C (axpy: from 2.8x hand-written C to a tie); the checked loop stays the oracle (`scripts/range_version_check.sh`, `scripts/vectorize_check.sh`)
-- **128-bit SIMD types** (`f64x2`, `u8x16`): lane operations on interp / C (vector extension) / LLVM (`<2 x double>`, `<16 x i8>`) / Wasm (`v128`) / RISC-V (`u8x16` through the RISC-V Vector extension, VLEN 128 -- the UTF-8 validator written with sixteen byte lanes runs on the Mere-written CPU, and on the C backend beats scalar C: `benchmarks/utf8valid_simd`)
-- **Fused multiply-add** (`fma`, `f64x2_fma`, v0.1.534): `a * b + c` rounded once, when a program asks for it by name -- the unfused expression keeps its two roundings at every optimization level. Bit-identical to the C library's `fma(3)` on all four compiling backends, including Wasm, which has no fma instruction and computes it in software (`scripts/fma_check.sh`)
+- **128-bit SIMD types** (`f64x2`, `f32x4`, `u8x16`): lane operations on interp / C (vector extension) / LLVM (`<2 x double>`, `<16 x i8>`) / Wasm (`v128`) / RISC-V (the float lanes in software since v0.1.656, and `u8x16` through the RISC-V Vector extension, VLEN 128 -- the UTF-8 validator written with sixteen byte lanes runs on the Mere-written CPU, and on the C backend beats scalar C: `benchmarks/utf8valid_simd`)
+- **Fused multiply-add** (`fma`, `f64x2_fma`, v0.1.534): `a * b + c` rounded once, when a program asks for it by name -- the unfused expression keeps its two roundings at every optimization level. Bit-identical to the C library's `fma(3)` on all four compiling backends, including Wasm, which has no fma instruction and computes it in software (`scripts/fma_check.sh`); on RISC-V, which has no floating-point unit, the prelude computes it (v0.1.656), checked on RV64
 - Memory model: regions, views, `Trivial[R]` and `with` cleanup; [reclamation and concurrency guarantees differ by backend](docs/memory-model.md).
 - Effect system: capability-passing pattern + `signature ... = (...)` argument bundling + `using [cap]` sugar + builtin Logger / Metrics.
 - Refined borrow annotations: 4 modes `&R T` / `&mut R T` / `&shared write R T` / `&exclusive R T` + borrow checker (place expressions + if/match branch propagation + full conflict matrix coverage).
@@ -161,9 +165,9 @@ Former tentative name: `lang-ml` (finalized as Mere on 2026-06-19).
 | Modules | `module M { ... }` (nestable), `M.f` references, internal short-name rewrite, `open M;`, type/record decls allowed inside modules |
 | import | `import "./path";` pulls in another file (importer-relative + canonical) |
 | Collections | `Vec[R, T]` / `OwnedVec[T]` / `StrBuf[R]` / `Map[R, K, V]` + higher-order API (iter/map/fold/filter/to_list/to_owned) — **insertion-order Map iter** (Phase 27.1) |
-| stdlib | 220+ builtins: I/O / conversion / strings (`str_split` / `str_join` / `str_compare` / `str_index_of` etc.) / numerics / polymorphic helpers / float / errors / Logger / Metrics |
+| stdlib | 290+ documented builtins: I/O / conversion / strings (`str_split` / `str_join` / `str_compare` / `str_index_of` etc.) / numerics / polymorphic helpers / float / errors / Logger / Metrics |
 | codegen | C / LLVM IR / Wasm (WAT) backends at parity, plus a fifth that emits **RV32IM and RV64IM machine code directly** — no assembler, no linker, and `--bare` for no operating system either ([bare-metal.md](docs/bare-metal.md)) + Wasm runtime validation (details in [codegen.md](docs/codegen.md)). Q-010 collections (4 kinds) + higher-order API + conversions + `len` ad-hoc poly + per-instantiation specialization of polymorphic user let-rec (Phase 23.3 / 25.5 / 26.4) + inner-fn lifting (Phase 25.3 / 26.3) + top-level value bindings globalized to file scope (Phase 30.2). |
-| SIMD | range-check versioning hoists a loop's bounds checks so clang vectorizes the emitted C, and 128-bit types `f64x2` / `u8x16` put lanes in your hands on every backend (`u8x16` on RISC-V through the V extension) — [simd.md](docs/simd.md) has what pays and what does not |
+| SIMD | range-check versioning hoists a loop's bounds checks so clang vectorizes the emitted C, and 128-bit types `f64x2` / `f32x4` / `u8x16` put lanes in your hands on every backend (`u8x16` on RISC-V through the V extension) — [simd.md](docs/simd.md) has what pays and what does not |
 | FFI | `extern fn <name>: <ty>;` declares a host function. Availability and representations depend on the backend and host; see the [standard-library reference](docs/stdlib-reference.md). |
 | REPL | persistent env, multi-line input, `:type` `:env` `:show NAME` `:load FILE` `:reset` `:help` |
 | Error UX | Rust-style multi-line code frame, ANSI colors (TTY only), Levenshtein-based typo suggestions (including record fields and qualified names), type-conversion hints |
@@ -184,10 +188,11 @@ $ dune exec ./bin/mere.exe -- examples/module_basic.mere
 # Calls Math.inc / Math.square / Math.pow from `module Math { ... }`
 
 $ dune exec ./bin/mere.exe -- examples/import_demo.mere
-# import "examples/lib_list_ops.mere"; computes ListOps.sum [1..5]
+# import "lib_list_ops.mere"; (importer-relative) computes ListOps.sum [1..5]
 
-$ dune exec ./bin/mere.exe -- contrib/json/json.mere
-# Runs the self-test of the JSON parser in Mere (140 lines; promoted to contrib/ in Phase 40)
+$ dune exec ./bin/mere.exe -- -e 'import "contrib/json/json.mere"; Json.to_json_str (Json.parse_json "[1, 2.5, null, true]")'
+"[1,2.5,null,true]"
+
 
 $ dune exec ./bin/mere.exe -- examples/pipeline.mere
 # A realistic example combining region / view / effects / `with`
@@ -220,7 +225,7 @@ The compiler compiles itself — Mere source is tokenized, parsed, and lowered t
 $ dune exec ./bin/mere.exe -e '
   import "contrib/codegen/codegen_wasm.mere";
   str_len (parse_and_emit_file "contrib/codegen/codegen_wasm.mere")'
-1560495                            # 1.56 MB WAT output — wat2wasm accepts
+2561852                            # 2.56 MB of WAT — wat2wasm --enable-tail-call accepts it
 
 # Runtime self-host: compile a tiny Mere program via the wasm-compiled
 # lexer, then confirm it ran under wasm (see test/test_basic.ml
@@ -236,26 +241,30 @@ $ dune exec ./bin/mere.exe -e '
 
 ## Documentation
 
+- **[Tour](docs/tour.md)** — one scroll through every core feature, each snippet a complete program
 - **[Tutorial](docs/tutorial.md)** — start here (includes `module` / `import` / REPL)
 - **[Tutorial: REST API](docs/tutorial-rest-api.md)** — build a notes JSON API with `contrib/http` (routing, path params, CRUD)
 - **[Tutorial: Redis client](docs/tutorial-redis-client.md)** — build a Redis client from the raw TCP externs (RESP wire protocol)
 - **[Tutorial: type inference](docs/tutorial-type-inference.md)** — implement the HM unification engine (type vars, unify, occurs check, infer)
 - **[Language reference](docs/language-reference.md)** — syntax and semantics
 - **[Stdlib reference](docs/stdlib-reference.md)** — builtin tables
+- **[Host matrix](docs/host-matrix.md)** — which backend has a lowering for each host builtin, generated by asking the compiler (`scripts/host_matrix.sh`)
+- **[Reserved names](docs/reserved-names.md)** — the reserved words, and the C names a `type` cannot take
 - **[Patterns / cookbook](docs/patterns.md)** — common idioms
 - **[Memory model](docs/memory-model.md)** — memory management options, region/view, current and future
 - **[Codegen](docs/codegen.md)** — the compiled backends' shared strategy (C / LLVM IR / Wasm) + per-slice table; the RISC-V backend has its own page below
-- **[SIMD](docs/simd.md)** — the two paths (range-check versioning, and the `f64x2` / `u8x16` types), when lanes pay and when they do not, the measured rows
+- **[SIMD](docs/simd.md)** — the two paths (range-check versioning, and the `f64x2` / `f32x4` / `u8x16` types), when lanes pay and when they do not, the measured rows; [the Go comparison](docs/simd-go-comparison.md) says what was taken from Go's SIMD design and what was not
+- **Runtime boundaries** — what a read, a range or a buffer may touch and where each backend stops it: [Vec reads](docs/vec-read-boundaries.md), [Map reads](docs/map-read-boundaries.md), [ranges](docs/range-boundaries.md), [buffers](docs/buffer-boundaries.md), [allocation alignment](docs/allocation-alignment.md), and [string roots in suspended coroutines](docs/coroutine-string-roots.md)
 - **[Language server](docs/lsp.md)** — `mere lsp`: diagnostics, hover, go to definition and completion in your editor, from the same check the compiler runs ([VS Code extension](https://github.com/merelang/mere-vscode))
-- **[Bare metal](docs/bare-metal.md)** — the RV32I backend: `--bare`, the memory map, raw memory as a capability, traps, tasks, a user process, and the debug map behind source-level debugging
-- **[HTTP demos](docs/http-demos.md)** — twelve `examples/http_*.mere` servers, catalog + patterns
-- **[Database](docs/db.md)** — pure-Mere Postgres client + pool + LISTEN/NOTIFY, 16 demos
-- **[Packages](docs/packages.md)** — `.mere_modules/` package resolution (v0.1)
+- **[Bare metal](docs/bare-metal.md)** — the RISC-V backend (RV32IM / RV64IM): `--bare`, the memory map, raw memory as a capability, traps, tasks, a user process, and the debug map behind source-level debugging
+- **[HTTP demos](docs/http-demos.md)** — the `examples/http_*.mere` servers, catalog + patterns
+- **[Database](docs/db.md)** — pure-Mere PostgreSQL, MySQL and Redis clients (pools, LISTEN/NOTIFY, TLS), 38 demos
+- **[Packages](docs/packages.md)** — `.mere_modules/` resolution, `mere.toml` + `mere install`, `mere fix` / `mere doc` / `mere test`
 - **[Changelog](docs/changelog.md)** — milestones from project start (2026-06-06) onward
 - **[Runbook](RUNBOOK.md)** — operational procedures (site deploy, merelang.org DNS/cert, Cloudflare Workers). Not published to the docs site.
-- `examples/` — runnable `.mere` files ([examples/README.md](examples/README.md) has a categorized index). From basics (FizzBuzz / word count) and Q-010 collection codegen demos (`vec_codegen_*.mere` / `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`), to realistic applications (PERFECT diff = 0 on all 4 backends): `template_engine` / `word_freq` / `mini_shell` / `chained_parse` / `state_machine` / `ini_parser` / `regex_lite`; **a 1165-line `toy_sql`** (Phase 29 dogfood; 59 tests; 4-backend PERFECT); and the 47 sugar-dogfood examples added in Phase 36: `calc` / `maze_solver` (BFS) / `game_of_life` / `sudoku_check` / `tic_tac_toe` / `eight_queens` / `knapsack` / `roman_numerals` / `morse_code` / `luhn_check` / `caesar_cipher` / `csv_summary` / `comprehension` / `if_let_demo` / `for_loop_demo` / `while_loop_demo` / `sugar_showcase` and more.
+- `examples/` — runnable `.mere` files ([examples/README.md](examples/README.md) has a categorized index). From basics (FizzBuzz / word count) and Q-010 collection codegen demos (`vec_codegen_*.mere` / `owned_vec_codegen.mere` / `strbuf_codegen.mere` / `map_codegen.mere`), to realistic applications (PERFECT diff = 0 on all 4 backends): `template_engine` / `word_freq` / `mini_shell` / `chained_parse` / `state_machine` / `ini_parser` / `regex_lite`; **a 1175-line `toy_sql`** (Phase 29 dogfood; 59 tests; 4-backend PERFECT); and the 47 sugar-dogfood examples added in Phase 36: `calc` / `maze_solver` (BFS) / `game_of_life` / `sudoku_check` / `tic_tac_toe` / `eight_queens` / `knapsack` / `roman_numerals` / `morse_code` / `luhn_check` / `caesar_cipher` / `csv_summary` / `comprehension` / `if_let_demo` / `for_loop_demo` / `while_loop_demo` / `sugar_showcase` and more.
 - `examples/chat|tally|tasks|profile|claims/` — **browser apps**: a Mere client compiled to Wasm, a Mere server, and the page that loads them. Each exists to make the language answer a question it had not been asked, and each names the capability it forced — see the "Browser apps" section of [examples/README.md](examples/README.md). `claims` is the furthest along: one `schema.mere` holds the record, the wire format and the rules, both replicas import it, and adding a field to the record is two edits with nothing silent.
-- `contrib/` — **library candidates** ([contrib/README.md](contrib/README.md)). One step more "reuse-oriented" than `examples/`. Grew significantly with the Phase 49-54 self-host effort: `parser/` (lexer + AST + parser), `codegen/codegen_wasm.mere` (2800-line self-host WAT emitter), `eval/eval.mere`, `typer/typer.mere`, `fmt/fmt.mere`, plus `json/` / `path/` / `option/` / `regex/` / `argparse/` / `test/` / `toml/` / `markdown/` (HTML / text / TOC) / `time/` / `dom/` / `site/` (playground pages). These will graduate to separate repos once a package manager is in place.
+- `contrib/` — **library candidates** ([contrib/README.md](contrib/README.md)). One step more "reuse-oriented" than `examples/`. Grew significantly with the Phase 49-54 self-host effort: `parser/` (lexer + AST + parser), `codegen/codegen_wasm.mere` (a 3,700-line self-host WAT emitter), `eval/eval.mere`, `typer/typer.mere`, `fmt/fmt.mere`, plus `json/` / `path/` / `option/` / `regex/` / `argparse/` / `test/` / `toml/` / `time/` / `dom/` / `site/` (the docs site and playground pages), and since then the HTTP, database, protocol and codec libraries. The markdown converter has moved to its own repository (`github.com/284km/mere-markdown`). An app can depend on any of these through `mere install` with a monorepo `subdir` ([docs/packages.md](docs/packages.md)).
 
 ## Build / run
 
@@ -277,7 +286,7 @@ clang sum.s -o sum && ./sum                          # → 7
 
 # Wasm codegen (requires wabt / Node.js)
 dune exec ./bin/mere.exe -- -we '1 + 2 * 3' > sum.wat
-wat2wasm sum.wat -o sum.wasm
+wat2wasm --enable-tail-call sum.wat -o sum.wasm
 node scripts/run_wasm.js sum.wasm                    # → 7 (via the host harness)
 ```
 
@@ -310,9 +319,10 @@ it cannot drift into being a second `-t`.
 
 The one gap it has, stated rather than hidden: **codegen is not run**, so a
 backend refusing what it was handed — a builtin no Wasm host implements, a shape
-the RISC-V emitter walls on — is invisible to the bare form. That is what the
-`-c` / `-ll` / `-w` / `-rv` / `-rv64` flags are for, and it is why the answer to "will this
-build" needs one of them.
+the RISC-V emitter walls on — is invisible to the bare form. That is what
+`mere check -c` / `-ll` / `-w` / `-rv` are for, and it is why the answer to "will this
+build" needs one of them. (`-rv64` has no `check` form yet; emitting with `mere -rv64`
+is the way to ask that backend.)
 
 ## Formatting (`mere fmt`)
 
@@ -343,20 +353,30 @@ mere/
 ├── lib/                # Core (library: mere)
 │   ├── loc.ml / ast.ml / lexer.ml / parser.ml
 │   ├── typer.ml        # HM inference + sum types + records + let-poly + borrow checker
+│   ├── trait_elab.ml   # user traits, elaborated into dictionary passing
+│   ├── exhaustive.ml / move_check.ml  # match exhaustiveness; spawn-capture moves
+│   ├── monomorph.ml    # per-type specialization shared by the compiling backends
+│   ├── prelude_stdlib.ml # the auto-imported prelude (Mere source)
 │   ├── eval.ml         # tree-walking interpreter
 │   ├── codegen_c.ml    # C codegen
 │   ├── codegen_llvm.ml # LLVM IR codegen
 │   ├── codegen_wasm.ml # Wasm (WAT) codegen
-│   ├── codegen_riscv.ml # RISC-V machine code (RV32IM / RV64IM)
+│   ├── codegen_riscv.ml # RISC-V machine code (RV32IM / RV64IM), with rv_prelude / rv_libm / rv_softfloat
 │   ├── pipeline.ml     # process / type_of (?base_dir for importer-relative)
+│   ├── lsp.ml / query.ml # `mere lsp`, and the position questions it asks
+│   ├── pkg_install.ml / feature.ml # `mere install`; `mere fix` / `--features`
+│   ├── suggest.ml      # `--suggest-regions`
 │   ├── repl.ml         # interactive REPL (multi-line / :env / :show / :load / :reset)
 │   ├── formatter.ml    # `mere fmt` pretty-printer
 │   ├── diagnostic.ml   # Rust-style code frame + ANSI colors
 │   └── version.ml
 ├── test/test_basic.ml  # core suite, including optional Wasm execution checks
-├── scripts/run_wasm.js # Wasm runtime host harness (Node.js: puts / read_file / write_file)
+├── test/parity/        # the cross-backend parity programs
+├── scripts/            # CI gates and host harnesses (run_wasm.js: puts / read_file / write_file)
+├── benchmarks/         # the same programs in other languages, measured (benchmarks/README.md)
+├── contrib/            # libraries written in Mere (contrib/README.md)
 ├── examples/           # *.mere sample programs
-└── docs/               # tutorial / language-reference / stdlib-reference / patterns / memory-model / codegen / bare-metal / changelog
+└── docs/               # tour / tutorials / language-reference / stdlib-reference / patterns / memory-model / codegen / bare-metal / lsp / packages / changelog
 ```
 
 ## Name

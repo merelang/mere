@@ -1,6 +1,6 @@
 # Language reference (mere)
 
-The syntax and semantics of Mere as currently implemented (as of 2026-06-24 / Phase 46). `&T` references / `region` / `view` / effects / FFI / 4-backend codegen are all implemented. Phase 36 added 13 kinds of syntactic sugar (range / op section / `::` / `<|` / `@@` / `\` lambda / string interp / `?` / `?!` / list comp / `if let` / `for-in-do` / `while-do`), substantially improving ergonomics in the ML-family tradition.
+The syntax and semantics of Mere as currently implemented. This page began at Phase 46 (2026-06-24) and its sections carry the version that added or changed each rule; v0.1.732 is the current version in the source. `&T` references / `region` / `view` / effects / user traits / FFI / codegen for C, LLVM IR, Wasm and RISC-V are all implemented. Phase 36 added 13 kinds of syntactic sugar (range / op section / `::` / `<|` / `@@` / `\` lambda / string interp / `?` / `?!` / list comp / `if let` / `for-in-do` / `while-do`), substantially improving ergonomics in the ML-family tradition.
 
 ---
 
@@ -14,11 +14,11 @@ The syntax and semantics of Mere as currently implemented (as of 2026-06-24 / Ph
 ### Literals
 | Kind | Example |
 |---|---|
-| Integer | `0`, `42`, `-5` (syntactically `Neg (Int_lit 5)`) |
+| Integer | `0`, `42`, `-5` (syntactically `Neg (Int_lit 5)`), `0xFF`, `0b1010`, `0o17`, `1_000_000` (see §8 for widths) |
 | Float | `1.5`, `3.14`, `0.0`, `1e3`, `2.5e-8`, `4E+5` (digits.digits, or an exponent; bare `1.` is not a float) |
 | Boolean | `true`, `false` |
-| String | `"hello"`; escapes are `\n` `\t` `\\` `\"` |
-| Char (length-1 str) | `'X'`; escapes are `'\n'` `'\t'` `'\\'` `'\''` `'\"'` |
+| String | `"hello"`; escapes are `\n` `\t` `\r` `\0` `\\` `\"`, `\{` / `\}` (literal braces), and `\uXXXX` (four hex digits, written as UTF-8). A `\` at the end of a line continues the literal: the newline and the next line's leading spaces and tabs are dropped |
+| Char (length-1 str) | `'X'`; escapes are `'\n'` `'\t'` `'\r'` `'\0'` `'\\'` `'\''` `'\"'` |
 | Unit | `()` |
 
 A char literal `'X'` is just a length-1 str (Mere has no separate char type). Convenient for dispatch like `match c with | 'n' -> ...`. To avoid ambiguity with the type variable syntax (`'a opt` etc.), the lexer distinguishes `'X'` (closing quote present) from `'NAME` (no closing quote; alphabetic start).
@@ -50,7 +50,7 @@ reserved word". The list is the lexer's own table, and
 <|                       reverse pipe (Phase 36): f <| x = f x
 @@                       low-precedence apply (Phase 36): f @@ x = f x
 ::                       cons operator (Phase 36): h :: t = Cons (h, t)
-..                       range literal (Phase 36): a..b = [a, ..., b-1]
+..                       range literal (Phase 36): a..b = [a, ..., b], both ends included
 ?                        Option early return (Phase 36)
 ?!                       Result early return (Phase 36)
 <-                       list comprehension generator (Phase 36)
@@ -119,7 +119,7 @@ not true                 false     (builtin)
 
 All desugar at the parser or lexer level, so the AST and beyond are unaffected. Per-form precedence is in §6.
 ```
-0..5                     // range: [0, 1, 2, 3, 4] (parser directly generates this; effectively list_iota)
+0..5                     // range: [0, 1, 2, 3, 4, 5] (desugars to `range 0 5`; both ends included)
 1 :: 2 :: []             // cons: Cons (1, Cons (2, Nil))
 (+ 1)                    // op section: fn x -> x + 1
 (* 2)                    // (- 1) is ambiguous with unary -, so parenthesize
@@ -361,7 +361,7 @@ region R {
 }
 ```
 
-**`Trivial[R]` is implicitly the default**: ordinary types (`int` / `str` / record / tuple / variant / `Vec[R, T]` / `&R T` / closure etc.) are **automatically `Trivial[R]`**. Users do **not** need to declare `impl Trivial[R] for X { }` (a future trait system may revisit this; see the internal design notes §3). The sole exception is types declared with `drop type` — they break Trivial[R] at every position they structurally appear (`contains_drop_type` walker in `lib/typer.ml`). So the judgment scheme is the simple "default-Trivial + drop-blacklist". Full trait-system rollout (DEFERRED §3.1) and explicit `impl Trivial[R]` syntax (§6.1) are linked in the design but don't affect the current implementation.
+**`Trivial[R]` is implicitly the default**: ordinary types (`int` / `str` / record / tuple / variant / `Vec[R, T]` / `&R T` / closure etc.) are **automatically `Trivial[R]`**. Users do **not** need to declare `impl Trivial[R] for X { }` (the user trait system in §5 does not model it). The sole exception is types declared with `drop type` — they break Trivial[R] at every position they structurally appear (`contains_drop_type` walker in `lib/typer.ml`). So the judgment scheme is the simple "default-Trivial + drop-blacklist". Full trait-system rollout (DEFERRED §3.1) and explicit `impl Trivial[R]` syntax (§6.1) are linked in the design but don't affect the current implementation.
 
 ### view (Phase 2.4: declaration + region enforcement + type-tag propagation)
 
@@ -675,6 +675,48 @@ signature ctx = (db: int, log: int);
 // Expanded by `fn (...ctx, x: int) -> ...` (parse-time)
 ```
 
+### Traits: `trait` / `impl` / `derive` / `dyn` (v0.1.92–109)
+
+User-defined traits give ad-hoc polymorphism. They are **elaborated into
+dictionary passing** (`lib/trait_elab.ml`) — a source-to-source lowering to
+plain Mere — so no backend needs support of its own, and the same program runs
+on the interpreter, C, LLVM, Wasm and RISC-V.
+
+```
+trait Num 'a {
+  add  : 'a -> 'a -> 'a;
+  zero : 'a;
+}
+impl Num int   { add = fn x -> fn y -> x + y; zero = 0; }
+impl Num float { add = fn x -> fn y -> x + y; zero = 0.0; }
+
+// The constraint is inferred; no annotation is needed. `zero`, a value
+// polymorphic in its RESULT, resolves through the same dictionary.
+let sum = fn xs -> list_fold xs zero (fn acc -> fn x -> add acc x);
+sum [1, 2, 3]          // 6
+```
+
+- **Defaults** (v0.1.101): a method may carry a body in the trait,
+  `eq : 'a -> 'a -> bool = fn a -> fn b -> a == b;`. An impl that omits it
+  inherits it; an impl body may refer to its sibling methods.
+- **Super-traits** (v0.1.103): `trait Ord 'a : Eq 'a { ... }` — every `Ord`
+  instance must also be an `Eq` instance, and a function constrained by `Ord`
+  may call `Eq`'s methods.
+- **`derive`** (v0.1.109): `derive (Eq, Ord) int;` (or `derive Eq T;`) is sugar
+  for one empty `impl` per trait. A trait is derivable exactly when every method
+  has a default; otherwise it is the ordinary "missing method" error.
+- **`dyn Trait`** (v0.1.108): `dyn Shape (Circ 2)` packs a value with its
+  instance, so values of different types can share a list; a method called on a
+  `dyn Shape` is dispatched dynamically. Annotate a parameter `(o : dyn Shape)`
+  to take objects. A trait supports `dyn` only if every method takes the trait
+  parameter as its single `self` argument and mentions it nowhere else.
+- Traits and impls may be declared inside a `module` (v0.1.107). A call that
+  needs an instance nobody declared is refused by name
+  (`trait error: no impl Shape circ`).
+
+`examples/trait_num.mere`, `examples/trait_bignum.mere`,
+`examples/trait_object.mere` and `contrib/ordset` are the worked uses.
+
 ---
 
 ## 6. Operator precedence (low → high)
@@ -721,7 +763,7 @@ So Mere's Copy/Linear distinction is realized via three layers — **Drop types 
 
 ---
 
-## 8. Known constraints (2026-06-24)
+## 8. Known constraints
 
 Items previously listed as "not implemented" were implemented incrementally through Phases 14-36; the following remain:
 
@@ -867,9 +909,9 @@ Mere's own keyword in `type t = A | B of int`.)
 
 ## 10. Status summary
 
-- **1573 tests passing** (test/test_basic.ml).
-- **4-backend feature parity**: interpreter + C / LLVM IR / Wasm runtime.
-- 16 realistic examples (~1500 LoC + toy_sql 1165 LoC) match **diff = 0 PERFECT**.
+- The test and parity-program counts are in the [README](../README.md), where `scripts/first_run_check.sh` re-derives them (3305 tests and 257 parity programs at v0.1.732).
+- **4-backend feature parity**: interpreter + C / LLVM IR / Wasm runtime, held by `test/parity/`; RISC-V (RV32IM / RV64IM) has its own hosted-execution and QEMU checks.
+- 16 realistic examples (~1500 LoC + toy_sql 1175 LoC) match **diff = 0 PERFECT**.
 - See [Changelog](changelog.md) / [Codegen](codegen.md) for details.
 
 ---

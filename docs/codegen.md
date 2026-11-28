@@ -186,9 +186,10 @@ access depend on the selected host. The generated host support matrix and
 the standard-library reference describe these requirements.
 
 Automatic scope cleanup for an ordinary `OwnedVec` binding is not inferred:
-use `with v = owned_vec_new () in body` for scope-bound cleanup. LLVM JSON
-decoding (`of_json` and its siblings) remains unsupported; `to_json` works
-there. Further restrictions, including region-returned functions on LLVM,
+use `with v = owned_vec_new () in body` for scope-bound cleanup. LLVM decodes
+JSON (`of_json` and its siblings) since v0.1.665, with the parser RISC-V
+uses; a decode whose target type is only known inside a polymorphic library
+function is not covered yet. `to_json` works there. Further restrictions, including region-returned functions on LLVM,
 are documented in the memory-model guide. The parity harness reports clean
 backend refusals separately from compilation failures and output differences.
 

@@ -7,7 +7,7 @@ for Redis), and everything on top are implemented in Mere itself; the
 host only exposes low-level TCP and crypto primitives. No `npm`
 packages involved.
 
-The rest of this page walks the stack top-down, then catalogs the 32
+The rest of this page walks the stack top-down, then catalogs the 38
 `examples/db_*.mere` demos.
 
 **At a glance**
@@ -23,7 +23,7 @@ The rest of this page walks the stack top-down, then catalogs the 32
 - [Layered architecture](#layered-architecture) — 5-layer diagram
 - [Quick start](#quick-start) — docker + build + run
 - [Public API reference](#public-api-reference) — grouped tables per concern
-- [Demo catalog](#demo-catalog) — 32 demos grouped by engine + concern
+- [Demo catalog](#demo-catalog) — 38 demos grouped by engine + concern
 - [Limitations and future work](#limitations-and-future-work)
 
 ## Layered architecture
@@ -258,7 +258,7 @@ node scripts/run_wasm.js /tmp/db.wasm
 Every demo is self-contained (its file header lists the exact docker
 command needed) and cleans up on process exit.
 
-### PostgreSQL (16 demos)
+### PostgreSQL (15 demos, plus one HTTP integration)
 
 *Auth & connect*
 
@@ -315,7 +315,7 @@ command needed) and cleans up on process exit.
 | [db_mysql_pool](https://github.com/merelang/mere/blob/main/examples/db_mysql_pool.mere) | `mysql_pool` keep-alive + `mysql_parse_url` + percent decoding |
 | [db_mysql_tx](https://github.com/merelang/mere/blob/main/examples/db_mysql_tx.mere) | `mysql_tx_iso` (REPEATABLE READ) + `mysql_savepoint_scope` nested rollback |
 
-### Redis (7 demos)
+### Redis (14 demos)
 
 *Core*
 

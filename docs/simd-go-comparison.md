@@ -20,7 +20,7 @@ number was measured on arm64 (Apple clang 21, node 24) unless it says otherwise.
 | `MulAdd` (fused multiply-add) | **Taken** as `fma` and `f64x2_fma` (v0.1.534) | `mat4xvec4` in lanes: 140 ms -> 100 ms through C |
 | `LoadVPart` / `StorePart` (loop tails) | Not taken | Upper bound on the one consumer that needs it: 0.16 s -> 0.15 s |
 | A mask type per element width, `IfElse` | Not taken yet | No consumer needs a select; the extra instructions can be removed without a new type |
-| Full emulation, so the code "always runs" | Not taken as a rule | Mere computes in software what it can reproduce exactly, and refuses the rest; so far that means fma on Wasm |
+| Full emulation, so the code "always runs" | Not taken as a rule | Mere computes in software what it can reproduce exactly, and refuses the rest; so far that means fma on Wasm, and the float lanes and fma on RISC-V (v0.1.656) |
 | Vector width removed from the type (`Float32s`, `Len()`) | Not taken | Every Mere target is 128-bit wide |
 | Feature variants (Go 1.28, planned) | Not taken | A problem of runtime CPU detection, which an ahead-of-time Mere build does not have |
 | Reductions (`ReduceSum`, missing in Go 1.27) | Already present | `f64x2_reduce_add`, `u8x16_reduce_add`, `u8x16_any_true`, `u8x16_first_true` |
@@ -78,7 +78,7 @@ scalar one would not.
 | C | `fma(3)` | `fma(3)` per lane (one `fmla.2d` on arm64) |
 | LLVM | `llvm.fma.f64` | `llvm.fma.v2f64` |
 | Wasm | `$__lang_fma`, in software | `$__lang_fma` per lane |
-| RV32IM / RV64IM | refused by name | refused (as all of `f64x2` is) |
+| RV32IM / RV64IM | the prelude's, in software (v0.1.656) | per lane, on the prelude's `f64x2` box (v0.1.656) |
 
 ### Wasm: refuse, or compute it in software?
 
@@ -211,15 +211,17 @@ be pattern-matched in the backends without changing any type.
 
 Go emulates every SIMD operation on platforms without the hardware, so a Go
 program using `simd` runs everywhere. Mere refuses an operation by name on a
-backend that cannot lower it: `f64x2` and `f32x4` on RISC-V, and
-`u8x16_first_true` there too. Mere also has what Go's `GODEBUG=simd=0` is for
+backend that cannot lower it. That used to include `f64x2`, `f32x4` and
+`u8x16_first_true` on RISC-V; since v0.1.656 the lane types and `fma` are
+computed there in software by the prelude (the target has no floating-point
+unit), and `u8x16_first_true` is lowered too. Mere also has what Go's `GODEBUG=simd=0` is for
 -- an interpreter that every compiled backend is compared against -- so
 emulation is worth less to it as a testing tool.
 
 The rule Mere follows is per operation, not global: an operation that is
 correctly rounded can be reproduced exactly, so it is computed in software; the
-rest is refused. fma on Wasm is the first operation to which the first half
-applied.
+rest is refused. fma on Wasm was the first operation to which the first half
+applied, and the RISC-V float lanes followed.
 
 **Look again when** Mere targets a real RISC-V core without the V extension.
 
