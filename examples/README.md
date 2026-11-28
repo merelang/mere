@@ -1,7 +1,7 @@
 # Mere examples
 
-A collection of runnable `.mere` programs for Mere (289 files, counting the
-multi-file apps under their own directories). Run with
+A collection of runnable `.mere` programs for Mere: 291 top-level files, plus
+25 directories holding multi-file apps and the frontends some servers load. Run with
 `dune exec ./bin/mere.exe -- examples/<file>.mere`
 to execute via the interpreter, or use the `-c` / `-ll` / `-w` flags to
 codegen to one of the C / LLVM IR / Wasm backends.
@@ -406,6 +406,75 @@ converter.
 | [prettyprinter.mere](prettyprinter.mere) | Wadler-style pretty printer combinator (variant doc + group/nest/line) |
 | ~~`regex_engine.mere`~~ | -> [contrib/regex/engine.mere](../contrib/regex/engine.mere) (NFA-based prototype) |
 
+### More examples, by subject
+
+Files that the sections above do not list. The descriptions come from each
+file's own header comment, which is the place to read more.
+
+#### Web servers and databases
+
+| File | Content |
+|---|---|
+| `http_*.mere` (34 files) | servers on `contrib/http`; [docs/http-demos.md](../docs/http-demos.md) is the catalog. The directories `blog/`, `ci_dashboard/`, `csv_export/`, `feed_reader/`, `file_upload/`, `jwt_demo/`, `link_shortener/`, `mini_blog/`, `rest_notes/`, `static_public/` and `wiki/` hold the static frontends those servers load |
+| `db_*.mere` (38 files) | PostgreSQL, MySQL and Redis clients in pure Mere; [docs/db.md](../docs/db.md) is the catalog |
+| [authz/server.mere](authz/server.mere) | every effect names the principal it ran as, so input that bypasses a layer cannot bypass the authorization |
+| [live/server.mere](live/server.mere) | `contrib/db/live`'s stale-read derivation wired to a transport, end to end |
+| [sse_native/server.mere](sse_native/server.mere) | the same server-sent-events loop as `live/`, compiled with `mere -c` to a native executable with no Node |
+| [nojs/server.mere](nojs/server.mere) | a flow that completes with no JavaScript at all |
+| [graphql_server.mere](graphql_server.mere) | a GraphQL endpoint over HTTP/1.1 (`contrib/graphql`) |
+| [grpc_hello.mere](grpc_hello.mere) | a gRPC Greeter over h2c (`contrib/http2`, `contrib/proto`); [hello_pb.mere](hello_pb.mere) is generated from `hello.proto` by [protoc_mere.mere](protoc_mere.mere) |
+| [gh_stars.mere](gh_stars.mere) | CLI: the star count of a GitHub repository via `http_fetch_h` |
+| [tcp_smoke.mere](tcp_smoke.mere) | end-to-end check for the synchronous TCP externs |
+| [kv_smoke.mere](kv_smoke.mere) / [feed_smoke.mere](feed_smoke.mere) | sanity checks for `contrib/kv` and `contrib/xml` + `contrib/feed` |
+| [tutorial_notes_api.mere](tutorial_notes_api.mere) / [tutorial_redis_client.mere](tutorial_redis_client.mere) / [tutorial_type_infer.mere](tutorial_type_infer.mere) | the worked examples for the three tutorials under `docs/` |
+| [cloudflare-worker/](cloudflare-worker/README.md) / [cloudflare-worker-registry/](cloudflare-worker-registry/README.md) | Mere compiled to Wasm and run as a Cloudflare Worker (a snippet-share service, and a read-only package registry API) |
+| [pkg_demo/](pkg_demo/main.mere) | one entry file and one vendored module under `.mere_modules/`; see [docs/packages.md](../docs/packages.md) |
+
+#### Concurrency
+
+| File | Content |
+|---|---|
+| [concurrent_loops.mere](concurrent_loops.mere) | two long-running loops in one process — the pain point the concurrency work started from |
+| [parallel_channel.mere](parallel_channel.mere) | `spawn` + channels across OS threads |
+| [parallel_compute.mere](parallel_compute.mere) / [par_map.mere](par_map.mere) | data-parallel fan-out / fan-in, by hand and as one `par_map` call |
+| [parallel_count.mere](parallel_count.mere) | a "shared counter" that needs no shared state |
+| [parallel_search.mere](parallel_search.mere) | branch-and-bound, where message passing is not enough |
+| [worker_pool.mere](worker_pool.mere) / [supervised_pool.mere](supervised_pool.mere) | a worker pool with graceful shutdown, and one whose collector survives a stuck worker with `channel_recv_timeout` |
+| [race.mere](race.mere) | race N workers, take the first, cancel the rest with a 0-ms receive |
+| [pubsub.mere](pubsub.mere) | a pub/sub broker written as an actor over one command inbox |
+| [gen_demo.mere](gen_demo.mere) | `contrib/gen`: thread-backed generators (lazy pull iteration) |
+| [parallel_map_demo.mere](parallel_map_demo.mere) / [subprocess_demo.mere](subprocess_demo.mere) | shell commands from Mere, in parallel and one at a time |
+
+#### Emulators, codecs and numerics
+
+| File | Content |
+|---|---|
+| [chip8.mere](chip8.mere) / [mos6502.mere](mos6502.mere) / [gameboy.mere](gameboy.mere) / [riscv.mere](riscv.mere) | the emulator ladder: CHIP-8, MOS 6502, Sharp LR35902 (Game Boy) and RV32I CPU cores |
+| [riscv_backend.mere](riscv_backend.mere) / [riscv_virt_args.mere](riscv_virt_args.mere) | the RV32IM backend (`mere -rv`), and how a program with no shell finds its arguments on QEMU `virt` |
+| [deflate.mere](deflate.mere) / [inflate.mere](inflate.mere) / [gzip_writer.mere](gzip_writer.mere) | DEFLATE (RFC 1951) and gzip (RFC 1952), both directions, in pure Mere |
+| [png_encode.mere](png_encode.mere) / [png_decode.mere](png_decode.mere) | PNG on top of the same DEFLATE code |
+| [mandelbrot.mere](mandelbrot.mere) / [raytrace.mere](raytrace.mere) | images written as PPM (P6, raw bytes) |
+| [sha256.mere](sha256.mere) / [crc32.mere](crc32.mere) | SHA-256 and CRC-32 — the programs that forced the bitwise builtins and the `bytes` story |
+| [base64.mere](base64.mere) / [base64_bytes.mere](base64_bytes.mere) | Base64 (RFC 4648) on `str` and on `bytes` |
+| [bignum_factorial.mere](bignum_factorial.mere) / [bignum_demo.mere](bignum_demo.mere) | arbitrary precision by hand, and through `contrib/bignum` |
+| [matmul.mere](matmul.mere) / [life_glider.mere](life_glider.mere) / [sudoku.mere](sudoku.mere) | probes for nested-container semantics: copy, read-current/write-next, mutate/undo |
+| [lisp.mere](lisp.mere) | a small Scheme interpreter: reader, evaluator with lexical closures, printer |
+| [linediff.mere](linediff.mere) | line-level diff via LCS with backtracking |
+| [midi_listen.mere](midi_listen.mere) | echo Note On/Off from a MIDI keyboard (native C only) |
+
+#### Types, traits and libraries
+
+| File | Content |
+|---|---|
+| [trait_num.mere](trait_num.mere) / [trait_bignum.mere](trait_bignum.mere) / [trait_object.mere](trait_object.mere) | user-defined traits, one generic over a bignum, and `dyn Trait` objects |
+| [generic_heap_dijkstra.mere](generic_heap_dijkstra.mere) / [ordset_demo.mere](ordset_demo.mere) | polymorphic containers: a pairing heap, and `contrib/ordset` at two key types |
+| [ledger.mere](ledger.mere) / [task_scheduler.mere](task_scheduler.mere) / [todo_app.mere](todo_app.mere) / [lru_cache.mere](lru_cache.mere) | records-heavy domain models |
+| [date_arith.mere](date_arith.mere) / [streaming_stats.mere](streaming_stats.mere) / [aligned_table.mere](aligned_table.mere) | civil-date arithmetic, statistics over a list (mean, variance, median), and display width (`utf8_width`) for CJK table cells |
+| [stream_lines.mere](stream_lines.mere) | region-scoped line streaming: peak memory is the longest line, not the file |
+| [encoding_demo.mere](encoding_demo.mere) / [url_parse_demo.mere](url_parse_demo.mere) / [url_percent_demo.mere](url_percent_demo.mere) | `contrib/encoding` and `contrib/url`, field by field |
+| [argparse_demo.mere](argparse_demo.mere) / [csv_writer_demo.mere](csv_writer_demo.mere) / [regex_demo.mere](regex_demo.mere) / [regex_engine_demo.mere](regex_engine_demo.mere) / [test_framework_demo.mere](test_framework_demo.mere) / [time_demo.mere](time_demo.mere) / [log_levels_demo.mere](log_levels_demo.mere) | demos of the matching `contrib/` libraries |
+| [oneshot_codegen.mere](oneshot_codegen.mere) / [selfhost_wasm_cli.mere](selfhost_wasm_cli.mere) | the self-hosted Wasm code generator at run time, and a CLI around it |
+
 ## How to try codegen
 
 ```sh
@@ -419,7 +488,7 @@ clang /tmp/sql.ll -o /tmp/sql && /tmp/sql
 
 # Wasm (requires wabt / Node.js). Phase 27.2 added scripts/run_wasm.js
 dune exec ./bin/mere.exe -- -w examples/toy_sql.mere > /tmp/sql.wat
-wat2wasm /tmp/sql.wat -o /tmp/sql.wasm
+wat2wasm --enable-tail-call /tmp/sql.wat -o /tmp/sql.wasm
 node scripts/run_wasm.js /tmp/sql.wasm   # with env imports for puts / read_file / write_file
 ```
 

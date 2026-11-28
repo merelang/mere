@@ -170,9 +170,9 @@ accumulators and four components are each a heap box on this backend, and a `f64
 that never escapes is not. Its measured out-of-memory threshold at 10,000 vertices is
 17 passes scalar and 75 with lanes.
 
-What is not measured here: the LLVM backend on the UTF-8 rows (it has no
-lowering for `read_bytes`, so those two `bench.mere` files do not run under
-`-ll`), Wasm on time, and a pinned RVV-on / RVV-off pair on the RISC-V core.
+What is not measured here: the LLVM backend on the UTF-8 rows (it had no
+lowering for `read_bytes` when these rows were recorded; `docs/host-matrix.md`
+shows one now, and the rows have not been re-measured), Wasm on time, and a pinned RVV-on / RVV-off pair on the RISC-V core.
 The summary the numbers support: **auto-vectorization is free once the bounds
 checks are hoisted, and it wins wherever it applies; explicit lanes pay only
 where no vectorizer can build the loop -- byte-lane table lookups like UTF-8
@@ -222,7 +222,7 @@ than a formatted double, and choose inputs that actually round — values that
 happen to be exact agree whether or not anything fused, and the check passes
 for the wrong reason.
 
-Three things to get right, all of them learned by getting them wrong here:
+Four things to get right, all of them learned by getting them wrong here:
 
 1. **End the program with `exit 0`.** Mere echoes its final expression and
    `print` evaluates to unit, so without it the process emits a trailing `()`
@@ -252,7 +252,7 @@ changes the input and every implementation then agrees on the wrong answer.
 
 ## A note on what the rows have cost to get right
 
-Three of the seven workloads were **predicted wrong** before they were run.
+Three of the first seven workloads were **predicted wrong** before they were run.
 `crc32` was written against the wrong byte API and reported Mere at 2.9x C
 until that was found. `json` was expected to be an easy loss for a parser
 written in Mere and is the fastest row on wall clock. `binarytrees` was
