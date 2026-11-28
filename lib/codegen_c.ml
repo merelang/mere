@@ -7091,6 +7091,106 @@ let emit_copy_fn_forward_decl (tag : string) (t : Ast.ty) : string =
   Printf.sprintf "static %s __mcopy_%s(__lang_region*, %s);"
     (c_type_of t) tag (c_type_of t)
 
+(* The page marker for one type, the shape of its __mcopy_<tag>: every byte a
+   value of this type occupies in a container's arena is marked as kept, so
+   __lang_shed_end gives back only what no live value touches. A string is its
+   length header, bytes and NUL; a cons cell or variant node its node; a
+   container handle the struct it points at; tuples, records and variants
+   their fields. A closure env cannot be sized here, so one inside the arena
+   stops the shedding of that arena (cx->unsafe). *)
+let emit_recursive_variant_mark (header : string) (cty : string) (tag : string)
+    (variants : (string * Ast.ty option) list) : string =
+  let tag_of cname = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+  let nullary =
+    List.filter_map (fun (cname, arg_opt) ->
+      match arg_opt with
+      | None -> Some (Printf.sprintf "    if (__t == %d) return;" (tag_of cname))
+      | Some _ -> None) variants in
+  let payload =
+    List.filter_map (fun (cname, arg_opt) ->
+      match arg_opt with
+      | None -> None
+      | Some ty ->
+        let tag_n = tag_of cname in
+        (match Ast.walk ty with
+         | Ast.TyTuple ts when ts <> [] && ty_tag (List.nth ts (List.length ts - 1)) = tag ->
+           let last = List.length ts - 1 in
+           let steps =
+             List.concat (List.mapi (fun i et ->
+               if i = last then []
+               else [Printf.sprintf "      __mmark_%s(cx, p->payload.%s.f%d);" (ty_tag et) cname i]) ts) in
+           Some (Printf.sprintf
+             "    if (__t == %d) {\n%s\n      v = p->payload.%s.f%d;\n      continue;\n    }"
+             tag_n (String.concat "\n" steps) cname last)
+         | _ ->
+           Some (Printf.sprintf "    if (__t == %d) { __mmark_%s(cx, p->payload.%s); return; }"
+                   tag_n (ty_tag ty) cname))) variants in
+  Printf.sprintf
+    "%s {\n  for (;;) {\n    int __t = %s__tag(v);\n%s\n    \
+     %s_node* p = %s__node(v);\n    __lang_shed_mark(cx, p, sizeof(%s_node));\n%s\n    return;\n  }\n}"
+    header cty (String.concat "\n" nullary) cty cty cty (String.concat "\n" payload)
+
+let emit_mark_fn (tag : string) (t : Ast.ty) : string =
+  let cty = c_type_of t in
+  let header =
+    Printf.sprintf "static void __mmark_%s(__lang_shed* cx, %s v)" tag cty
+  in
+  let none = header ^ " { (void)cx; (void)v; }" in
+  match Ast.walk t with
+  | Ast.TyInt | Ast.TyBool | Ast.TyFloat | Ast.TyUnit | Ast.TySimd _ -> none
+  | Ast.TyArrow _ ->
+    header ^ " { if (v.env && __lang_shed_owns(cx, v.env)) cx->unsafe = 1; }"
+  | Ast.TyStr ->
+    header ^ " { if (v && __lang_shed_owns(cx, v)) \
+              __lang_shed_mark(cx, (const char*)v - sizeof(size_t), sizeof(size_t) + __lang_str_size(v) + 1); }"
+  | Ast.TyBytes ->
+    bytes_used := true;
+    header ^ " { if (v && __lang_shed_owns(cx, v)) \
+              __lang_shed_mark(cx, v, sizeof(mere_bytes) + (size_t)(v->len < 0 ? 0 : v->len)); }"
+  | Ast.TyCon (("Map" | "Vec" | "StrBuf" | "ByteBuf" | "ListBuf"), _) ->
+    header ^ " { if (v) __lang_shed_mark(cx, v, sizeof(*v)); }"
+  | Ast.TyCon (("OwnedVec" | "Channel" | "ThreadHandle" | "Coro"), _) -> none
+  | Ast.TyTuple ts ->
+    let steps =
+      List.mapi (fun i et -> Printf.sprintf "  __mmark_%s(cx, v.f%d);" (ty_tag et) i) ts in
+    Printf.sprintf "%s {\n  (void)cx;\n%s\n}" header (String.concat "\n" steps)
+  | Ast.TyCon (name, args) when Hashtbl.mem Typer.records name ->
+    let steps =
+      List.map (fun (fname, ft) ->
+        Printf.sprintf "  __mmark_%s(cx, v.%s);" (ty_tag ft) (c_field_name fname))
+        (record_field_types_at name args) in
+    Printf.sprintf "%s {\n  (void)cx;\n%s\n}" header (String.concat "\n" steps)
+  | Ast.TyCon (name, args) ->
+    let variants =
+      if Hashtbl.mem polymorphic_variants name then
+        let (params, vs) = Hashtbl.find polymorphic_variants name in
+        subst_variants params args vs
+      else
+        Hashtbl.fold (fun cname (info : Typer.constr_info) acc ->
+          if info.type_name = name && Ast.canonical_ctor cname = cname
+          then (cname, info.arg) :: acc else acc)
+          Typer.constructors []
+    in
+    if is_recursive_variant cty then
+      emit_recursive_variant_mark header cty tag variants
+    else
+      let cases =
+        List.filter_map (fun (cname, arg_opt) ->
+          match arg_opt with
+          | None -> None
+          | Some ty ->
+            let tag_n = try Hashtbl.find variant_tags cname with Not_found -> 0 in
+            Some (Printf.sprintf
+              "  if (v.tag == %d) __mmark_%s(cx, v.payload.%s);"
+              tag_n (ty_tag ty) cname))
+          variants
+      in
+      Printf.sprintf "%s {\n  (void)cx;\n%s\n}" header (String.concat "\n" cases)
+  | _ -> none
+
+let emit_mark_fn_forward_decl (tag : string) (t : Ast.ty) : string =
+  Printf.sprintf "static void __mmark_%s(__lang_shed*, %s);" tag (c_type_of t)
+
 (* v0.1.296: the DEEP copy family, __mdeep_<tag>, for a region loop's carry.
    Like __mcopy with one difference that is the whole point: containers are
    COPIED into the target region instead of passed as handles. __mcopy's
@@ -11655,6 +11755,7 @@ let region_runtime_helpers () =
       "  struct __lang_region_s* owner;   /* whose chain it is on: its bump block ends at owner->top */";
       "  struct __lang_region_block* gprev;";
       "  struct __lang_region_block* gnext;";
+      "  size_t shed;   /* bytes of it handed back while it was pinned (__lang_shed_end) */";
       "} __attribute__((aligned(16))) __lang_region_block;";
       "/* bumped by every coroutine switch (see __lang_region_pinned): a block";
       "   allocated after a coroutine last stopped cannot be pointed into by it */";
@@ -11672,6 +11773,9 @@ let region_runtime_helpers () =
          then: the measure of "this arena has more than doubled since", which
          a pin does not stop. A fresh arena starts at 0. *)
       "  size_t cbase;";
+      (* alloc_total when __lang_shed_end last walked this arena, 0 until then:
+         a pinned arena is walked again only once it has grown by a quarter. *)
+      "  size_t shed_at;";
       (* Q-065: which source construct this arena is serving, for the meter.
          A static string (a `region R` name, or a runtime-owned arena's label)
          or NULL for the default region and for an arena already charged. *)
@@ -11728,6 +11832,7 @@ let region_runtime_helpers () =
       "static void __lang_blk_link(__lang_region* r, __lang_region_block* b) {";
       "  b->dflt = (r == &__lang_default_region || r->xthread);";
       "  b->owner = r;";
+      "  b->shed = 0;";
       "  b->gprev = NULL;";
       "  if (b->dflt) {";
       "    pthread_mutex_lock(&__lang_blk_dl_lock);";
@@ -11851,7 +11956,9 @@ let region_runtime_helpers () =
       "__attribute__((unused)) static void __lang_malloc_tune(void) {}";
       "#endif";
       "#endif";
+      "static void __lang_blk_unshed(__lang_region_block* b);";
       "static void __lang_blk_free(__lang_region_block* b) {";
+      "  __lang_blk_unshed(b);";
       "  __lang_blk_unlink(b);";
       "  __lang_blk_raw_free(b, sizeof(__lang_region_block) + b->pad);";
       "}";
@@ -11951,6 +12058,7 @@ let region_runtime_helpers () =
       "  r->blocks = NULL;";
       "  r->alloc_total = 0;";
       "  r->cbase = 0;";
+      "  r->shed_at = 0;";
       "  r->site = 0;";
       "  r->seq = 0;";
       "  r->keep = NULL;";
@@ -12484,6 +12592,230 @@ let region_runtime_helpers () =
       "   back yet, it gives back later. Programs without coroutines free at once,";
       "   as before. */";
       "static _Thread_local int (*__lang_region_pinned)(__lang_region*, int) = 0;";
+      "/* GIVE BACK THE DEAD PAGES OF A PINNED ARENA. A container whose arena a";
+      "   suspended stack points into is not compacted (map_compact, vec_compact):";
+      "   its live entries stay where they are, and every byte written there since";
+      "   stays resident with them -- the arena is bump-allocated, so nothing dead in";
+      "   it is ever reused. A test that iterates an Array while it loads 65,536";
+      "   fixture rows held 120-190 MB of such an arena for 20-50 MB of live data.";
+      "   Here the pages that hold nothing anyone can still read are handed back to";
+      "   the kernel instead (the arena stays where it is; a page handed back reads";
+      "   as zeros if touched, and is never touched: the bump allocator only moves";
+      "   up, and the oldest block, which a recycle reuses, is never shed).";
+      "";
+      "   What is kept, as pages: the container's own arrays and every live entry,";
+      "   walked through its type (__mmark_<tag>, the shape of __mcopy_<tag>); every";
+      "   word on a suspended stack or found by the pin's reach that points into the";
+      "   arena, with every page after it up to the next that holds a live object";
+      "   (whatever it points into, of a size nobody knows, ends before that) or the";
+      "   end of its block, and the page before when it points into the first bytes";
+      "   of a page; and, to a fixpoint, the same for every word in a page kept so.";
+      "   A pin word can be a pointer the running code still reads although the map";
+      "   no longer holds it (a list replaced while it is iterated, an old copy of a";
+      "   Vec's array), and what it can reach is kept with it. A closure env inside";
+      "   the arena, which the walk cannot size, stops the shedding of that arena.";
+      "";
+      "   MERE_ARENA_SHED=0 turns it off; MERE_ARENA_SHED=protect makes the pages";
+      "   inaccessible instead of handing them back (mprotect PROT_NONE), so a page";
+      "   that should have been kept faults at once -- the check mode for a test";
+      "   suite: it also walks arenas from 256 KiB, at every growth, and protects";
+      "   whatever is unmarked however little that is. MERE_ARENA_SHED_LOG prints";
+      "   each shedding. */";
+      "#if defined(__linux__) || defined(__APPLE__)";
+      "#include <sys/mman.h>";
+      "#endif";
+      "static _Thread_local void (*__lang_region_pin_words)(__lang_region*, void (*)(void*, uintptr_t), void*) = 0;";
+      "static int __lang_shed_mode_v = -1;";
+      "static int __lang_shed_log_v = -1;";
+      "static int __lang_shed_mode(void) {";
+      "  if (__lang_shed_mode_v < 0) {";
+      "    const char* e = getenv(\"MERE_ARENA_SHED\");";
+      "    int m = 1;";
+      "    if (e && strcmp(e, \"0\") == 0) m = 0;";
+      "    else if (e && strcmp(e, \"protect\") == 0) m = 2;";
+      "#if !defined(__linux__) && !defined(__APPLE__)";
+      "    m = 0;";
+      "#endif";
+      "    const char* l = getenv(\"MERE_ARENA_SHED_LOG\");";
+      "    __lang_shed_log_v = l && *l && strcmp(l, \"0\") != 0;";
+      "    __lang_shed_mode_v = m;";
+      "  }";
+      "  return __lang_shed_mode_v;";
+      "}";
+      "static void __lang_blk_unshed(__lang_region_block* b) {";
+      "  if (!b->shed) return;";
+      "#if defined(__linux__) || defined(__APPLE__)";
+      "  if (__lang_shed_mode_v == 2) {";
+      "    uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);";
+      "    uintptr_t lo = (uintptr_t)(b + 1), hi = lo + b->pad;";
+      "    uintptr_t a = (lo + page - 1) & ~(page - 1), z = hi & ~(page - 1);";
+      "    if (a < z) mprotect((void*)a, (size_t)(z - a), PROT_READ | PROT_WRITE);";
+      "  }";
+      "#endif";
+      "  b->shed = 0;";
+      "}";
+      "typedef struct {";
+      "  __lang_region* r;";
+      "  size_t nb;";
+      "  uintptr_t page;";
+      "  __lang_region_block** b;   /* by address */";
+      "  uintptr_t* lo;             /* data start */";
+      "  uintptr_t* end;            /* end of what was handed out */";
+      "  uintptr_t* pbase;          /* the page holding the block header */";
+      "  unsigned char** bits;      /* one byte per page from pbase, 1 = keep */";
+      "  size_t* npg;";
+      "  uintptr_t* work; size_t nwork, capwork;";
+      "  size_t live;";
+      "  int unsafe;";
+      "} __lang_shed;";
+      "static int __lang_shed_bcmp(const void* x, const void* y) {";
+      "  uintptr_t a = (uintptr_t)*(__lang_region_block* const*)x, b = (uintptr_t)*(__lang_region_block* const*)y;";
+      "  return a < b ? -1 : a > b;";
+      "}";
+      "static long __lang_shed_blk(__lang_shed* cx, uintptr_t a) {";
+      "  size_t lo = 0, hi = cx->nb;";
+      "  while (lo < hi) { size_t m = lo + (hi - lo) / 2; if (cx->lo[m] <= a) lo = m + 1; else hi = m; }";
+      "  if (lo == 0) return -1;";
+      "  lo--;";
+      "  return a < cx->lo[lo] + cx->b[lo]->pad ? (long)lo : -1;";
+      "}";
+      "/* keep the pages of [p, p+n) that lie in the arena */";
+      "static void __lang_shed_mark(__lang_shed* cx, const void* p, size_t n) {";
+      "  uintptr_t a = (uintptr_t)p;";
+      "  long i = __lang_shed_blk(cx, a);";
+      "  if (i < 0) return;";
+      "  if (n == 0) n = 1;";
+      "  uintptr_t z = a + n;";
+      "  if (z > cx->lo[i] + cx->b[i]->pad) z = cx->lo[i] + cx->b[i]->pad;";
+      "  for (uintptr_t pg = (a - cx->pbase[i]) / cx->page; pg <= (z - 1 - cx->pbase[i]) / cx->page && pg < cx->npg[i]; pg++)";
+      "    cx->bits[i][pg] |= 1;";
+      "  cx->live += n;";
+      "}";
+      "static int __lang_shed_owns(__lang_shed* cx, const void* p) { return __lang_shed_blk(cx, (uintptr_t)p) >= 0; }";
+      "/* keep page q of block i and queue its words for the closure */";
+      "static void __lang_shed_keep(__lang_shed* cx, long i, uintptr_t q) {";
+      "  if (cx->bits[i][q] & 2) return;";
+      "  cx->bits[i][q] |= 2;";
+      "    if (cx->nwork == cx->capwork) {";
+      "      size_t nc = cx->capwork ? cx->capwork * 2 : 1024;";
+      "      uintptr_t* nw = (uintptr_t*)realloc(cx->work, nc * 2 * sizeof(uintptr_t));";
+      "      if (!nw) { cx->unsafe = 1; return; }";
+      "      cx->work = nw; cx->capwork = nc;";
+      "    }";
+      "    cx->work[2 * cx->nwork] = cx->pbase[i] + q * cx->page;   /* the page, and its block */";
+      "    cx->work[2 * cx->nwork + 1] = (uintptr_t)i;";
+      "    cx->nwork++;";
+      "}";
+      "/* a word that may be a pointer, to something of a type and size nobody knows:";
+      "   a node, a string's bytes, an old copy of a container's array the running";
+      "   code still reads. Kept: its page and every page after it up to and";
+      "   including the next that holds a live object (allocations do not overlap,";
+      "   so whatever it points into ends before the next live object begins), or to";
+      "   the end of the block; and the page before, when it points into the first";
+      "   bytes of its page (a string's length is just before its bytes). */";
+      "static void __lang_shed_pin(__lang_shed* cx, uintptr_t w) {";
+      "  w &= ~(uintptr_t)7;";
+      "  long i = __lang_shed_blk(cx, w);";
+      "  if (i < 0) return;";
+      "  uintptr_t pg = (w - cx->pbase[i]) / cx->page;";
+      "  if ((w - cx->pbase[i]) % cx->page < 64 && pg > 0) __lang_shed_keep(cx, i, pg - 1);";
+      "  for (uintptr_t q = pg; q < cx->npg[i] && !cx->unsafe; q++) {";
+      "    int typed = cx->bits[i][q] & 1;";
+      "    __lang_shed_keep(cx, i, q);";
+      "    if (q > pg && typed) break;";
+      "  }";
+      "}";
+      "static void __lang_shed_pin_cb(void* c, uintptr_t w) { __lang_shed_pin((__lang_shed*)c, w); }";
+      "static void __lang_shed_free(__lang_shed* cx) {";
+      "  for (size_t i = 0; i < cx->nb; i++) free(cx->bits ? cx->bits[i] : NULL);";
+      "  free(cx->b); free(cx->lo); free(cx->end); free(cx->pbase); free(cx->bits); free(cx->npg); free(cx->work);";
+      "}";
+      "/* whether a container's pinned arena is worth a walk now: large, and grown by";
+      "   a quarter since the last one */";
+      "static int __lang_shed_want(__lang_region* r) {";
+      "  if (!__lang_shed_mode()) return 0;";
+      "  int chk = __lang_shed_mode_v == 2;   /* the check walks small arenas, at every growth */";
+      "  if (r->alloc_total < (chk ? ((size_t)256 << 10) : ((size_t)8 << 20))) return 0;";
+      "  if (r->shed_at && r->alloc_total < (chk ? r->shed_at + 1 : r->shed_at + r->shed_at / 4)) return 0;";
+      "  r->shed_at = r->alloc_total;";
+      "  return 1;";
+      "}";
+      "static int __lang_shed_begin(__lang_shed* cx, __lang_region* r) {";
+      "  memset(cx, 0, sizeof *cx);";
+      "  cx->r = r;";
+      "  cx->page = (uintptr_t)sysconf(_SC_PAGESIZE);";
+      "  if (cx->page == 0 || (cx->page & (cx->page - 1))) return 0;";
+      "  for (__lang_region_block* b = r->blocks; b; b = b->prev) cx->nb++;";
+      "  if (cx->nb == 0) return 0;";
+      "  cx->b = (__lang_region_block**)malloc(cx->nb * sizeof(*cx->b));";
+      "  cx->lo = (uintptr_t*)malloc(cx->nb * sizeof(uintptr_t));";
+      "  cx->end = (uintptr_t*)malloc(cx->nb * sizeof(uintptr_t));";
+      "  cx->pbase = (uintptr_t*)malloc(cx->nb * sizeof(uintptr_t));";
+      "  cx->bits = (unsigned char**)calloc(cx->nb, sizeof(unsigned char*));";
+      "  cx->npg = (size_t*)malloc(cx->nb * sizeof(size_t));";
+      "  if (!cx->b || !cx->lo || !cx->end || !cx->pbase || !cx->bits || !cx->npg) { __lang_shed_free(cx); return 0; }";
+      "  size_t i = 0;";
+      "  for (__lang_region_block* b = r->blocks; b; b = b->prev) cx->b[i++] = b;";
+      "  qsort(cx->b, cx->nb, sizeof(*cx->b), __lang_shed_bcmp);";
+      "  for (i = 0; i < cx->nb; i++) {";
+      "    __lang_region_block* b = cx->b[i];";
+      "    cx->lo[i] = (uintptr_t)(b + 1);";
+      "    cx->end[i] = b == r->blocks ? (uintptr_t)r->top : cx->lo[i] + b->pad;";
+      "    cx->pbase[i] = (uintptr_t)b & ~(cx->page - 1);";
+      "    cx->npg[i] = (cx->lo[i] + b->pad - cx->pbase[i] + cx->page - 1) / cx->page;";
+      "    cx->bits[i] = (unsigned char*)calloc(cx->npg[i], 1);";
+      "    if (!cx->bits[i]) { __lang_shed_free(cx); return 0; }";
+      "    /* the header's page; the whole of the oldest block (a recycle reuses it) */";
+      "    cx->bits[i][0] = 1;";
+      "    if (!b->prev) memset(cx->bits[i], 1, cx->npg[i]);";
+      "  }";
+      "  return 1;";
+      "}";
+      "static void __lang_shed_end(__lang_shed* cx) {";
+      "  if (cx->unsafe) { __lang_shed_free(cx); return; }";
+      "  size_t live = cx->live;";
+      "  if (__lang_region_pin_words) __lang_region_pin_words(cx->r, __lang_shed_pin_cb, cx);";
+      "  for (size_t q = 0; q < cx->nwork && !cx->unsafe; q++) {";
+      "    size_t i = (size_t)cx->work[2 * q + 1];";
+      "    uintptr_t* p = (uintptr_t*)cx->work[2 * q];";
+      "    uintptr_t* e = (uintptr_t*)(cx->work[2 * q] + cx->page);";
+      "    if ((uintptr_t)p < cx->lo[i]) p = (uintptr_t*)cx->lo[i];";
+      "    if ((uintptr_t)e > cx->end[i]) e = (uintptr_t*)cx->end[i];";
+      "    for (; p < e; p++) __lang_shed_pin(cx, *p);";
+      "  }";
+      "  if (cx->unsafe) { __lang_shed_free(cx); return; }";
+      "  size_t used = 0, gone = 0, runs = 0;";
+      "  for (size_t i = 0; i < cx->nb; i++) used += cx->end[i] - cx->lo[i];";
+      "  if (__lang_shed_mode_v == 2 || (used > 2 * live && used - live > ((size_t)4 << 20))) {";
+      "    for (size_t i = 0; i < cx->nb; i++) {";
+      "      if (!cx->b[i]->prev) continue;";
+      "      uintptr_t lastpg = (cx->end[i] - cx->pbase[i]) / cx->page;   /* pages wholly below the end */";
+      "      size_t pg = 1;";
+      "      while (pg < lastpg) {";
+      "        if (cx->bits[i][pg]) { pg++; continue; }";
+      "        size_t z = pg;";
+      "        while (z < lastpg && !cx->bits[i][z]) z++;";
+      "        void* a = (void*)(cx->pbase[i] + pg * cx->page);";
+      "        size_t n = (z - pg) * cx->page;";
+      "#if defined(__linux__) || defined(__APPLE__)";
+      "        int rc;";
+      "        if (__lang_shed_mode_v == 2) rc = mprotect(a, n, PROT_NONE);";
+      "#if defined(__APPLE__)";
+      "        else rc = madvise(a, n, MADV_FREE_REUSABLE);";
+      "#else";
+      "        else rc = madvise(a, n, MADV_DONTNEED);";
+      "#endif";
+      "        if (rc == 0) { cx->b[i]->shed += n; gone += n; runs++; }";
+      "#endif";
+      "        pg = z;";
+      "      }";
+      "    }";
+      "  }";
+      "  if (__lang_shed_log_v)";
+      "    fprintf(stderr, \"shed: %s used %zu KiB live %zu KiB pinned-closure %zu pages, gave back %zu KiB in %zu runs\\n\",";
+      "            cx->r->site ? cx->r->site : \"-\", used >> 10, live >> 10, cx->nwork, gone >> 10, runs);";
+      "  __lang_shed_free(cx);";
+      "}";
       (* v0.1.589: WHO pinned it, and the one running now. A retired arena was
          tried again at every later retirement, and only the SUSPENDED stacks
          were asked -- so the coroutine that had pinned it, running again by
@@ -12785,6 +13117,7 @@ let region_runtime_helpers () =
       "        if (b != best) __lang_blk_free(b);";
       "        b = prev;";
       "      }";
+      "      __lang_blk_unshed(best);";
       "      best->prev = NULL;";
       "      r->blocks = best;";
       "      r->base = (char*)(best + 1);";
@@ -13252,6 +13585,24 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          order, so the operation is invisible to every observer except the
          allocator. Maps never compacted never pay: no private arena exists
          until the first call (a frame-shaped map costs nothing extra). *)
+      (* the pages of a pinned arena nobody can read any more go back to the
+         kernel: see __lang_shed_end. The map's own arrays and every live
+         entry, through its type. *)
+      Printf.sprintf "static void %s_shed(%s* m) {" struct_name struct_name;
+      "  if (!__lang_shed_want(m->region)) return;";
+      "  __lang_shed cx;";
+      "  if (!__lang_shed_begin(&cx, m->region)) return;";
+      "  __lang_shed_mark(&cx, m->keys, sizeof(*m->keys) * (size_t)m->cap);";
+      "  __lang_shed_mark(&cx, m->values, sizeof(*m->values) * (size_t)m->cap);";
+      "  __lang_shed_mark(&cx, m->dead, (size_t)m->cap);";
+      "  __lang_shed_mark(&cx, m->idx, sizeof(*m->idx) * (size_t)m->idx_cap);";
+      "  for (int i = 0; i < m->len && !cx.unsafe; i++) {";
+      "    if (m->dead[i]) continue;";
+      Printf.sprintf "    __mmark_%s(&cx, m->keys[i]);" k_tag;
+      Printf.sprintf "    __mmark_%s(&cx, m->values[i]);" v_tag;
+      "  }";
+      "  __lang_shed_end(&cx);";
+      "}";
       Printf.sprintf "static int %s_compact(%s* m) {" struct_name struct_name;
       "  __LANG_OWNED(m, \"Map\", \"map_compact\");";
       (* v0.1.589: NOT UNDER A PIN. Compaction has no observable behaviour, and
@@ -13294,8 +13645,8 @@ let emit_map_runtime_for (k_ty : Ast.ty) (v_ty : Ast.ty) : string =
          keeps v0.1.651's rule. *)
       "  if (m->owns_region && __lang_region_pinned && __lang_region_pinned(m->region, 0)) {";
       "    if (!(m->live <= 1024 && (unsigned long)m->live * 256UL < (unsigned long)m->region->alloc_total)) {";
-      "    if (m->region->cbase == 0) { m->region->cbase = m->region->alloc_total; return 0; }";
-      "    if (m->region->alloc_total <= 2 * m->region->cbase + 1048576) return 0;";
+      Printf.sprintf "    if (m->region->cbase == 0) { m->region->cbase = m->region->alloc_total; %s_shed(m); return 0; }" struct_name;
+      Printf.sprintf "    if (m->region->alloc_total <= 2 * m->region->cbase + 1048576) { %s_shed(m); return 0; }" struct_name;
       "    }";
       "  }";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
@@ -14318,6 +14669,17 @@ let coro_runtime ~(stack_bytes : int) =
       "  *out = hs;";
       "  return n;";
       "}";
+      "/* every word that may pin an arena, for __lang_shed_end: each suspended";
+      "   stack's words, and what its pin's reach found from them */";
+      "static void __lang_coro_pin_words(__lang_region* r, void (*cb)(void*, uintptr_t), void* ctx) {";
+      "  (void)r;";
+      "  for (__lang_coro* c = __lang_coro_live; c; c = c->x->lnext) {";
+      "    if (c == __lang_coro_cur || c->state != 2) continue;";
+      "    for (uintptr_t* p = (uintptr_t*)c->x->sp; p < (uintptr_t*)c->x->s_hi; p++) cb(ctx, *p);";
+      "    if (!c->x->pgot) __lang_pin_gather(c);";
+      "    for (size_t j = 0; j < c->x->pn; j++) cb(ctx, c->x->pw[j]);";
+      "  }";
+      "}";
       "/* has none of these stacks run since epoch ep? Each still suspended, and";
       "   stopped no later than ep (a stop stamps the epoch it starts) */";
       "static int __lang_coro_unmoved(unsigned long long* hs, int n, unsigned long ep) {";
@@ -14991,6 +15353,7 @@ let coro_runtime ~(stack_bytes : int) =
       "  __lang_coro_link(&__lang_coro_root);";
       "  __lang_region_pinned = __lang_coro_pins;";
       "  __lang_region_pinners = __lang_coro_pinners;";
+      "  __lang_region_pin_words = __lang_coro_pin_words;";
       "  __lang_region_unmoved = __lang_coro_unmoved;";
       "  __lang_coro_cur_h = __lang_coro_cur_handle;";
       "  __lang_coro_cur = &__lang_coro_root;";
@@ -15681,12 +16044,21 @@ let emit_vec_runtime_for (elem_ty : Ast.ty) : string =
       (* v0.1.297: the Vec twin of map_compact -- see the map runtime for the
          full story. Slots overwritten by vec_set leave their old owned copies
          in the arena; the generation swap is what returns them. *)
+      (* see map_compact's _shed: the data array and every live element *)
+      Printf.sprintf "static void %s_shed(%s* v) {" struct_name struct_name;
+      "  if (!__lang_shed_want(v->region)) return;";
+      "  __lang_shed cx;";
+      "  if (!__lang_shed_begin(&cx, v->region)) return;";
+      "  __lang_shed_mark(&cx, v->data, sizeof(*v->data) * (size_t)v->cap);";
+      Printf.sprintf "  for (long long i = 0; i < (long long)v->len && !cx.unsafe; i++) __mmark_%s(&cx, v->data[i]);" tag;
+      "  __lang_shed_end(&cx);";
+      "}";
       Printf.sprintf "static int %s_compact(%s* v) {" struct_name struct_name;
       "  __LANG_OWNED(v, \"Vec\", \"vec_compact\");";
       (if tag = "str" then "  __lang_region_collect_retired();\n  if (v->owns_region && !v->compact_dirty && v->compact_alloc == v->region->alloc_total) return 0;" else "");
       "  if (v->owns_region && __lang_region_pinned && __lang_region_pinned(v->region, 0)) {  /* v0.1.589, v0.1.648, v0.1.651: see map_compact */";
-      "    if (v->region->cbase == 0) { v->region->cbase = v->region->alloc_total; return 0; }";
-      "    if (v->region->alloc_total <= 2 * v->region->cbase + 1048576) return 0;";
+      Printf.sprintf "    if (v->region->cbase == 0) { v->region->cbase = v->region->alloc_total; %s_shed(v); return 0; }" struct_name;
+      Printf.sprintf "    if (v->region->alloc_total <= 2 * v->region->cbase + 1048576) { %s_shed(v); return 0; }" struct_name;
       "  }";
       "  __lang_region* fresh = (__lang_region*)malloc(sizeof(__lang_region));";
       "  if (!fresh) __lang_fail_impl(\"out of memory\");";
@@ -18456,8 +18828,8 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
       List.sort compare
         (Hashtbl.fold (fun tag t acc -> (tag, t) :: acc) copy_types [])
     in
-    (List.map (fun (tag, t) -> emit_copy_fn_forward_decl tag t) tags,
-     List.map (fun (tag, t) -> emit_copy_fn tag t) tags)
+    (List.map (fun (tag, t) -> emit_copy_fn_forward_decl tag t ^ "\n" ^ emit_mark_fn_forward_decl tag t) tags,
+     List.map (fun (tag, t) -> emit_copy_fn tag t ^ "\n" ^ emit_mark_fn tag t) tags)
   in
   (* v0.1.296: the deep family for region-loop carries -- one __mdeep_<tag>
      per type reachable from any carry, emitted only when a loop exists. *)
@@ -18790,7 +19162,7 @@ let emit_program ?(main_ty = Ast.TyInt) (prog : Ast.program) : string =
          List.mapi (fun i n -> Printf.sprintf "  memcpy(&%s, &s->f%d, sizeof(%s));" n i n) teardown_fields @
          (if not !uses_coro then [] else
           [ "  __lang_coro_cur = &__lang_coro_root;";
-            "  __lang_region_pinned = NULL; __lang_region_pinners = NULL;" ]) @
+            "  __lang_region_pinned = NULL; __lang_region_pinners = NULL; __lang_region_pin_words = NULL;" ]) @
          [ "  free(s);"; "}";
            "#else";
            "static void __mere_lib_thread_capture(void) {}";
