@@ -12696,6 +12696,7 @@ let region_runtime_helpers () =
       "  uintptr_t* work; size_t nwork, capwork;";
       "  size_t live;";
       "  int unsafe;";
+      "  int keep_oldest;          /* a container's arena: its first block is reused by a recycle */";
       "} __lang_shed;";
       "static int __lang_shed_bcmp(const void* x, const void* y) {";
       "  uintptr_t a = (uintptr_t)*(__lang_region_block* const*)x, b = (uintptr_t)*(__lang_region_block* const*)y;";
@@ -12772,6 +12773,7 @@ let region_runtime_helpers () =
       "static int __lang_shed_begin(__lang_shed* cx, __lang_region* r) {";
       "  memset(cx, 0, sizeof *cx);";
       "  cx->r = r;";
+      "  cx->keep_oldest = 1;";
       "  cx->page = (uintptr_t)sysconf(_SC_PAGESIZE);";
       "  if (cx->page == 0 || (cx->page & (cx->page - 1))) return 0;";
       "  for (__lang_region_block* b = r->blocks; b; b = b->prev) cx->nb++;";
@@ -12818,7 +12820,7 @@ let region_runtime_helpers () =
       "  for (size_t i = 0; i < cx->nb; i++) used += cx->end[i] - cx->lo[i];";
       "  if (__lang_shed_mode_v == 2 || (used > 2 * live && used - live > ((size_t)4 << 20))) {";
       "    for (size_t i = 0; i < cx->nb; i++) {";
-      "      if (!cx->b[i]->prev) continue;";
+      "      if (cx->keep_oldest && !cx->b[i]->prev) continue;";
       "      uintptr_t lastpg = (cx->end[i] - cx->pbase[i]) / cx->page;   /* pages wholly below the end */";
       "      size_t pg = 1;";
       "      while (pg < lastpg) {";
@@ -12846,6 +12848,20 @@ let region_runtime_helpers () =
       "    fprintf(stderr, \"shed: %s used %zu KiB live %zu KiB pinned-closure %zu pages, gave back %zu KiB in %zu runs\\n\",";
       "            cx->r->site ? cx->r->site : \"-\", used >> 10, live >> 10, cx->nwork, gone >> 10, runs);";
       "  __lang_shed_free(cx);";
+      "}";
+      "/* an arena retired while a suspended stack points into it (its container";
+      "   has moved out, been recycled or gone) holds nothing live: only what the";
+      "   pins reach is kept while it waits to be freed */";
+      "static void __lang_shed_retired(__lang_region* r) {";
+      "  if (!__lang_shed_mode()) return;";
+      "  size_t total = 0;";
+      "  for (__lang_region_block* b = r->blocks; b; b = b->prev) total += b->pad;";
+      "  if (total < (__lang_shed_mode_v == 2 ? ((size_t)256 << 10) : ((size_t)4 << 20))) return;";
+      "  __lang_shed cx;";
+      "  if (!__lang_shed_begin(&cx, r)) return;";
+      "  cx.keep_oldest = 0;   /* nothing reuses a retired arena */";
+      "  for (size_t i = 0; i < cx.nb; i++) if (!cx.b[i]->prev) { memset(cx.bits[i], 0, cx.npg[i]); cx.bits[i][0] = 1; }";
+      "  __lang_shed_end(&cx);";
       "}";
       (* v0.1.589: WHO pinned it, and the one running now. A retired arena was
          tried again at every later retirement, and only the SUSPENDED stacks
@@ -12906,6 +12922,7 @@ let region_runtime_helpers () =
       "      __lang_retired[__lang_retired_n].nby = nby;";
       "      __lang_retired[__lang_retired_n].ep = __lang_region_epoch;";
       "      __lang_retired_n++;";
+      "      __lang_shed_retired(r);";
       "      return;";
       "    }";
       "    free(by);";
@@ -14870,6 +14887,15 @@ let coro_runtime ~(stack_bytes : int) =
       "    if (h2 > __LANG_SCAN_FOREIGN_HOPS) { if (st->pinx) __lang_pin_add(st->pinx, a); continue; }";
       "    uintptr_t e = a + 16 * sizeof(uintptr_t);";
       "    if (e > used) e = used;";
+      (* a page the block handed back while it was pinned holds nothing anyone
+         reads (__lang_shed_end): a word into it is stale, and under
+         MERE_ARENA_SHED=protect reading it would fault in the scan itself *)
+      "    if (blk->shed) {";
+      "      if (__lang_shed_was(blk, a)) continue;";
+      "      uintptr_t pgsz = (uintptr_t)sysconf(_SC_PAGESIZE);";
+      "      uintptr_t pz = (a + pgsz) & ~(pgsz - 1);";
+      "      if (e > pz && __lang_shed_was(blk, pz)) e = pz;";
+      "    }";
       "    __lang_scan_queue(st, a, e, h2);";
       "  }";
       "}";
